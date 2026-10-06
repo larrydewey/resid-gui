@@ -1,0 +1,14 @@
+[package]
+name = "resid-gui"
+version = "0.1.0"
+root = "src/gui.resid"
+
+# A GUI program touches the display and the filesystem (fonts, images) and
+# may load native asset modules. Every library function that reaches one of
+# those builtins declares @requires; nothing is granted here implicitly.
+[capabilities]
+grant = []
+
+[dependencies.resid]
+path = "../resid"
+version = "0.1.0"

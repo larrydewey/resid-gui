@@ -1,0 +1,20 @@
+// connect_probe.resid — connect to the server DISPLAY names and print
+// what it said about itself. The smallest end-to-end check there is:
+// everything after this is the same socket.
+import "../src/x11/connect.resid";
+
+@requires(display)
+Int main() {
+    Session s = x11_open(auth_none());
+    if (s.fd < 0) {
+        eprintln("no server on DISPLAY");
+        return 1;
+    }
+    println(f"release {s.setup.release}");
+    println(f"id base {s.setup.id_base} mask {s.setup.id_mask}");
+    println(f"max request {s.setup.max_request_len}");
+    println(f"screens {s.setup.screens} formats {s.setup.formats}");
+    println(f"vendor {s.setup.vendor}");
+    _ = x11_close(s);
+    return 0;
+}

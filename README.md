@@ -33,18 +33,28 @@ Int main() {
 `App(M)` and calls `gui_run`. The library turns that value into pixels on a
 real window.
 
-## Status: skeleton
+## Status: G2 started
 
-Nothing here works yet. The design is fixed and the phases are sequenced in
+The `display` capability landed in the Resid runtime (phase G1), so
+`@requires(display)` compiles and the Unix-socket transport with descriptor
+passing and the shared-memory handle are available. The X11 backend is under
+construction: `src/x11/` holds the wire codec, the connection setup, the
+request set, stream framing and the connection state, all pure and tested
+against recorded byte sequences; `tests/fake_server.resid` runs a real
+client against a fake server over a socket pair — handshake, window, shared
+segment, one presented frame. `src/gui.resid` still does not compile: it
+calls `gui_run_x11`, which arrives with the backend. The phases are sequenced in
 [PLAN-gui.md](https://github.com/larrydewey/Resid/blob/master/PLAN-gui.md) in
-the Resid repository; the exit criterion for each phase is a green test suite
-plus a commit. `src/gui.resid` does not compile yet — `@requires(display)` is
-E0213 until phase G1 adds the family to the runtime.
+the Resid repository; each ends with a green test suite plus a commit.
+
+```sh
+tests/run.sh     # every test file under src/
+```
 
 | Layer | What it is | Phase |
 |---|---|---|
 | `src/backend/` | the `Backend(B)` behavior: frame events in, frames out | G2 |
-| `src/x11/` | the X11 wire protocol, spoken directly in Resid | G2 |
+| `src/x11/` | the X11 wire codec and setup handshake, spoken directly in Resid | G2 |
 | `src/gfx/` | `Canvas(W, H)`, a linear builder over ARGB32 pixels | G3 |
 | `src/ui/` | widgets, constraint layout, hit testing, focus, the loop | G5 |
 | `src/gui.resid` | `App(M)`, `Event`, `Widget`, `gui_run` — the interface | G1 |

@@ -1,0 +1,8 @@
+pub Int color_dummy() { return 0; }
+
+test "color dummy" {
+    expect(1).toEqual(1);
+}
+
+pub type Color = { Int b; Int g; Int r; Int a; };
+pub type Rect = { Int x; Int y; Int w; Int h; };

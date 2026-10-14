@@ -1,0 +1,80 @@
+import "color.resid";
+
+// A linear pixel builder over ARGB32 bytes, stored BGRA.
+pub type Canvas = { Int w; Int h; List(Int) px; };
+
+pub Int color_pack(Color c) {
+    return (c.a << 24) | (c.r << 16) | (c.g << 8) | c.b;
+}
+
+pub Canvas canvas_new(Int ww, Int hh) {
+    return Canvas { .w = ww, .h = hh, .px = canvas_fill(0, ww * hh * 4, []) };
+}
+
+List(Int) canvas_fill(Int i, Int n, List(Int) acc) {
+    if (i >= n) { return acc; }
+    return canvas_fill(i + 1, n, acc.concat([0]));
+}
+
+List(Int) set_byte(List(Int) xs, Int i, Int v) {
+    if (i < 0 || i >= xs.len()) { return xs; }
+    return set_byte_at(xs, i, v, 0, []);
+}
+
+List(Int) set_byte_at(List(Int) xs, Int i, Int v, Int j, List(Int) acc) {
+    if (j >= xs.len()) { return acc; }
+    Int byte = if (j == i) { v & 255 } else { xs[j] & 255 };
+    return set_byte_at(xs, i, v, j + 1, acc.concat([byte]));
+}
+
+pub Canvas fill_rect(Canvas c, Rect r, Color col) {
+    Int ww = c.w;
+    Int hh = c.h;
+    List(Int) px = fill_rect_loop(c, r, col, 0, 0, c.px, ww, hh);
+    return Canvas { .w = ww, .h = hh, .px = px };
+}
+
+List(Int) fill_rect_loop(Canvas c, Rect r, Color col, Int y, Int x, List(Int) px, Int ww, Int hh) {
+    if (y >= r.h) { return px; }
+    if (y < 0) { return fill_rect_loop(c, r, col, y + 1, 0, px, ww, hh); }
+    Int yy = r.y + y;
+    if (yy < 0 || yy >= hh) { return fill_rect_loop(c, r, col, y + 1, 0, px, ww, hh); }
+    return fill_rect_row(c, r, col, yy, x, px, y, ww);
+}
+
+List(Int) fill_rect_row(Canvas c, Rect r, Color col, Int yy, Int x, List(Int) px, Int y, Int ww) {
+    if (x >= r.w) { return fill_rect_loop(c, r, col, y + 1, 0, px, ww, c.h); }
+    if (x < 0) { return fill_rect_row(c, r, col, yy, x + 1, px, y, ww); }
+    Int xx = r.x + x;
+    if (xx < 0 || xx >= ww) { return fill_rect_row(c, r, col, yy, x + 1, px, y, ww); }
+    Int base = (yy * ww + xx) * 4;
+    List(Int) p2 = set_byte(px, base + 0, col.b);
+    List(Int) p3 = set_byte(p2, base + 1, col.g);
+    List(Int) p4 = set_byte(p3, base + 2, col.r);
+    List(Int) p5 = set_byte(p4, base + 3, col.a);
+    return fill_rect_row(c, r, col, yy, x + 1, p5, y, ww);
+}
+
+pub List(Int) finish(Canvas c) { return c.px; }
+
+test "canvas allocates" {
+    Canvas c = canvas_new(4, 3);
+    expect(c.px.len()).toEqual(48);
+}
+
+test "fill_rect writes" {
+    Canvas c0 = canvas_new(4, 3);
+    Color col = Color { .b = 1, .g = 2, .r = 3, .a = 4 };
+    Canvas c1 = fill_rect(c0, Rect { .x = 1, .y = 1, .w = 2, .h = 1 }, col);
+    Int base = (1 * 4 + 1) * 4;
+    expect(c1.px[base + 0]).toEqual(1);
+    expect(c1.px[base + 1]).toEqual(2);
+    expect(c1.px[base + 2]).toEqual(3);
+    expect(c1.px[base + 3]).toEqual(4);
+    expect(c1.px[0]).toEqual(0);
+}
+
+test "finish" {
+    Canvas c = canvas_new(2, 2);
+    expect(finish(c).len()).toEqual(16);
+}

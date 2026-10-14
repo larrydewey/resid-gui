@@ -1,0 +1,32 @@
+import "canvas.resid";
+import "font.resid";
+
+pub Canvas render_text(Canvas c, Int x0, Int y0, Str s, Color col, Int i, Int cx) {
+    if (i >= s.len()) { return c; }
+    Int code = str_char_code_at(s, i);
+    Int charx = x0 + (i * 8);
+    return render_text(render_glyph(c, charx, y0, code, col, 0), x0, y0, s, col, i + 1, cx);
+}
+
+Canvas render_glyph(Canvas c, Int x0, Int y0, Int code, Color col, Int row) {
+    Glyph g = glyph_for(code);
+    if (row >= 16) { return c; }
+    Int bits = g.rows[row];
+    return render_glyph(draw_bits(c, x0, y0 + row, bits, col, 0), x0, y0, code, col, row + 1);
+}
+
+Canvas draw_bits(Canvas c, Int x, Int y, Int bits, Color col, Int bit) {
+    if (bit >= 8) { return c; }
+    Int mask = 1 << (7 - bit);
+    Canvas out = if ((bits & mask) != 0) { fill_rect(c, Rect { .x = x + bit, .y = y, .w = 1, .h = 1 }, col) } else { c };
+    return draw_bits(out, x, y, bits, col, bit + 1);
+}
+
+pub Int str_char_code_at(Str s, Int i) {
+    if (i < 0 || i >= s.len()) { return 0; }
+    return str_char_at(s, i);
+}
+
+test "text render width" {
+    expect(str_char_code_at("A",0)).toEqual(65);
+}

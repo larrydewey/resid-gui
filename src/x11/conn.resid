@@ -1,0 +1,116 @@
+// conn.resid — the client's side of the connection, as a value.
+//
+// There is no object table to look things up in and nothing mutable to
+// own: the connection is the parsed setup reply plus the next resource id
+// to hand out, and every step takes it and returns it (PLAN-gui.md §3.4).
+// The only state that lives in handles is the socket fd and the shm
+// mappings, which are not here.
+
+import "setup.resid";
+import "requests.resid";
+
+// Everything the client knows between requests.
+type Conn = {
+    Setup setup;      // the parsed setup reply
+    Int next_id;      // the next resource id to hand out
+    Int atom_wm_name; // interned lazily; 0 until it is
+};
+
+/// A fresh connection from a setup reply. Ids start at the server's
+/// resource-id base; the mask decides how many the client may use.
+pub Conn conn_new(Setup s) {
+    return Conn { .setup = s, .next_id = s.id_base, .atom_wm_name = 0 };
+}
+
+/// Whether the server's range can hold another id. A mask of zero would
+/// let ids run off the end of the server's range, so a caller checks this
+/// before spending one rather than learning at the first rejected request.
+pub Bool conn_has_ids(Conn c) { return c.setup.id_mask != 0; }
+
+/// The next resource id to hand out.
+pub Int conn_take_id(Conn c) { return c.next_id; }
+
+/// `conn_id`'s other half: the same connection with the id spent.
+pub Conn conn_advance(Conn c) {
+    return Conn { .setup = c.setup, .next_id = c.next_id + 1, .atom_wm_name = c.atom_wm_name };
+}
+
+/// The window, graphics context and shared segment a first frame needs.
+/// The sequence is data, so a test can check it and a caller can send it.
+pub List(List(Int)) conn_open_window(Conn c, Int width, Int height) {
+    Int wid = c.next_id;
+    Int cid = wid + 1;
+    Int seg = wid + 2;
+    Int mask = 0;
+    Int visual = 0;
+    List(List(Int)) rs = [
+        req_create_window(wid, c.setup.id_base, 0, 0, width, height, class_input_output(), visual, mask, []),
+        req_create_gc(cid, wid, mask, []),
+        req_change_property(wid, 39, 31, "resid-gui"),
+        req_map_window(wid)
+    ];
+    return rs.concat([req_shm_attach(seg, width * height * 4)]);
+}
+
+/// The id triple the sequence above used, recovered from the connection the
+/// caller should keep. Returning it keeps `conn_open_window` pure: the
+/// caller stores the ids it just used and passes the advanced connection on.
+pub Int conn_window_id(Conn c) { return c.next_id; }
+pub Int conn_gc_id(Conn c) { return c.next_id + 1; }
+pub Int conn_segment_id(Conn c) { return c.next_id + 2; }
+
+/// `ShmPutImage` for the whole frame: the segment is already attached, so
+/// no pixels cross the socket.
+pub List(Int) conn_present(Conn c, Int width, Int height) {
+    return req_shm_put_image(conn_segment_id(c), conn_window_id(c), conn_gc_id(c), width, height, 0, 0, 0, 0);
+}
+
+test "ids come from the server's base, one at a time" {
+    Setup s = Setup { .release = 1, .id_base = 1000, .id_mask = 255, .motion_buf = 0,
+                      .max_request_len = 65535, .screens = 1, .formats = 1, .vendor = "X" };
+    Conn c = conn_new(s);
+    expect(c.next_id).toEqual(1000);
+    expect(conn_has_ids(c)).toEqual(true);
+    expect(conn_take_id(c)).toEqual(1000);
+    expect(conn_take_id(conn_advance(c))).toEqual(1001);
+    expect(conn_take_id(conn_advance(conn_advance(c)))).toEqual(1002);
+}
+
+test "a server that offers no ids is refused" {
+    Setup s = Setup { .release = 1, .id_base = 0, .id_mask = 0, .motion_buf = 0,
+                      .max_request_len = 0, .screens = 1, .formats = 1, .vendor = "X" };
+    Conn c = conn_new(s);
+    expect(conn_has_ids(c)).toEqual(false);
+}
+
+test "opening a window is a fixed sequence of whole requests" {
+    Setup s = Setup { .release = 1, .id_base = 1000, .id_mask = 255, .motion_buf = 0,
+                      .max_request_len = 65535, .screens = 1, .formats = 1, .vendor = "X" };
+    Conn c = conn_new(s);
+    List(List(Int)) rs = conn_open_window(c, 64, 48);
+    expect(rs.len()).toEqual(5);
+    expect(rs[0][0]).toEqual(op_create_window());
+    expect(rs[1][0]).toEqual(op_create_gc());
+    expect(rs[2][0]).toEqual(op_change_property());
+    expect(rs[3][0]).toEqual(op_map_window());
+    expect(rs[4][1]).toEqual(shm_attach());
+    // Every one of them is a whole number of words.
+    expect(whole_words_at(rs[0], 2)).toEqual(0);
+    expect(whole_words_at(rs[1], 2)).toEqual(0);
+    expect(whole_words_at(rs[2], 6)).toEqual(0);
+    expect(whole_words_at(rs[3], 2)).toEqual(0);
+    expect(whole_words_at(rs[4], 2)).toEqual(0);
+}
+
+test "presenting names the window, the context and the segment" {
+    Setup s = Setup { .release = 1, .id_base = 1000, .id_mask = 255, .motion_buf = 0,
+                      .max_request_len = 65535, .screens = 1, .formats = 1, .vendor = "X" };
+    Conn c = conn_new(s);
+    List(Int) p = conn_present(c, 64, 48);
+    expect(p[0]).toEqual(op_shm());
+    expect(p[1]).toEqual(shm_put_image());
+    expect(word_at(p, 4) else { -1 }).toEqual(1002);      // the segment
+    expect(word_at(p, 8) else { -1 }).toEqual(1000);      // the window
+    expect(word_at(p, 12) else { -1 }).toEqual(1001);     // the context
+    expect(whole_words_at(p, 2)).toEqual(0);
+}

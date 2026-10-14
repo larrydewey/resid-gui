@@ -1,0 +1,222 @@
+// wire.resid — the X11 wire codec, as pure functions over bytes.
+//
+// X11 requests and replies are little-endian words on a Unix socket, so a
+// message is a byte list and nothing else: no object ids, no handshake
+// state machine, no generated bindings (PLAN-gui.md §3.2). Every function
+// here is pure and every one bounds-checks, because everything the server
+// sends is untrusted input (PLAN-gui.md §9).
+//
+// Bytes are `List(Int)` with each element 0..255, matching what
+// `resid_disp_send` and `resid_disp_recv` carry.
+
+// ─── Little-endian words ────────────────────────────────────────────
+
+/// Byte 1 of `v` (little-endian).
+pub Int w8(Int v) { return v & 255; }
+
+/// Byte 0 of `v`: the low word of a little-endian 16-bit read.
+pub Int w16(Int v) { return v & 65535; }
+
+/// Byte 1 of a 16-bit word: the high word, unsigned.
+pub Int w16hi(Int v) { return (v >> 16) & 65535; }
+
+/// Byte `i` of `v`, `i` in 0..3. A word is read from bytes with
+/// `word_at`, so this only ever sees a byte-shaped argument.
+pub Int byte_at(Int v, Int i) { return (v >> (8 * i)) & 255; }
+
+/// The 16-bit little-endian value at byte `i`, for the many X11 fields that
+/// are CARD16 rather than CARD32. `-1` when the message is short.
+pub Int half_at(List(Int) bs, Int i) {
+    if (i < 0 || i + 2 > bs.len()) { return -1; }
+    return bs[i] | (bs[i + 1] << 8);
+}
+
+/// Little-endian word at byte `i` of `bs`: `bs[i]` is the low byte. Fails
+/// with `Err` when fewer than `i + 4` bytes remain.
+pub Result(Int, Str) word_at(List(Int) bs, Int i) {
+    if (i < 0 || i + 4 > bs.len()) { return Err("x11: short read"); }
+    Int r = bs[i] | (bs[i + 1] << 8) | (bs[i + 2] << 16) | (bs[i + 3] << 24);
+    return Ok(r);
+}
+
+/// A signed word: X11 uses the full 32-bit range for coordinates and
+/// lengths, so a high bit set means negative.
+pub Int signed_word(Int v) {
+    if (v >= 2147483648) { return v - 4294967296; }
+    return v;
+}
+
+// ─── Encoding ───────────────────────────────────────────────────────
+
+/// A message being built. `ListBuf` is linear: each push returns the
+/// builder, so a builder value is used exactly once (spec §45).
+pub ListBuf(Int) enc_new() { return ListBuf(); }
+
+/// Append one byte.
+pub ListBuf(Int) enc_byte(ListBuf(Int) b, Int v) { return b.push(v & 255); }
+
+/// Append a 16-bit little-endian word.
+pub ListBuf(Int) enc_word16(ListBuf(Int) b, Int v) {
+    return enc_byte(enc_byte(b, v), (v >> 8) & 255);
+}
+
+/// Append a 32-bit little-endian word. Negative values are the server's
+/// convention for "all bits set" in masks, so they encode as two's
+/// complement.
+pub ListBuf(Int) enc_word32(ListBuf(Int) b, Int v) {
+    return enc_byte(enc_byte(enc_byte(enc_byte(b, v), (v >> 8) & 255), (v >> 16) & 255), (v >> 24) & 255);
+}
+
+/// Append `n` bytes, padding to a 4-byte boundary. X11 pads every string
+/// and every array out to a word.
+pub ListBuf(Int) enc_pad(ListBuf(Int) b, Int n) {
+    Int pad = (4 - (n & 3)) & 3;
+    return enc_bytes(b, pad, 0);
+}
+
+/// Append a list of 32-bit little-endian words. One call, so a builder
+/// stays linear: each intermediate name is used exactly once (spec §45).
+pub ListBuf(Int) enc_words(ListBuf(Int) b, List(Int) vs) {
+    return enc_words_at(b, vs, 0);
+}
+
+/// `enc_words`'s per-word step.
+pub ListBuf(Int) enc_words_at(ListBuf(Int) b, List(Int) vs, Int i) {
+    if (i >= vs.len()) { return b; }
+    return enc_words_at(enc_word32(b, vs[i]), vs, i + 1);
+}
+
+/// Append a list of 16-bit little-endian words.
+pub ListBuf(Int) enc_words16(ListBuf(Int) b, List(Int) vs) {
+    return enc_words16_at(b, vs, 0);
+}
+
+/// `enc_words16`'s per-word step.
+pub ListBuf(Int) enc_words16_at(ListBuf(Int) b, List(Int) vs, Int i) {
+    if (i >= vs.len()) { return b; }
+    return enc_words16_at(enc_word16(b, vs[i]), vs, i + 1);
+}
+
+/// Pad a byte list out to a multiple of `mult` bytes, given the list.
+pub List(Int) pad_to(List(Int) b, Int mult) {
+    return pad_to_with(b, mult, (mult - (b.len() % mult)) % mult);
+}
+
+/// `pad_to`'s per-byte step.
+List(Int) pad_to_with(List(Int) b, Int mult, Int n) {
+    if (n <= 0) { return b; }
+    return pad_to_with(b.concat([0]), mult, n - 1);
+}
+
+/// Pad a byte list out to a 4-byte boundary. A request that is not a whole
+/// number of words leaves client and server reading different offsets for
+/// the rest of the connection, so every request is padded once, at the end.
+pub List(Int) pad4(List(Int) b) {
+    return pad4_with(b, (4 - (b.len() & 3)) & 3);
+}
+
+/// `pad4`'s per-byte step.
+pub List(Int) pad4_with(List(Int) b, Int n) {
+    if (n <= 0) { return b; }
+    return pad4_with(b.concat([0]), n - 1);
+}
+
+/// `enc_bytes` over a list rather than a count.
+pub ListBuf(Int) enc_bytes_list(ListBuf(Int) b, List(Int) v, Int i) {
+    if (i >= v.len()) { return b; }
+    return enc_bytes_list(enc_byte(b, v[i]), v, i + 1);
+}
+
+/// Append `n` copies of `v`.
+pub ListBuf(Int) enc_bytes(ListBuf(Int) b, Int n, Int v) {
+    return enc_bytes_at(b, n, v, 0);
+}
+
+/// `enc_bytes` with an explicit starting count, for the tail recursion.
+pub ListBuf(Int) enc_bytes_at(ListBuf(Int) b, Int n, Int v, Int i) {
+    if (i >= n) { return b; }
+    return enc_bytes_at(enc_byte(b, v), n, v, i + 1);
+}
+
+/// Append a NUL-terminated string with its length word and padding, the
+/// X11 `STRING8` layout. The length word counts the NUL.
+pub ListBuf(Int) enc_string(ListBuf(Int) b, Str s) {
+    ListBuf(Int) r = enc_word16(b, s.len() + 1);
+    Int i = 0;
+    ListBuf(Int) r2 = enc_str_at(r, s, i);
+    return enc_pad(r2, s.len() + 1);
+}
+
+/// `enc_string`'s per-character step.
+pub ListBuf(Int) enc_str_at(ListBuf(Int) b, Str s, Int i) {
+    if (i >= s.len()) { return enc_byte(b, 0); }
+    return enc_str_at(enc_byte(b, str_char_at(s, i)), s, i + 1);
+}
+
+/// The finished bytes.
+pub List(Int) enc_finish(ListBuf(Int) b) { return b.finish(); }
+
+// ─── Decoding ───────────────────────────────────────────────────────
+
+/// The byte at `i`, or `Err` when the message is short. Every decoder
+/// below goes through this or `word_at`, so a truncated message is an
+/// error, never an out-of-range read.
+pub Result(Int, Str) byte_get(List(Int) bs, Int i) {
+    if (i < 0 || i >= bs.len()) { return Err("x11: short read"); }
+    return Ok(bs[i] & 255);
+}
+
+/// A NUL-terminated string at `i`, with the word-aligned padding after it.
+/// The length comes from the wire and is checked against what is actually
+/// there: a server that claims a longer string than it sent ends the
+/// message rather than the process. Bytes are taken as codepoints, which
+/// is right for the ASCII names X11 sends (vendor, atom, format names).
+pub Result(Str, Str) string_at(List(Int) bs, Int i) {
+    if (i < 0 || i + 2 > bs.len()) { return Err("x11: short string header"); }
+    Int n = bs[i] | (bs[i + 1] << 8);
+    if (n == 0 || i + 2 + n > bs.len()) { return Err("x11: string overruns message"); }
+    return Ok(bytes_str(bs, i + 2, n - 1));
+}
+
+/// `b[i..stop)` as a string, one codepoint per byte, linear in length
+/// through the string builder.
+pub Str bytes_str(List(Int) b, Int i, Int stop) {
+    return bytes_str_at(b, i, stop, StrBuf());
+}
+
+/// `bytes_str`'s per-byte step.
+pub Str bytes_str_at(List(Int) b, Int i, Int stop, StrBuf acc) {
+    if (i >= stop) { return acc.finish(); }
+    return bytes_str_at(b, i + 1, stop, acc.push_char(b[i]));
+}
+
+test "words are little-endian" {
+    expect(enc_finish(enc_word32(enc_new(), 1))).toEqual([1, 0, 0, 0]);
+    expect(enc_finish(enc_word32(enc_new(), 65538))).toEqual([2, 1, 1, 0]);
+    expect(enc_finish(enc_word32(enc_new(), -1))).toEqual([255, 255, 255, 255]);
+    expect(enc_finish(enc_word16(enc_new(), 513))).toEqual([1, 2]);
+}
+
+test "a word reads back from its bytes" {
+    expect(word_at([1, 2, 3, 4], 0) else { -1 }).toEqual(67305985);
+    expect(word_at([9, 42, 0, 0, 0], 1) else { -1 }).toEqual(42);
+    expect(word_at([1, 2], 0) else { -1 }).toEqual(-1);
+    expect(signed_word(4294967295)).toEqual(-1);
+    expect(signed_word(65538)).toEqual(65538);
+}
+
+test "strings carry a length word, a NUL and padding" {
+    // "hi" is 3 bytes with the NUL, padded to 4.
+    expect(enc_finish(enc_string(enc_new(), "hi"))).toEqual([3, 0, 104, 105, 0, 0]);
+    expect(enc_finish(enc_string(enc_new(), ""))).toEqual([1, 0, 0, 0, 0]);
+    // "abcd" is 5 bytes, padded to 8.
+    expect(enc_finish(enc_string(enc_new(), "abcd")).len()).toEqual(10);
+}
+
+test "a short message is an error, never an out-of-range read" {
+    expect(byte_get([], 0) else { -1 }).toEqual(-1);
+    expect(byte_get([7], 5) else { -1 }).toEqual(-1);
+    expect(string_at([9, 0], 0) else { "no" }).toEqual("no");
+    // A string that claims more bytes than the message holds.
+    expect(string_at([9, 0, 65], 0) else { "no" }).toEqual("no");
+}

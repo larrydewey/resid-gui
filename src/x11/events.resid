@@ -1,0 +1,54 @@
+import "wire.resid";
+import "../gui.resid";
+
+pub Int event_type(List(Int) e) {
+    if (e.len() < 1) { return 0; }
+    return e[0] & 255;
+}
+
+pub Int event_detail(List(Int) e) {
+    if (e.len() < 2) { return 0; }
+    return e[1] & 255;
+}
+
+pub Int event_u16(List(Int) e, Int off) {
+    if (off < 0 || off + 2 > e.len()) { return 0; }
+    return (e[off] & 255) | ((e[off + 1] & 255) << 8);
+}
+
+pub Int event_u32(List(Int) e, Int off) {
+    if (off < 0 || off + 4 > e.len()) { return 0; }
+    return (e[off] & 255) | ((e[off + 1] & 255) << 8) | ((e[off + 2] & 255) << 16) | ((e[off + 3] & 255) << 24);
+}
+
+pub List(Int) slice_bytes(List(Int) xs, Int start, Int stop, Int i, List(Int) acc) {
+    if (i >= stop || i >= xs.len() || start >= xs.len()) { return acc; }
+    if (start < 0) { return acc; }
+    Int idx = start + i;
+    if (idx >= stop || idx >= xs.len()) { return acc; }
+    return slice_bytes(xs, start, stop, i + 1, acc.concat([xs[idx]]));
+}
+
+pub Event decode_event(List(Int) e) {
+    if (e.len() < 32) { return FrameTick; }
+    Int t = event_type(e);
+    Int x = event_u16(e, 24);
+    Int y = event_u16(e, 26);
+    Int sw = event_u16(e, 16);
+    Int sh = event_u16(e, 18);
+    if (t == 2) { return KeyDown(event_detail(e), ""); }
+    if (t == 3) { return KeyUp(event_detail(e)); }
+    if (t == 4) { return PointerDown(x, y, event_detail(e)); }
+    if (t == 5) { return PointerUp(x, y, event_detail(e)); }
+    if (t == 6) { return PointerMoved(x, y); }
+    if (t == 9) { return Focused; }
+    if (t == 10) { return Blurred; }
+    if (t == 22) { return Resized(sw, sh); }
+    if (t == 33) { return Closed; }
+    return FrameTick;
+}
+
+test "event type first byte" {
+    List(Int) e = [33, 0, 0, 0];
+    expect(event_type(e)).toEqual(33);
+}

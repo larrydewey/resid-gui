@@ -1,0 +1,293 @@
+// requests.resid — the X11 requests a self-rendering client actually
+// sends, one hand-written encoder each (PLAN-gui.md §3.2).
+//
+// Every request is `[opcode:1][data:1][length:2 in 4-byte units]` followed
+// by its arguments, so the length is the whole point: it counts the header
+// too, and a server that reads a different number of words than were sent
+// loses sync for the rest of the connection. Every encoder here therefore
+// builds the arguments first and then prepends the header with the real
+// length.
+//
+// Encoders chain `enc_words`, `enc_words16` and `enc_bytes_list` rather
+// than binding a name per step, because a `ListBuf` is linear: each
+// builder value is used exactly once (spec §45).
+
+import "wire.resid";
+
+// ─── Opcodes ────────────────────────────────────────────────────────
+
+pub Int op_create_window() { return 1; }
+pub Int op_destroy_window() { return 4; }
+pub Int op_map_window() { return 8; }
+pub Int op_intern_atom() { return 16; }
+pub Int op_change_property() { return 18; }
+pub Int op_create_gc() { return 55; }
+pub Int op_free_gc() { return 60; }
+pub Int op_put_image() { return 72; }
+pub Int op_get_image() { return 73; }
+pub Int op_copy_area() { return 92; }
+pub Int op_no_operation() { return 127; }
+
+// MIT-SHM's own opcode, with its minor opcodes following it.
+pub Int op_shm() { return 70; }
+pub Int shm_query_version() { return 0; }
+pub Int shm_attach() { return 1; }
+pub Int shm_put_image() { return 4; }
+
+// A window class, in the order X11 numbers them.
+pub Int class_copy_from_parent() { return 0; }
+pub Int class_input_output() { return 1; }
+
+// `PutImage` format 2: ZPixmap, one pixel every three bytes.
+pub Int format_zpix() { return 2; }
+
+// Depth 24: 32 bits per pixel, which is what a canvas holds.
+pub Int depth_default() { return 24; }
+
+// Prepend mode: Append 0, Prepend 1, Replace 2.
+pub Int mode_string() { return 0; }
+
+// Read/write, the only mode a client that draws its own frames wants.
+pub Int read_only() { return 0; }
+
+// ─── The header ────────────────────────────────────────────────────
+
+/// The request length in 4-byte units. The header is four bytes — opcode,
+/// data byte, then the length itself — and the count includes it, so a
+/// request with no arguments is one unit. `args` must already be padded
+/// (`pad4`); the caller does that so the bytes sent and the count agree.
+pub Int req_units(List(Int) args) { return (4 + args.len()) / 4; }
+
+/// Prepend the request header to `args`.
+pub List(Int) req(Int opcode, List(Int) args) {
+    List(Int) a = pad4(args);
+    ListBuf(Int) b = enc_bytes_list(enc_word16(enc_byte(enc_byte(enc_new(), opcode), 0), req_units(a)), a, 0);
+    return enc_finish(b);
+}
+
+/// The header alone, for a request with no arguments (`NoOperation`).
+pub List(Int) req_none(Int opcode) { return req(opcode, []); }
+
+/// `req` for MIT-SHM, where the minor opcode rides in the data byte.
+/// A request whose second byte carries protocol data rather than padding:
+/// `CreateWindow`'s depth, `PutImage`'s format, `InternAtom`'s
+/// only-if-exists flag. The length field still follows at bytes 2-3.
+pub List(Int) req_d(Int opcode, Int data, List(Int) args) {
+    List(Int) a = pad4(args);
+    ListBuf(Int) b = enc_bytes_list(enc_word16(enc_byte(enc_byte(enc_new(), opcode), data), req_units(a)), a, 0);
+    return enc_finish(b);
+}
+
+/// A request with extra fixed bytes between the second byte and the length
+/// field: `ChangeProperty` has mode, three unused bytes and the format
+/// before its length.
+pub List(Int) req_pre(Int opcode, List(Int) pre, List(Int) args) {
+    List(Int) a = pad4(args);
+    Int units = (3 + pre.len() + a.len()) / 4;
+    ListBuf(Int) b = enc_bytes_list(enc_word16(enc_bytes_list(enc_byte(enc_new(), opcode), pre, 0), units), a, 0);
+    return enc_finish(b);
+}
+
+pub List(Int) req_shm(Int minor, List(Int) args) {
+    List(Int) a = pad4(args);
+    ListBuf(Int) b = enc_bytes_list(enc_word16(enc_byte(enc_byte(enc_new(), op_shm()), minor), req_units(a)), a, 0);
+    return enc_finish(b);
+}
+
+/// `MapWindow`: the window is real but not yet on screen.
+pub List(Int) req_map_window(Int wid) { return req(op_map_window(), enc_finish(enc_word32(enc_new(), wid))); }
+
+/// `DestroyWindow`.
+pub List(Int) req_destroy_window(Int wid) { return req(op_destroy_window(), enc_finish(enc_word32(enc_new(), wid))); }
+
+/// `FreeGC`.
+pub List(Int) req_free_gc(Int cid) { return req(op_free_gc(), enc_finish(enc_word32(enc_new(), cid))); }
+
+/// `CopyArea`: copy one rectangle of the drawable, for damaged bands.
+pub List(Int) req_copy_area(Int src, Int dst, Int gc, Int x, Int y, Int w, Int h) {
+    ListBuf(Int) b = enc_words(enc_new(), [src, dst, gc]);
+    return req(op_copy_area(), enc_finish(enc_words16(b, [x, y, w, h])));
+}
+
+/// `GetImage`, for reading the frame back to compare against a golden.
+pub List(Int) req_get_image(Int drawable, Int x, Int y, Int w, Int h) {
+    ListBuf(Int) b = enc_words(enc_new(), [drawable]);
+    return req_d(op_get_image(), 2, enc_finish(enc_words16(b, [x, y, w, h])));
+}
+
+// ─── Windows ────────────────────────────────────────────────────────
+
+/// `CreateWindow` for one window. `visual` is the visual id from the setup
+/// reply; `mask` is the attribute bitmask and `values` the matching words
+/// in bit order, none of them in v1.
+pub List(Int) req_create_window(Int wid, Int parent, Int x, Int y, Int w, Int h, Int class, Int visual, Int mask, List(Int) values) {
+    ListBuf(Int) b = enc_words(enc_new(), [wid, parent, x, y, w, h, 0, visual, mask]);
+    ListBuf(Int) c = enc_words16(b, [class]);
+    return req_d(op_create_window(), depth_default(), enc_finish(enc_bytes_list(c, values, 0)));
+}
+
+// ─── Graphics contexts ──────────────────────────────────────────────
+
+/// `CreateGC` for one depth. `mask` and `values` have the same shape as
+/// the window attributes.
+pub List(Int) req_create_gc(Int cid, Int drawable, Int mask, List(Int) values) {
+    ListBuf(Int) b = enc_words(enc_new(), [cid, drawable, mask]);
+    return req(op_create_gc(), enc_finish(enc_bytes_list(b, values, 0)));
+}
+
+// ─── Atoms and properties ───────────────────────────────────────────
+
+/// `InternAtom`: false creates the atom, true asks only if it exists. The
+/// answer arrives as an event, not a reply.
+pub List(Int) req_intern_atom(Str name, Bool only_if_exists) {
+    ListBuf(Int) b = enc_str_at(enc_words16(enc_new(), [name.len(), if (only_if_exists) { 1 } else { 0 }]), name, 0);
+    return req(op_intern_atom(), enc_finish(enc_pad(b, name.len() + 1)));
+}
+
+/// `ChangeProperty` for a STRING8 or ATOM value: the window title being
+/// the one a GUI cannot do without.
+pub List(Int) req_change_property(Int wid, Int prop, Int type, Str value) {
+    ListBuf(Int) b = enc_words(enc_new(), [wid, prop, type]);
+    return req_pre(op_change_property(), [mode_string(), 0, 0, 0, 8], enc_finish(enc_str_at(enc_byte(b, value.len()), value, 0)));
+}
+
+// ─── Images ─────────────────────────────────────────────────────────
+
+/// `PutImage` over the socket, in 24-bit chunks. The last row is padded
+/// to a word boundary, which is why the length is computed from the padded
+/// row size and not from the pixel count alone.
+pub List(Int) req_put_image(Int drawable, Int gc, Int w, Int h, Int x, Int y, List(Int) px) {
+    Int row = w * 3;
+    Int row_pad = (4 - (row & 3)) & 3;
+    ListBuf(Int) b = enc_words(enc_new(), [drawable, gc]);
+    ListBuf(Int) c = enc_words16(b, [w, h, x, y]);
+    ListBuf(Int) d = enc_bytes(enc_byte(enc_byte(c, 0), depth_default()), 2, 0);
+    ListBuf(Int) e = enc_bytes_list(d, px, 0);
+    return req_d(op_put_image(), format_zpix(), enc_finish(enc_bytes(e, (h * row_pad) + ((h - 1) * row), 0)));
+}
+
+// ─── MIT-SHM ────────────────────────────────────────────────────────
+
+/// `ShmQueryVersion`, the first SHM request; the reply says whether the
+/// server has it and what it supports.
+pub List(Int) req_shm_query_version() {
+    return req_shm(shm_query_version(), enc_finish(enc_bytes(enc_byte(enc_words(enc_new(), [1]), 0), 3, 0)));
+}
+
+/// `ShmAttachFd`: the shared-memory descriptor goes out of band, with the
+/// request carrying the segment's size. `fd` is passed to
+/// `resid_disp_send`, never encoded here.
+pub List(Int) req_shm_attach(Int shmseg, Int size) {
+    ListBuf(Int) b = enc_words(enc_new(), [shmseg, shmseg >> 16, size]);
+    return req_shm(shm_attach(), enc_finish(enc_bytes(enc_byte(b, read_only()), 3, 0)));
+}
+
+/// `ShmPutImage`: a rectangle of an already attached segment, with no
+/// pixels on the wire at all.
+pub List(Int) req_shm_put_image(Int shmseg, Int drawable, Int gc, Int w, Int h, Int sx, Int sy, Int dx, Int dy) {
+    ListBuf(Int) b = enc_words(enc_new(), [shmseg, drawable, gc]);
+    ListBuf(Int) c = enc_words16(b, [w, h, sx, sy, dx, dy]);
+    return req_shm(shm_put_image(), enc_finish(enc_bytes(enc_byte(c, format_zpix()), 3, 0)));
+}
+
+// ─── Replies ────────────────────────────────────────────────────────
+
+/// The 32-bit value `which` of a reply: `[1][data][sequence][extra
+/// length:4][24 bytes of values]`. Only what the client needs is read out,
+/// and a short reply is an error rather than a read past the message.
+pub Result(Int, Str) reply_word32(List(Int) bs, Int which) {
+    if (bs.len() < 32) { return Err("x11: short reply"); }
+    if (bs[0] != 1) { return Err("x11: not a reply"); }
+    return word_at(bs, 8 + (which * 4));
+}
+
+/// Every request must be a whole number of words: the bytes sent and the
+/// length field have to agree, or the two sides drift apart and every later
+/// message is garbage. `at` is where the length field sits — 2 for most
+/// requests, 6 for `ChangeProperty`, which has fixed bytes before it.
+pub Int whole_words_at(List(Int) r, Int at) { return r.len() - ((half_at(r, at) & 65535) * 4); }
+
+test "the header counts the header" {
+    expect(req_none(op_no_operation())).toEqual([127, 0, 1, 0]);
+    expect(req(op_map_window(), [7, 0, 0, 0])).toEqual([8, 0, 2, 0, 7, 0, 0, 0]);
+}
+
+test "CreateWindow carries its fields" {
+    // An InputOutput window at 100x50 with no attributes set.
+    List(Int) r = req_create_window(100, 1, 0, 0, 100, 50, class_input_output(), 33, 0, []);
+    expect(r[0]).toEqual(1);
+    expect(r[1]).toEqual(24);
+    expect(word_at(r, 4) else { -1 }).toEqual(100);
+    expect(word_at(r, 8) else { -1 }).toEqual(1);
+    expect(word_at(r, 20) else { -1 }).toEqual(100);
+    expect(word_at(r, 24) else { -1 }).toEqual(50);
+    expect(word_at(r, 28) else { -1 }).toEqual(0);
+    expect(word_at(r, 32) else { -1 }).toEqual(33);
+}
+
+test "graphics context and window attributes carry their mask" {
+    List(Int) gc = req_create_gc(200, 100, 4, [7]);
+    expect(word_at(gc, 4) else { -1 }).toEqual(200);
+    expect(word_at(gc, 8) else { -1 }).toEqual(100);
+    expect(word_at(gc, 12) else { -1 }).toEqual(4);
+    expect(gc[16]).toEqual(7);
+
+    // One attribute word rides along after the window fields.
+    List(Int) win = req_create_window(100, 1, 0, 0, 4, 4, class_input_output(), 33, 4, [7]);
+    expect(word_at(win, 32) else { -1 }).toEqual(33);
+    expect(word_at(win, 36) else { -1 }).toEqual(4);
+}
+
+test "PutImage pads the data to a whole number of words" {
+    // 4x1 at 3 bytes per pixel is 12 bytes; 3x1 is 9 and needs padding.
+    List(Int) r = req_put_image(100, 200, 4, 1, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(r[0]).toEqual(72);
+    expect(r[1]).toEqual(2);                                  // ZPixmap
+    expect(word_at(r, 4) else { -1 }).toEqual(100);            // drawable
+    expect(half_at(r, 12)).toEqual(4);                         // width
+    List(Int) r2 = req_put_image(100, 200, 3, 1, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(r2.len() > r.len()).toEqual(false);
+}
+
+test "MIT-SHM asks for a version, attaches, and puts without pixels" {
+    List(Int) q = req_shm_query_version();
+    expect(q[0]).toEqual(70);
+    expect(q[1]).toEqual(0);
+    expect(word_at(q, 4) else { -1 }).toEqual(1);             // major version
+
+    List(Int) a = req_shm_attach(300, 65536);
+    expect(a[0]).toEqual(70);
+    expect(a[1]).toEqual(1);
+    expect(word_at(a, 4) else { -1 }).toEqual(300);
+    expect(word_at(a, 12) else { -1 }).toEqual(65536);
+
+    List(Int) p = req_shm_put_image(300, 100, 200, 64, 48, 0, 0, 0, 0);
+    expect(p[0]).toEqual(70);
+    expect(p[1]).toEqual(4);
+    expect(word_at(p, 4) else { -1 }).toEqual(300);
+    expect(half_at(p, 16)).toEqual(64);
+    expect(half_at(p, 18)).toEqual(48);
+}
+
+test "every request is a whole number of words" {
+    expect(whole_words_at(req_none(op_no_operation()), 2)).toEqual(0);
+    expect(whole_words_at(req(op_map_window(), [7, 0, 0, 0]), 2)).toEqual(0);
+    expect(whole_words_at(req_create_window(100, 1, 0, 0, 100, 50, class_input_output(), 33, 0, []), 2)).toEqual(0);
+    expect(whole_words_at(req_create_window(100, 1, 0, 0, 4, 4, class_input_output(), 33, 4, [7]), 2)).toEqual(0);
+    expect(whole_words_at(req_create_gc(200, 100, 4, [7]), 2)).toEqual(0);
+    expect(whole_words_at(req_intern_atom("WM_NAME", false), 2)).toEqual(0);
+    expect(whole_words_at(req_change_property(100, 39, 31, "hi"), 6)).toEqual(0);
+    expect(whole_words_at(req_put_image(100, 200, 4, 1, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), 2)).toEqual(0);
+    expect(whole_words_at(req_put_image(100, 200, 3, 1, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8, 9]), 2)).toEqual(0);
+    expect(whole_words_at(req_shm_query_version(), 2)).toEqual(0);
+    expect(whole_words_at(req_shm_attach(300, 65536), 2)).toEqual(0);
+    expect(whole_words_at(req_shm_put_image(300, 100, 200, 64, 48, 0, 0, 0, 0), 2)).toEqual(0);
+}
+
+test "a reply reads its values, and a short one is an error" {
+    List(Int) r = [1, 1, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 0,
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    expect(reply_word32(r, 0) else { -1 }).toEqual(42);
+    expect(reply_word32([1, 0], 0) else { -1 }).toEqual(-1);
+    expect(reply_word32([0, 0, 0, 0, 0, 0, 0, 0], 0) else { -1 }).toEqual(-1);
+}

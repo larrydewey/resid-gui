@@ -1,0 +1,21 @@
+import "../src/gui.resid";
+
+type TodoModel = { Int count; };
+
+TodoModel todo_init() { return TodoModel { .count = 0 }; }
+TodoModel todo_update_msg(TodoModel m, Msg msg) {
+    return match (msg) { Clicked => TodoModel { .count = m.count + 1 }, _ => m };
+}
+TodoModel todo_update(TodoModel m, Event e) {
+    return match (e) { AppMsg(msg) => todo_update_msg(m, msg), _ => m };
+}
+Widget todo_view(TodoModel m) {
+    return Column([Text("items"), Button("add", Clicked)]);
+}
+
+App(TodoModel) = { .init = todo_init, .update = todo_update, .view = todo_view };
+
+@requires(display)
+Int main() {
+    return gui_run(WindowOptions { .title = "Todo", .width = 200, .height = 160, .resizable = true });
+}

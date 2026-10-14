@@ -4,10 +4,15 @@
 // owns the display connection, the frame loop and the pixels; the program
 // owns the model. Nothing here holds ambient authority: every function that
 // reaches a display builtin says so with @requires.
-//
-// Status: skeleton. This file does not compile until the `display` family
-// lands in the Resid runtime (PLAN-gui.md, phase G1) — `@requires(display)`
-// is E0213 today. See PLAN-gui.md for the phases.
+
+import "x11/connect.resid";
+import "x11/conn.resid";
+import "x11/events.resid";
+import "x11/requests.resid";
+import "gfx/color.resid";
+import "gfx/draw.resid";
+import "gfx/raster.resid";
+import "ui/paint.resid";
 
 // What the display sends up. Every field is data: the loop decodes bytes
 // into one of these and folds it through `update`.
@@ -34,10 +39,85 @@ type WindowOptions = {
     Str title; Int width; Int height; Bool resizable;
 };
 
+@requires(display)
+pub Int gui_send_seq(Int fd, List(List(Int)) seq, Int handle, Int i) {
+    if (i >= seq.len()) { return i; }
+    Int pass = if (i == seq.len() - 1) { resid_disp_shm_fd(handle) } else { -1 };
+    if (!resid_disp_send(fd, seq[i], pass)) { return i; }
+    return gui_send_seq(fd, seq, handle, i + 1);
+}
+
+@requires(display)
+pub Int gui_event_loop(Int fd) {
+    List(Int) ready = resid_disp_poll([fd], [1], 1000);
+    if (ready.len() > 0 && (ready[0] & 1) != 0) {
+        List(Int) got = resid_disp_recv(fd, 65536);
+        if (got.len() == 0) { return 0; }
+    }
+    if (ready.len() > 0 && (ready[0] & 4) != 0) { return 0; }
+    if (ready.len() > 0 && (ready[0] & 8) != 0) { return 0; }
+    return gui_event_loop(fd);
+}
+
 // Open a window and run the program's `App(M)` instance until it is closed.
 // Blocks; returns the process exit status.
 @needs(App(M))
 @requires(display)
+pub Int gui_run_x11(WindowOptions opts) { return gui_run(opts); }
+
+@needs(App(M))
+@requires(display)
 pub Int gui_run(WindowOptions opts) {
-    return gui_run_x11(opts);
+    Session s = x11_open(auth_none());
+    if (s.fd < 0) { return 1; }
+    Conn c = conn_new(s.setup);
+    Int width = if (opts.width < 1) { 1 } else { opts.width };
+    Int height = if (opts.height < 1) { 1 } else { opts.height };
+    Int bytes = width * height * 4;
+    Int handle = resid_disp_shm_new(bytes);
+    if (handle == 0) { _ = x11_close(s); return 1; }
+    List(List(Int)) seq = conn_open_window(c, width, height);
+    Int sent = gui_send_seq(s.fd, seq, handle, 0);
+    if (sent != seq.len()) { _ = x11_close(s); return 1; }
+    // Initial frame for the program's initial model.
+    M model0 = init();
+    _ = gui_render_frame(s.fd, handle, c, model0, width, height);
+    M finalmodel = gui_run_loop(s, c, model0, width, height, handle, []);
+    _ = resid_disp_shm_free(handle);
+    _ = x11_close(s);
+    return 0;
 }
+
+@needs(App(M))
+@requires(display)
+Int gui_render_frame(Int fd, Int handle, Conn c, M model, Int width, Int height) {
+    Widget vw = view(model);
+    List(DrawOp) ops = paint_widget(vw, Rect { .x = 0, .y = 0, .w = width, .h = height });
+    List(Int) px = rasterize_ops(ops, width, height);
+    _ = resid_disp_shm_put(handle, 0, px, width * height * 4);
+    _ = resid_disp_send(fd, conn_present(c, width, height), -1);
+    return 0;
+}
+
+@needs(App(M))
+@requires(display)
+M gui_run_loop(Session s, Conn c, M model, Int width, Int height, Int handle, List(Int) buf) {
+    if (buf.len() >= 32) {
+        Event e = decode_event(slice_bytes(buf, 0, 32, 0, []));
+        M m2 = update(model, e);
+        _ = gui_render_frame(s.fd, handle, c, m2, width, height);
+        Bool closed = match (e) { Closed => true, _ => false };
+        List(Int) rest = slice_bytes(buf, 32, buf.len(), 0, []);
+        if (closed) { return m2; }
+        return gui_run_loop(s, c, m2, width, height, handle, rest);
+    }
+    List(Int) ready = resid_disp_poll([s.fd], [1], 16);
+    if (ready.len() > 0 && (ready[0] & 1) != 0) {
+        List(Int) got = resid_disp_recv(s.fd, 65536);
+        if (got.len() == 0) { return model; }
+        return gui_run_loop(s, c, model, width, height, handle, buf.concat(got));
+    }
+    if (ready.len() > 0 && (ready[0] & 8) != 0) { return model; }
+    return gui_run_loop(s, c, model, width, height, handle, buf);
+}
+

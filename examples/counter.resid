@@ -1,0 +1,13 @@
+import "../src/gui.resid";
+
+Int counter_init() { return 0; }
+Int counter_update_msg(Int m, Msg msg) { return match (msg) { Clicked => m + 1, _ => m }; }
+Int counter_update(Int m, Event e) { return match (e) { AppMsg(msg) => counter_update_msg(m, msg), _ => m }; }
+Widget counter_view(Int m) { return Column([Text("count: 0"), Button("click me", Clicked)]); }
+
+App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
+
+@requires(display)
+Int main() {
+    return gui_run(WindowOptions { .title = "Counter", .width = 160, .height = 120, .resizable = false });
+}

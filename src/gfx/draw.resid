@@ -1,0 +1,16 @@
+import "color.resid";
+
+
+
+pub type DrawOp =
+    OpFill(Rect, Color) |
+    OpText(Int, Int, Str, Color) |
+    OpClipPush(Rect) |
+    OpClipPop;
+
+pub type DrawList = List(DrawOp);
+
+test "draw rect" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 1, .h = 1 };
+    expect(r.w).toEqual(1);
+}

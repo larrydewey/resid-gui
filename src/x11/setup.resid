@@ -1,0 +1,130 @@
+// setup.resid — the X11 connection setup: the one request a client sends
+// before anything else, and the one reply it must read whole.
+//
+// There is no object-id table and no registry (PLAN-gui.md §3.1): the reply
+// carries the release number, the resource-id base and mask the client
+// allocates ids inside, the vendor, and the pixmap formats. Everything
+// untrusted in the GUI arrives first here, so every field is bounds-checked
+// and a malformed reply is an `Err`, never a read past the message.
+
+import "wire.resid";
+
+// What the client learns from the server's first reply. `screens` and
+// `formats` are kept so a caller can check they are what it expects; the
+// vendor is a diagnostic.
+type Setup = {
+    Int release; Int id_base; Int id_mask; Int motion_buf;
+    Int max_request_len; Int screens; Int formats;
+    Str vendor;
+};
+
+// The reply's fixed part is 8 bytes; the fields the client needs start
+// there. These are the offsets of the additional data, which begins at 8.
+Int setup_off_release() { return 8; }
+Int setup_off_id_base() { return 12; }
+Int setup_off_id_mask() { return 16; }
+Int setup_off_motion() { return 20; }
+Int setup_off_vendor_len() { return 24; }
+Int setup_off_max_req() { return 26; }
+Int setup_off_screens() { return 28; }
+Int setup_off_formats() { return 29; }
+Int setup_off_vendor() { return 40; }
+
+// ─── The request ────────────────────────────────────────────────────
+
+/// A setup request with the given authorization name and data: the cookie
+/// for MIT-MAGIC-COOKIE-1, or empty names for a server that wants none.
+pub List(Int) setup_request(Str name, List(Int) data) {
+    return setup_request_v(11, 0, name, data);
+}
+
+/// `setup_request` with the protocol version spelled out.
+pub List(Int) setup_request_v(Int major, Int minor, Str name, List(Int) data) {
+    // A STRING8 carries its NUL; a length of zero means no name at all, so
+    // an unauthenticated server gets a header and nothing else.
+    Int n = if (name.len() == 0) { 0 } else { name.len() + 1 };
+    ListBuf(Int) body = if (n == 0) { enc_new() } else { enc_str_at(enc_new(), name, 0) };
+    List(Int) named = pad_to(enc_finish(body), 4);
+    ListBuf(Int) tail = enc_bytes_list(enc_new(), data, 0);
+    ListBuf(Int) head = enc_word16(enc_byte(enc_byte(enc_new(), 108), 0), major);
+    ListBuf(Int) rest = enc_words16(head, [minor, n, data.len(), 0]);
+    return enc_finish(rest).concat(pad_to(named.concat(enc_finish(tail)), 4));
+}
+
+// ─── The reply ──────────────────────────────────────────────────────
+
+/// Word `i` of a reply already known to be long enough.
+Int setup_word(List(Int) bs, Int i) {
+    return bs[i] | (bs[i + 1] << 8) | (bs[i + 2] << 16) | (bs[i + 3] << 24);
+}
+
+/// The 16-bit field at `i`.
+Int setup_word16(List(Int) bs, Int i) { return (bs[i] | (bs[i + 1] << 8)) & 65535; }
+
+/// A zero `Setup`, for a caller that takes the `Err` branch.
+pub Setup setup_empty() {
+    return Setup { .release = 0, .id_base = 0, .id_mask = 0, .motion_buf = 0,
+                   .max_request_len = 0, .screens = 0, .formats = 0, .vendor = "" };
+}
+
+/// Parse the server's first reply. `bs[0]` is the success byte: 1 for
+/// success, 0 for refused, 2 for "authenticate again".
+pub Result(Setup, Str) setup_parse(List(Int) bs) {
+    if (bs.len() < setup_off_vendor()) { return Err("x11: setup reply too short"); }
+    if (bs[0] == 0) { return Err("x11: server refused the connection"); }
+    if (bs[0] == 2) { return Err("x11: server demands further authentication"); }
+    if (bs[0] != 1) { return Err("x11: not a setup reply"); }
+    Int vendor_len = setup_word16(bs, setup_off_vendor_len());
+    Int end = setup_off_vendor() + vendor_len;
+    if (end > bs.len()) { return Err("x11: vendor overruns reply"); }
+    return Ok(Setup {
+        .release = setup_word(bs, setup_off_release()),
+        .id_base = setup_word(bs, setup_off_id_base()),
+        .id_mask = setup_word(bs, setup_off_id_mask()),
+        .motion_buf = setup_word(bs, setup_off_motion()),
+        .max_request_len = setup_word16(bs, setup_off_max_req()),
+        .screens = bs[setup_off_screens()],
+        .formats = bs[setup_off_formats()],
+        .vendor = bytes_str(bs, setup_off_vendor(), end)
+    });
+}
+
+test "the setup request is the recorded byte sequence" {
+    // No cookie: the header alone, twelve bytes.
+    expect(setup_request("", [])).toEqual([108, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    // A one-character name and two data bytes, each padded to a word.
+    expect(setup_request_v(11, 0, "X", [1, 2])).toEqual(
+        [108, 0, 11, 0, 0, 0, 1, 0, 2, 0, 0, 0, 1, 0, 88, 0, 0, 0, 1, 2]);
+}
+
+test "a successful reply parses into the setup" {
+    // release 1_000_000, id base 0x0100_0000, mask 0x001f_ffff, motion
+    // 65536, vendor "abc", one screen, one format.
+    List(Int) bs = [1, 0, 11, 0, 0, 6, 0, 0,
+                    64, 66, 15, 0, 0, 0, 0, 1,
+                    255, 31, 0, 0, 0, 0, 1, 0,
+                    3, 0, 255, 255, 1, 1, 0, 0,
+                    32, 0, 8, 255, 0, 0, 0, 0,
+                    97, 98, 99, 0];
+    Setup s = setup_parse(bs) else { setup_empty() };
+    expect(s.release).toEqual(1000000);
+    expect(s.id_base).toEqual(16777216);
+    expect(s.id_mask).toEqual(8191);
+    expect(s.motion_buf).toEqual(65536);
+    expect(s.max_request_len).toEqual(65535);
+    expect(s.screens).toEqual(1);
+    expect(s.formats).toEqual(1);
+    expect(s.vendor).toEqual("abc");
+}
+
+test "a refused, truncated or malformed reply is an error" {
+    Setup bad = setup_parse([0, 0, 0, 0]) else { setup_empty() };
+    expect(bad.release).toEqual(0);
+    Setup short1 = setup_parse([1, 0]) else { setup_empty() };
+    expect(short1.release).toEqual(0);
+    // A vendor length of 200 that runs past the reply.
+    List(Int) over = [1, 0, 11, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                      255, 31, 255, 0, 0, 1, 0, 0, 200, 0, 1, 1, 1, 1, 0, 0];
+    Setup bad2 = setup_parse(over) else { setup_empty() };
+    expect(bad2.vendor).toEqual("");
+}

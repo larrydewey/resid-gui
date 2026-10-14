@@ -1,0 +1,31 @@
+import "canvas.resid";
+import "color.resid";
+import "draw.resid";
+import "text.resid";
+
+Canvas ramp_apply(Canvas c, DrawOp op) {
+    return match (op) {
+        OpFill(rect, col) => fill_rect(c, rect, col),
+        OpText(x, y, s, col) => render_text(c, x, y, s, col, 0, 0),
+        OpClipPush(rect) => c,
+        OpClipPop => c
+    };
+}
+
+pub Canvas rasterize(List(DrawOp) ops, Int w, Int h, Int i, Canvas acc) {
+    if (i >= ops.len()) { return acc; }
+    Canvas next = ramp_apply(acc, ops[i]);
+    return rasterize(ops, w, h, i + 1, next);
+}
+
+pub List(Int) rasterize_ops(List(DrawOp) ops, Int w, Int h) {
+    Canvas c = rasterize(ops, w, h, 0, canvas_new(w, h));
+    return finish(c);
+}
+
+test "raster" {
+    List(DrawOp) ops = [OpFill(Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, Color { .b = 1, .g = 2, .r = 3, .a = 4 })];
+    List(Int) px = rasterize_ops(ops, 2, 2);
+    expect(px.len()).toEqual(16);
+    expect(px[0]).toEqual(1);
+}

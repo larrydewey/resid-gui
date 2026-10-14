@@ -6,3 +6,4 @@
 *.resid-graph.cbor
 a.out
 a.out.*
+*.testbin*

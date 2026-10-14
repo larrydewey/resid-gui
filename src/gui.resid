@@ -25,7 +25,7 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Focused | Blurred;
 
 // What the program wants on screen. A widget is a value, so two equal models
 // give two equal display lists and therefore identical pixels.
-type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Padding(Int, Widget) | Spacer;
+type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget)) | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Widget) | Bitmap(Int, Int, Str) | Slider(Int, Msg) | Spacer;
 
 // A program's application: a model, a pure step over events, a pure view.
 behavior App(M) {

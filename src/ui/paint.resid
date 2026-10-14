@@ -10,8 +10,14 @@ pub List(DrawOp) paint_widget(Widget w, Rect r) {
         TextInput(value, _, _) => [OpFill(r, Color { .b = 255, .g = 255, .r = 255, .a = 255 })].concat([OpText(r.x + 4, r.y + 4, value, Color { .b = 0, .g = 0, .r = 0, .a = 255 })]),
         Row(xs) => paint_row(xs, r, 0),
         Column(xs) => paint_col(xs, r, 0),
+        Stack(xs) => paint_stack(xs, r, 0),
+        Align(ax, ay, child) => paint_widget(child, Rect { .x = r.x + ax, .y = r.y + ay, .w = r.w, .h = r.h }),
+        Scroll(child) => paint_widget(child, r),
         Padding(n, child) => paint_widget(child, Rect { .x = r.x + n, .y = r.y + n, .w = r.w - (2 * n), .h = r.h - (2 * n) }),
-        Spacer => []
+        Bitmap(w, h, _) => [OpFill(r, Color { .b = 200, .g = 200, .r = 200, .a = 255 })],
+        Slider(value, _) => [OpFill(Rect { .x = r.x, .y = r.y + (r.h / 2), .w = value, .h = 2 }, Color { .b = 60, .g = 60, .r = 60, .a = 255 })],
+        Spacer => [],
+        _ => []
     };
 }
 
@@ -27,4 +33,10 @@ List(DrawOp) paint_col(List(Widget) xs, Rect r, Int i) {
     Int h = if (xs.len() == 0) { r.h } else { r.h / xs.len() };
     Rect rr = Rect { .x = r.x, .y = r.y + (i * h), .w = r.w, .h = h };
     return paint_widget(xs[i], rr).concat(paint_col(xs, r, i + 1));
+}
+
+
+List(DrawOp) paint_stack(List(Widget) xs, Rect r, Int i) {
+    if (i >= xs.len()) { return []; }
+    return paint_widget(xs[i], r).concat(paint_stack(xs, r, i + 1));
 }

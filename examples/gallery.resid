@@ -1,0 +1,14 @@
+import "../src/gui.resid";
+import "../src/gfx/color.resid";
+
+Int gallery_init() { return 0; }
+Int gallery_update(Int m, Event e) { return match (e) { AppMsg(msg) => m, _ => m }; }
+Widget gallery_view(Int m) {
+    return Column([Text("Gallery"), Row([Button("a", Clicked), Button("b", Toggled)]), Column([Stack([Text("layer"), Text("second")])]), Bitmap(4, 4, "demo"), Slider(m, Clicked)]);
+}
+App(Int) = { .init = gallery_init, .update = gallery_update, .view = gallery_view };
+
+@requires(display)
+Int main() {
+    return gui_run(WindowOptions { .title = "Gallery", .width = 320, .height = 200, .resizable = true });
+}

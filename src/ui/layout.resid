@@ -27,6 +27,11 @@ pub Int desired_width(Widget w) {
         Button(label, _) => str_len_proxy(label) * 8 + 16,
         Checkbox(label, _, _) => str_len_proxy(label) * 8 + 28,
         TextInput(v, _, _) => if (v.len() * 8 + 8 < 40) { 40 } else { v.len() * 8 + 8 },
+        Stack(xs) => max_desired_width(xs),
+        Align(_, _, child) => desired_width(child),
+        Scroll(child) => desired_width(child),
+        Bitmap(w, _, _) => w,
+        Slider(_, _) => 100,
         Spacer => 0,
         Padding(n, child) => desired_width(child) + (2 * n),
         Row(xs) => sum_desired_width(xs, xs.len()) + ((xs.len() - 1) * 2),
@@ -41,6 +46,11 @@ pub Int desired_height(Widget w) {
         Button(_, _) => 24,
         Checkbox(_, _, _) => 20,
         TextInput(_, _, _) => 24,
+        Stack(xs) => max_desired_height(xs),
+        Align(_, _, child) => desired_height(child),
+        Scroll(child) => desired_height(child),
+        Bitmap(_, h, _) => h,
+        Slider(_, _) => 16,
         Spacer => 0,
         Padding(n, child) => desired_height(child) + (2 * n),
         Row(xs) => max_desired_height(xs),
@@ -83,8 +93,19 @@ pub LayoutNode layout(Widget w, Constraints c) {
     if (match (w) { Column(xs) => true, _ => false }) {
         return layout_col(w, c);
     }
+    if (match (w) { Stack(xs) => true, _ => false }) {
+        return layout_stack(w, c);
+    }
+    if (match (w) { Align(ax, ay, child) => true, _ => false }) {
+        return layout_align(w, c);
+    }
     if (match (w) { Padding(n, child) => true, _ => false }) {
         return layout_padding(w, c);
+    }
+    if (match (w) { Scroll(child) => true, _ => false }) {
+        Widget ch = child_of(w);
+        LayoutNode n = layout(ch, c);
+        return LayoutNode { .widget = w, .rect = n.rect, .children = n.children };
     }
     if (match (w) { Spacer => true, _ => false }) {
         return layout_spacer(w, c);
@@ -115,6 +136,47 @@ LayoutNode layout_spacer(Widget w, Constraints c) {
     Int rh = clamp_int(0, c.minh, c.maxh);
     return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [] };
 }
+LayoutNode layout_stack(Widget w, Constraints c) {
+    List(Widget) xs = match (w) { Stack(xs) => xs, _ => [] };
+    return layout_stack_children(w, xs, c);
+}
+LayoutNode layout_stack_children(Widget w, List(Widget) xs, Constraints c) {
+    Int n = xs.len();
+    if (n <= 0) {
+        return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = clamp_int(0, c.minw, c.maxw), .h = clamp_int(0, c.minh, c.maxh) }, .children = [] };
+    }
+    List(LayoutNode) kids = layout_stack_kids(xs, n, 0, c, []);
+    Int maxw = max_rectw(kids, 0, 0);
+    Int maxh = max_recth(kids, 0, 0);
+    Int rw = clamp_int(maxw, c.minw, c.maxw);
+    Int rh = clamp_int(maxh, c.minh, c.maxh);
+    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = kids };
+}
+List(LayoutNode) layout_stack_kids(List(Widget) xs, Int n, Int i, Constraints c, List(LayoutNode) acc) {
+    if (i >= n) { return acc; }
+    LayoutNode child = layout(xs[i], constraints_all(0, c.maxw, 0, c.maxh));
+    return layout_stack_kids(xs, n, i + 1, c, acc.concat([child]));
+}
+LayoutNode layout_align(Widget w, Constraints c) {
+    return match (w) {
+        Align(ax, ay, child) => layout_align_child(w, c, ax, ay, child),
+        _ => layout_spacer(w, c)
+    };
+}
+LayoutNode layout_align_child(Widget w, Constraints c, Int ax, Int ay, Widget child) {
+    LayoutNode cn = layout(child, c);
+    LayoutNode shifted = shift_node(cn, ax, ay);
+    Int rw = clamp_int(cn.rect.w + ax, c.minw, c.maxw);
+    Int rh = clamp_int(cn.rect.h + ay, c.minh, c.maxh);
+    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [shifted] };
+}
+Widget child_of(Widget w) {
+    return match (w) {
+        Scroll(child) => child,
+        _ => Spacer
+    };
+}
+
 
 LayoutNode layout_row(Widget w, Constraints c) {
     return match (w) {

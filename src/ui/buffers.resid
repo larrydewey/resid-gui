@@ -1,0 +1,18 @@
+import "../gui.resid";
+
+pub type DoubleBuffer = { Int front; Int back; Int count; };
+
+pub DoubleBuffer buffer_new() {
+    return DoubleBuffer { .front = 0, .back = 1, .count = 2 };
+}
+
+pub DoubleBuffer buffer_swap(DoubleBuffer b) {
+    return DoubleBuffer { .front = b.back, .back = b.front, .count = b.count };
+}
+
+test "buffer swaps" {
+    DoubleBuffer b = buffer_new();
+    DoubleBuffer s = buffer_swap(b);
+    expect(s.front).toEqual(1);
+    expect(s.back).toEqual(0);
+}

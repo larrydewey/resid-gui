@@ -1,0 +1,29 @@
+import "../gui.resid";
+
+pub type Timer = { Int id; Int period; Int next; Bool on; };
+
+pub Timer timer_new(Int id, Int period) { return Timer { .id = id, .period = period, .next = period, .on = true }; }
+
+pub Timer timer_reset(Timer t, Int now) {
+    return Timer { .id = t.id, .period = t.period, .next = now + t.period, .on = t.on };
+}
+
+pub Bool timer_due(Timer t, Int now) { return t.on && now >= t.next; }
+
+pub Int timer_next_due(List(Timer) xs, Int i, Int best) {
+    if (i >= xs.len()) { return best; }
+    if (!xs[i].on) { return timer_next_due(xs, i + 1, best); }
+    Int cand = xs[i].next;
+    Int next_best = if (best < 0) { cand } else { if (cand < best) { cand } else { best } };
+    return timer_next_due(xs, i + 1, next_best);
+}
+
+pub Timer timer_enabled(Timer t, Bool on) {
+    return Timer { .id = t.id, .period = t.period, .next = t.next, .on = on };
+}
+
+test "timer due" {
+    Timer t = timer_new(1, 10);
+    expect(timer_due(t, 5)).toEqual(false);
+    expect(timer_due(t, 10)).toEqual(true);
+}

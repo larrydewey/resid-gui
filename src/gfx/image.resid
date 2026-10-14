@@ -24,10 +24,62 @@ pub Canvas blit_image(Canvas c, Image im, Int x0, Int y0, Int i, Int j) {
     return blit_image(next, im, x0, y0, i, j + 1);
 }
 
+pub Canvas blit_at(Canvas c, Image im, Int x0, Int y0) {
+    return blit_image(c, im, x0, y0, 0, 0);
+}
+
 test "image shape" {
     Image im = image_new(2, 2);
     expect(im.px.len()).toEqual(16);
     Canvas c = canvas_new(4, 4);
-    Canvas c2 = blit_image(c, im, 1, 1, 0, 0);
+    Canvas c2 = blit_at(c, im, 1, 1);
     expect(c2.px.len()).toEqual(64);
+}
+
+// ─── Native image decode (optional, requires native_image capability) ───
+
+// Native module binding - returns packed image bytes
+// Result format: [w][h][channels][pixels...] (BGRA premultiplied)
+// @link("image_decode") Bytes(16777216) image_decode_native(Bytes(16777216) data, Int len) {}
+
+/// Result of native image decode
+pub type DecodedImage = {
+    Int w;
+    Int h;
+    Int channels;
+    List(Int) pixels; // premultiplied BGRA
+};
+
+/// Unpack native image decode result
+pub DecodedImage unpack_image(Bytes(16777216) packed, Int len) {
+    if (len < 12) { return empty_image(); }
+    
+    Int w = packed[0] | (packed[1] << 8) | (packed[2] << 16) | (packed[3] << 24);
+    Int h = packed[4] | (packed[5] << 8) | (packed[6] << 16) | (packed[7] << 24);
+    Int channels = packed[8] | (packed[9] << 8) | (packed[10] << 16) | (packed[11] << 24);
+    
+    List(Int) pixels = unpack_pixels(packed, len, 12, w * h * channels, 0, []);
+    
+    return DecodedImage { .w = w, .h = h, .channels = channels, .pixels = pixels };
+}
+
+List(Int) unpack_pixels(Bytes(16777216) packed, Int len, Int offset, Int count, Int i, List(Int) acc) {
+    if (i >= count) { return acc; }
+    if (offset >= len) { return acc; }
+    return unpack_pixels(packed, len, offset + 1, count, i + 1, acc.concat([packed[offset]]));
+}
+
+DecodedImage empty_image() {
+    return DecodedImage { .w = 0, .h = 0, .channels = 0, .pixels = [] };
+}
+
+/// Convert DecodedImage to Image (Canvas-compatible)
+pub Image decoded_to_image(DecodedImage d) {
+    return Image { .w = d.w, .h = d.h, .px = d.pixels };
+}
+
+test "unpack empty image" {
+    DecodedImage d = empty_image();
+    expect(d.w).toEqual(0);
+    expect(d.h).toEqual(0);
 }

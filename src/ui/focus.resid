@@ -1,0 +1,86 @@
+import "../gui.resid";
+
+pub type FocusState = {
+    List(Widget) order;
+    Int current;
+};
+
+pub FocusState focus_new(List(Widget) order) {
+    return FocusState { .order = order, .current = 0 };
+}
+
+pub Int focus_len(FocusState f) { return f.order.len(); }
+
+pub FocusState focus_next(FocusState f) {
+    if (f.order.len() == 0) { return f; }
+    Int n = f.current + 1;
+    Int i = if (n >= f.order.len()) { 0 } else { n };
+    return FocusState { .order = f.order, .current = i };
+}
+
+pub FocusState focus_prev(FocusState f) {
+    if (f.order.len() == 0) { return f; }
+    Int n = f.current - 1;
+    Int i = if (n < 0) { f.order.len() - 1 } else { n };
+    return FocusState { .order = f.order, .current = i };
+}
+
+pub Widget focus_current(FocusState f) {
+    return if (f.order.len() == 0) { Text("") } else { f.order[f.current] };
+}
+
+pub Bool focus_contains(FocusState f, Widget w, Int i) {
+    if (i >= f.order.len()) { return false; }
+    if (widget_equal(f.order[i], w)) { return true; }
+    return focus_contains(f, w, i + 1);
+}
+
+pub Bool widget_equal(Widget a, Widget b) {
+    return match (a) {
+        Text(sa) => match (b) { Text(sb) => sa == sb, _ => false },
+        Button(la, ma) => match (b) { Button(lb, mb) => (la == lb) && msg_equal(ma, mb), _ => false },
+        Checkbox(la, ca, ma) => match (b) { Checkbox(lb, cb, mb) => (la == lb) && (ca == cb) && msg_equal(ma, mb), _ => false },
+        TextInput(va, ca, ma) => match (b) { TextInput(vb, cb, mb) => (va == vb) && (ca == cb) && msg_equal(ma, mb), _ => false },
+        Spacer => match (b) { Spacer => true, _ => false },
+        Padding(na, ca) => match (b) { Padding(nb, cb) => (na == nb) && widget_equal(ca, cb), _ => false },
+        Row(xs) => match (b) { Row(ys) => widget_list_equal(xs, ys, 0), _ => false },
+        Column(xs) => match (b) { Column(ys) => widget_list_equal(xs, ys, 0), _ => false },
+        _ => false
+    };
+}
+
+Bool msg_equal(Msg a, Msg b) {
+    return match (a) {
+        Clicked => match (b) { Clicked => true, _ => false },
+        Toggled => match (b) { Toggled => true, _ => false },
+        Changed(sa) => match (b) { Changed(sb) => sa == sb, _ => false },
+        Submitted => match (b) { Submitted => true, _ => false },
+        Focused => match (b) { Focused => true, _ => false },
+        Blurred => match (b) { Blurred => true, _ => false }
+    };
+}
+
+Bool widget_list_equal(List(Widget) a, List(Widget) b, Int i) {
+    if (a.len() != b.len()) { return false; }
+    if (i >= a.len()) { return true; }
+    return widget_equal(a[i], b[i]) && widget_list_equal(a, b, i + 1);
+}
+
+test "focus contains widget by value" {
+    FocusState f = focus_new([Text("a"), Text("b")]);
+    expect(focus_contains(f, Text("b"), 0)).toEqual(true);
+    expect(focus_contains(f, Text("z"), 0)).toEqual(false);
+}
+
+test "focus wraps" {
+    FocusState f = focus_new([Text("a"), Text("b")]);
+    FocusState n = focus_next(focus_next(f));
+    expect(n.current).toEqual(0);
+    FocusState p = focus_prev(f);
+    expect(p.current).toEqual(1);
+}
+
+test "current access" {
+    FocusState f = focus_new([Text("a")]);
+    expect(widget_equal(focus_current(f), Text("a"))).toEqual(true);
+}

@@ -33,7 +33,7 @@ Int main() {
 `App(M)` and calls `gui_run`. The library turns that value into pixels on a
 real window.
 
-## Status: G2 started
+## Status: G2 operational; G3/G5/G7 architecture in progress
 
 The `display` capability landed in the Resid runtime (phase G1), so
 `@requires(display)` compiles and the Unix-socket transport with descriptor

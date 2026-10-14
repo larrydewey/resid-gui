@@ -1,0 +1,14 @@
+import "../gui.resid";
+
+// A backend value carries its protocol connection and surface handles. The
+// shared App loop in gui.resid stands in for the behavior today; this module
+// records the contract that every future backend (Wayland) must implement.
+behavior Backend(B) {
+    B connect(WindowOptions opts);
+    Bool present(B b, Int width, Int height);
+    Event next_event(B b, Int fd);
+}
+
+test "backend trait is declared" {
+    expect(1).toEqual(1);
+}

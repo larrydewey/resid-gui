@@ -1,0 +1,33 @@
+import "canvas.resid";
+import "color.resid";
+
+pub type Image = { Int w; Int h; List(Int) px; };
+
+pub Image image_new(Int w, Int h) {
+    return Image { .w = w, .h = h, .px = canvas_fill(0, w * h * 4, []) };
+}
+
+pub Canvas blit_image(Canvas c, Image im, Int x0, Int y0, Int i, Int j) {
+    if (i >= im.h) { return c; }
+    if (j >= im.w) { return blit_image(c, im, x0, y0, i + 1, 0); }
+    Int xx = x0 + j;
+    Int yy = y0 + i;
+    Canvas next = if (xx < 0 || yy < 0 || xx >= c.w || yy >= c.h) { c } else {
+        Int src = (i * im.w + j) * 4;
+        Int dst = (yy * c.w + xx) * 4;
+        List(Int) p1 = set_byte(c.px, dst + 0, im.px[src + 0]);
+        List(Int) p2 = set_byte(p1, dst + 1, im.px[src + 1]);
+        List(Int) p3 = set_byte(p2, dst + 2, im.px[src + 2]);
+        List(Int) p4 = set_byte(p3, dst + 3, im.px[src + 3]);
+        Canvas { .w = c.w, .h = c.h, .px = p4 }
+    };
+    return blit_image(next, im, x0, y0, i, j + 1);
+}
+
+test "image shape" {
+    Image im = image_new(2, 2);
+    expect(im.px.len()).toEqual(16);
+    Canvas c = canvas_new(4, 4);
+    Canvas c2 = blit_image(c, im, 1, 1, 0, 0);
+    expect(c2.px.len()).toEqual(64);
+}

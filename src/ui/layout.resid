@@ -1,0 +1,255 @@
+import "../gui.resid";
+import "../gfx/color.resid";
+
+pub type Size = { Int w; Int h; };
+
+pub type Constraints = { Int minw; Int maxw; Int minh; Int maxh; };
+
+pub type LayoutNode = {
+    Widget widget;
+    Rect rect;
+    List(LayoutNode) children;
+};
+
+pub Constraints constraints_all(Int minw, Int maxw, Int minh, Int maxh) {
+    return Constraints { .minw = minw, .maxw = maxw, .minh = minh, .maxh = maxh };
+}
+
+pub Int clamp_int(Int v, Int lo, Int hi) {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+pub Int desired_width(Widget w) {
+    return match (w) {
+        Text(s) => str_len_proxy(s) * 8 + 8,
+        Button(label, _) => str_len_proxy(label) * 8 + 16,
+        Checkbox(label, _, _) => str_len_proxy(label) * 8 + 28,
+        TextInput(v, _, _) => if (v.len() * 8 + 8 < 40) { 40 } else { v.len() * 8 + 8 },
+        Spacer => 0,
+        Padding(n, child) => desired_width(child) + (2 * n),
+        Row(xs) => sum_desired_width(xs, xs.len()) + ((xs.len() - 1) * 2),
+        Column(xs) => max_desired_width(xs),
+        _ => 10
+    };
+}
+
+pub Int desired_height(Widget w) {
+    return match (w) {
+        Text(_) => 16,
+        Button(_, _) => 24,
+        Checkbox(_, _, _) => 20,
+        TextInput(_, _, _) => 24,
+        Spacer => 0,
+        Padding(n, child) => desired_height(child) + (2 * n),
+        Row(xs) => max_desired_height(xs),
+        Column(xs) => sum_desired_height(xs) + ((xs.len() - 1) * 2),
+        _ => 10
+    };
+}
+
+Int str_len_proxy(Str s) { return s.len(); }
+
+Int sum_desired_width(List(Widget) xs, Int i) { return sum_desired_width_at(xs, i, 0); }
+Int sum_desired_width_at(List(Widget) xs, Int n, Int i) {
+    if (i >= n) { return 0; }
+    return desired_width(xs[i]) + sum_desired_width_at(xs, n, i + 1);
+}
+Int max_desired_width(List(Widget) xs) { return max_desired_width_at(xs, xs.len(), 0, 0); }
+Int max_desired_width_at(List(Widget) xs, Int n, Int i, Int acc) {
+    if (i >= n) { return acc; }
+    Int d = desired_width(xs[i]);
+    Int next = if (d > acc) { d } else { acc };
+    return max_desired_width_at(xs, n, i + 1, next);
+}
+Int max_desired_height(List(Widget) xs) { return max_desired_height_at(xs, xs.len(), 0, 0); }
+Int max_desired_height_at(List(Widget) xs, Int n, Int i, Int acc) {
+    if (i >= n) { return acc; }
+    Int d = desired_height(xs[i]);
+    Int next = if (d > acc) { d } else { acc };
+    return max_desired_height_at(xs, n, i + 1, next);
+}
+Int sum_desired_height(List(Widget) xs) { return sum_desired_height_at(xs, xs.len(), 0); }
+Int sum_desired_height_at(List(Widget) xs, Int n, Int i) {
+    if (i >= n) { return 0; }
+    return desired_height(xs[i]) + sum_desired_height_at(xs, n, i + 1);
+}
+
+pub LayoutNode layout(Widget w, Constraints c) {
+    if (match (w) { Row(xs) => true, _ => false }) {
+        return layout_row(w, c);
+    }
+    if (match (w) { Column(xs) => true, _ => false }) {
+        return layout_col(w, c);
+    }
+    if (match (w) { Padding(n, child) => true, _ => false }) {
+        return layout_padding(w, c);
+    }
+    if (match (w) { Spacer => true, _ => false }) {
+        return layout_spacer(w, c);
+    }
+    Int dw = desired_width(w);
+    Int dh = desired_height(w);
+    Int rw = clamp_int(dw, c.minw, c.maxw);
+    Int rh = clamp_int(dh, c.minh, c.maxh);
+    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [] };
+}
+
+LayoutNode layout_padding(Widget w, Constraints c) {
+    return match (w) {
+        Padding(n, child) => layout_padding_child(w, c, n, child),
+        _ => layout_spacer(w, c)
+    };
+}
+
+LayoutNode layout_padding_child(Widget w, Constraints c, Int n, Widget child) {
+    Int innermaxw = if (c.maxw < (2 * n)) { 0 } else { c.maxw - (2 * n) };
+    Int innermaxh = if (c.maxh < (2 * n)) { 0 } else { c.maxh - (2 * n) };
+    LayoutNode cn = layout(child, constraints_all(0, innermaxw, 0, innermaxh));
+    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = cn.rect.w + (2 * n), .h = cn.rect.h + (2 * n) }, .children = [cn] };
+}
+
+LayoutNode layout_spacer(Widget w, Constraints c) {
+    Int rw = clamp_int(0, c.minw, c.maxw);
+    Int rh = clamp_int(0, c.minh, c.maxh);
+    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [] };
+}
+
+LayoutNode layout_row(Widget w, Constraints c) {
+    return match (w) {
+        Row(xs) => layout_row_children(w, xs, c),
+        _ => layout_spacer(w, c)
+    };
+}
+
+LayoutNode layout_row_children(Widget w, List(Widget) xs, Constraints c) {
+    Int n = xs.len();
+    if (n <= 0) {
+        return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = clamp_int(0, c.minw, c.maxw), .h = clamp_int(0, c.minh, c.maxh) }, .children = [] };
+    }
+    Int availw = if (c.maxw < 0) { desired_width(w) } else { c.maxw };
+    Int each = availw / n;
+    List(LayoutNode) kids = layout_row_kids(xs, n, 0, each, c, []);
+    Int totalw = sum_rectw(kids, 0, 0);
+    Int maxh = max_recth(kids, 0, 0);
+    Int rw = clamp_int(totalw, c.minw, c.maxw);
+    Int rh = clamp_int(maxh, c.minh, c.maxh);
+    LayoutNode node = LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [] };
+    // offsets
+    List(LayoutNode) kids2 = offset_row(kids, 0, 0);
+    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = kids2 };
+}
+
+List(LayoutNode) layout_row_kids(List(Widget) xs, Int n, Int i, Int each, Constraints c, List(LayoutNode) acc) {
+    if (i >= n) { return acc; }
+    Constraints cc = constraints_all(0, each, c.minh, c.maxh);
+    LayoutNode child = layout(xs[i], cc);
+    return layout_row_kids(xs, n, i + 1, each, c, acc.concat([child]));
+}
+
+LayoutNode layout_col(Widget w, Constraints c) {
+    return match (w) {
+        Column(xs) => layout_col_children(w, xs, c),
+        _ => layout_spacer(w, c)
+    };
+}
+
+LayoutNode layout_col_children(Widget w, List(Widget) xs, Constraints c) {
+    Int n = xs.len();
+    if (n <= 0) {
+        return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = clamp_int(0, c.minw, c.maxw), .h = clamp_int(0, c.minh, c.maxh) }, .children = [] };
+    }
+    Int availh = if (c.maxh < 0) { desired_height(w) } else { c.maxh };
+    Int each = availh / n;
+    List(LayoutNode) kids = layout_col_kids(xs, n, 0, each, c, []);
+    Int maxw = max_rectw(kids, 0, 0);
+    Int totalh = sum_recth(kids, 0, 0);
+    Int rw = clamp_int(maxw, c.minw, c.maxw);
+    Int rh = clamp_int(totalh, c.minh, c.maxh);
+    List(LayoutNode) kids2 = offset_col(kids, 0, 0);
+    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = kids2 };
+}
+
+List(LayoutNode) layout_col_kids(List(Widget) xs, Int n, Int i, Int each, Constraints c, List(LayoutNode) acc) {
+    if (i >= n) { return acc; }
+    Constraints cc = constraints_all(c.minw, c.maxw, 0, each);
+    LayoutNode child = layout(xs[i], cc);
+    return layout_col_kids(xs, n, i + 1, each, c, acc.concat([child]));
+}
+
+Int sum_rectw(List(LayoutNode) xs, Int i, Int acc) {
+    if (i >= xs.len()) { return acc; }
+    return sum_rectw(xs, i + 1, acc + xs[i].rect.w);
+}
+Int sum_recth(List(LayoutNode) xs, Int i, Int acc) {
+    if (i >= xs.len()) { return acc; }
+    return sum_recth(xs, i + 1, acc + xs[i].rect.h);
+}
+Int max_rectw(List(LayoutNode) xs, Int i, Int acc) {
+    if (i >= xs.len()) { return acc; }
+    Int v = if (xs[i].rect.w > acc) { xs[i].rect.w } else { acc };
+    return max_rectw(xs, i + 1, v);
+}
+Int max_recth(List(LayoutNode) xs, Int i, Int acc) {
+    if (i >= xs.len()) { return acc; }
+    Int v = if (xs[i].rect.h > acc) { xs[i].rect.h } else { acc };
+    return max_recth(xs, i + 1, v);
+}
+
+List(LayoutNode) offset_row(List(LayoutNode) kids, Int i, Int x) {
+    if (i >= kids.len()) { return []; }
+    LayoutNode k = kids[i];
+    LayoutNode nk = shift_node(k, x, 0);
+    List(LayoutNode) rest = offset_row(kids, i + 1, x + k.rect.w);
+    return [nk].concat(rest);
+}
+
+LayoutNode shift_node(LayoutNode k, Int dx, Int dy) {
+    Rect r = Rect { .x = k.rect.x + dx, .y = k.rect.y + dy, .w = k.rect.w, .h = k.rect.h };
+    return LayoutNode { .widget = k.widget, .rect = r, .children = shift_nodes(k.children, dx, dy, 0, []) };
+}
+
+List(LayoutNode) shift_nodes(List(LayoutNode) ks, Int dx, Int dy, Int i, List(LayoutNode) acc) {
+    if (i >= ks.len()) { return acc; }
+    return shift_nodes(ks, dx, dy, i + 1, acc.concat([shift_node(ks[i], dx, dy)]));
+}
+
+List(LayoutNode) offset_col(List(LayoutNode) kids, Int i, Int y) {
+    if (i >= kids.len()) { return []; }
+    LayoutNode k = kids[i];
+    LayoutNode nk = shift_node(k, 0, y);
+    List(LayoutNode) rest = offset_col(kids, i + 1, y + k.rect.h);
+    return [nk].concat(rest);
+}
+
+List(LayoutNode) offset_col_children(LayoutNode k, Int x, Int y) {
+    return k.children;
+}
+
+pub Bool contains(Rect r, Int x, Int y) {
+    return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+}
+
+pub List(Widget) widget_order(LayoutNode l) {
+    List(Widget) self = [l.widget];
+    List(Widget) child = collect_order(l.children, 0, []);
+    return self.concat(child);
+}
+
+List(Widget) collect_order(List(LayoutNode) xs, Int i, List(Widget) acc) {
+    if (i >= xs.len()) { return acc; }
+    return collect_order(xs, i + 1, acc.concat(widget_order(xs[i])));
+}
+
+test "layout clamps direct node" {
+    LayoutNode n = layout(Text("hello"), constraints_all(0, 100, 0, 100));
+    expect(n.rect.w >= 8).toEqual(true);
+    expect(contains(n.rect, 1, 1)).toEqual(true);
+}
+
+test "widget order" {
+    LayoutNode n = layout(Row([Text("a"), Text("b")]), constraints_all(0, 1000, 0, 1000));
+    List(Widget) xs = widget_order(n);
+    expect(xs.len()).toEqual(3);
+}

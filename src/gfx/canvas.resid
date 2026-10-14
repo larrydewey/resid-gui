@@ -11,17 +11,17 @@ pub Canvas canvas_new(Int ww, Int hh) {
     return Canvas { .w = ww, .h = hh, .px = canvas_fill(0, ww * hh * 4, []) };
 }
 
-List(Int) canvas_fill(Int i, Int n, List(Int) acc) {
+pub List(Int) canvas_fill(Int i, Int n, List(Int) acc) {
     if (i >= n) { return acc; }
     return canvas_fill(i + 1, n, acc.concat([0]));
 }
 
-List(Int) set_byte(List(Int) xs, Int i, Int v) {
+pub List(Int) set_byte(List(Int) xs, Int i, Int v) {
     if (i < 0 || i >= xs.len()) { return xs; }
     return set_byte_at(xs, i, v, 0, []);
 }
 
-List(Int) set_byte_at(List(Int) xs, Int i, Int v, Int j, List(Int) acc) {
+pub List(Int) set_byte_at(List(Int) xs, Int i, Int v, Int j, List(Int) acc) {
     if (j >= xs.len()) { return acc; }
     Int byte = if (j == i) { v & 255 } else { xs[j] & 255 };
     return set_byte_at(xs, i, v, j + 1, acc.concat([byte]));

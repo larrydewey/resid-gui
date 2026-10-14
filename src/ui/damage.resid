@@ -1,0 +1,60 @@
+import "../gui.resid";
+import "../gfx/draw.resid";
+import "../gfx/color.resid";
+
+pub Bool draw_op_equal(DrawOp a, DrawOp b) {
+    return match (a) {
+        OpFill(ra, ca) => match (b) { OpFill(rb, cb) => rect_equal(ra, rb) && color_equal(ca, cb), _ => false },
+        OpText(xa, ya, sa, ca) => match (b) { OpText(xb, yb, sb, cb) => xa == xb && ya == yb && sa == sb && color_equal(ca, cb), _ => false },
+        OpClipPush(ra) => match (b) { OpClipPush(rb) => rect_equal(ra, rb), _ => false },
+        OpClipPop => match (b) { OpClipPop => true, _ => false }
+    };
+}
+
+pub Bool rect_equal(Rect a, Rect b) {
+    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+pub Bool color_equal(Color a, Color b) {
+    return a.b == b.b && a.g == b.g && a.r == b.r && a.a == b.a;
+}
+
+pub Bool draw_lists_equal(List(DrawOp) a, List(DrawOp) b) {
+    return draw_lists_equal_at(a, b, 0);
+}
+
+pub Bool draw_lists_equal_at(List(DrawOp) a, List(DrawOp) b, Int i) {
+    if (a.len() != b.len()) { return false; }
+    if (i >= a.len()) { return true; }
+    return draw_op_equal(a[i], b[i]) && draw_lists_equal_at(a, b, i + 1);
+}
+
+pub Int first_changed_op(List(DrawOp) old, List(DrawOp) now, Int i) {
+    if (i >= old.len() || i >= now.len()) { return -1; }
+    if (!draw_op_equal(old[i], now[i])) { return i; }
+    return first_changed_op(old, now, i + 1);
+}
+
+pub List(Int) changed_ops(List(DrawOp) old, List(DrawOp) now) {
+    List(Int) out = [];
+    Int i = 0;
+    return changed_ops_at(old, now, i, out);
+}
+
+List(Int) changed_ops_at(List(DrawOp) old, List(DrawOp) now, Int i, List(Int) acc) {
+    if (i >= old.len() || i >= now.len()) { return acc; }
+    List(Int) next = if (draw_op_equal(old[i], now[i])) { acc } else { acc.concat([i]) };
+    return changed_ops_at(old, now, i + 1, next);
+}
+
+test "damage sees change" {
+    List(DrawOp) a = [OpFill(Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, Color { .b = 1, .g = 2, .r = 3, .a = 4 })];
+    List(DrawOp) b = [OpFill(Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, Color { .b = 2, .g = 2, .r = 3, .a = 4 })];
+    expect(draw_lists_equal(a, b)).toEqual(false);
+    expect(first_changed_op(a, b, 0)).toEqual(0);
+}
+
+test "equal lists" {
+    List(DrawOp) a = [OpClipPop];
+    expect(draw_lists_equal(a, a)).toEqual(true);
+}

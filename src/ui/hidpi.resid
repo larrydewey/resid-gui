@@ -1,0 +1,45 @@
+import "../gfx/color.resid";
+
+// HiDPI support: compute scale factor from X server screen info
+// In X11, HiDPI is determined by the screen resolution and physical size
+// Scale = 96 / (dpi) - if dpi > 144, scale = 2
+
+pub Int hi_dpi_scale(Int dpi) {
+    if (dpi >= 288) { return 4; }
+    if (dpi >= 192) { return 3; }
+    if (dpi >= 144) { return 2; }
+    return 1;
+}
+
+pub Int device_to_logical(Int physical, Int scale) {
+    return physical / scale;
+}
+
+pub Int logical_to_device(Int logical, Int scale) {
+    return logical * scale;
+}
+
+pub Rect scale_rect(Rect r, Int scale) {
+    return Rect { .x = r.x * scale, .y = r.y * scale, .w = r.w * scale, .h = r.h * scale };
+}
+
+test "hi_dpi scale" {
+    expect(hi_dpi_scale(96)).toEqual(1);
+    expect(hi_dpi_scale(144)).toEqual(2);
+    expect(hi_dpi_scale(192)).toEqual(3);
+    expect(hi_dpi_scale(288)).toEqual(4);
+}
+
+test "device to logical" {
+    expect(device_to_logical(192, 2)).toEqual(96);
+    expect(logical_to_device(96, 2)).toEqual(192);
+}
+
+test "scale rect" {
+    Rect r = Rect { .x = 4, .y = 8, .w = 100, .h = 200 };
+    Rect s = scale_rect(r, 2);
+    expect(s.x).toEqual(8);
+    expect(s.y).toEqual(16);
+    expect(s.w).toEqual(200);
+    expect(s.h).toEqual(400);
+}

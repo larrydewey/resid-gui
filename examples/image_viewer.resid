@@ -1,0 +1,43 @@
+import "../src/gui.resid";
+import "../src/gfx/color.resid";
+import "../src/gfx/image.resid";
+import "../src/gfx/png.resid";
+
+// Simple image viewer - demonstrates Image widget and native image decode fallback
+Int viewer_init() { return 0; }
+
+Int viewer_update(Int m, Event e) {
+    return m;
+}
+
+Widget viewer_view(Int m) {
+    return Column([
+        Text("Image Viewer (fallback)"),
+        // In a real app with native_image capability, you'd load from file:
+        // Image img = decoded_to_image(unpack_image(native_decode(file_bytes), len));
+        // For now, create a synthetic gradient image as Bitmap
+        Bitmap(32, 32, "gradient")
+    ]);
+}
+
+// Create a simple gradient image (as bytes for Bitmap)
+List(Int) gradient_img(Int w, Int h) {
+    return gradient_img_loop(w, h, 0, []);
+}
+
+List(Int) gradient_img_loop(Int w, Int h, Int i, List(Int) acc) {
+    if (i >= w * h) { return acc; }
+    Int x = i % w;
+    Int y = i / w;
+    Int r = (x * 255) / w;
+    Int g = (y * 255) / h;
+    Int b = ((x + y) * 255) / (w + h);
+    return gradient_img_loop(w, h, i + 1, acc.concat([r, g, b, 255]));
+}
+
+App(Int) = { .init = viewer_init, .update = viewer_update, .view = viewer_view };
+
+@requires(display)
+Int main() {
+    return gui_run(WindowOptions { .title = "Image Viewer", .width = 320, .height = 240, .resizable = true });
+}

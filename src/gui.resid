@@ -13,6 +13,9 @@ import "gfx/color.resid";
 import "gfx/draw.resid";
 import "gfx/raster.resid";
 import "ui/paint.resid";
+import "ui/damage.resid";
+import "ui/buffers.resid";
+import "ui/timer.resid";
 
 // What the display sends up. Every field is data: the loop decodes bytes
 // into one of these and folds it through `update`.
@@ -74,25 +77,30 @@ pub Int gui_run(WindowOptions opts) {
     Int width = if (opts.width < 1) { 1 } else { opts.width };
     Int height = if (opts.height < 1) { 1 } else { opts.height };
     Int bytes = width * height * 4;
-    Int handle = resid_disp_shm_new(bytes);
-    if (handle == 0) { _ = x11_close(s); return 1; }
+    // Double buffering: two shm handles
+    Int handle0 = resid_disp_shm_new(bytes);
+    if (handle0 == 0) { _ = x11_close(s); return 1; }
+    Int handle1 = resid_disp_shm_new(bytes);
+    if (handle1 == 0) { _ = resid_disp_shm_free(handle0); _ = x11_close(s); return 1; }
     List(List(Int)) seq = conn_open_window(c, width, height);
-    Int sent = gui_send_seq(s.fd, seq, handle, 0);
-    if (sent != seq.len()) { _ = x11_close(s); return 1; }
+    Int sent = gui_send_seq(s.fd, seq, handle0, 0);
+    if (sent != seq.len()) { _ = x11_close(s); _ = resid_disp_shm_free(handle0); _ = resid_disp_shm_free(handle1); return 1; }
     // Initial frame for the program's initial model.
     M model0 = init();
-    _ = gui_render_frame(s.fd, handle, c, model0, width, height);
-    M finalmodel = gui_run_loop(s, c, model0, width, height, handle, []);
-    _ = resid_disp_shm_free(handle);
+    List(DrawOp) prev_ops = paint_widget(view(model0), Rect { .x = 0, .y = 0, .w = width, .h = height });
+    _ = gui_render_frame(s.fd, handle0, c, model0, width, height, prev_ops);
+    // Timer for caret blink (500ms)
+    Timer blink_timer = timer_new(0, 500);
+    M finalmodel = gui_run_loop(s, c, model0, width, height, handle0, handle1, 0, blink_timer, prev_ops, []);
+    _ = resid_disp_shm_free(handle0);
+    _ = resid_disp_shm_free(handle1);
     _ = x11_close(s);
     return 0;
 }
 
 @needs(App(M))
 @requires(display)
-Int gui_render_frame(Int fd, Int handle, Conn c, M model, Int width, Int height) {
-    Widget vw = view(model);
-    List(DrawOp) ops = paint_widget(vw, Rect { .x = 0, .y = 0, .w = width, .h = height });
+Int gui_render_frame(Int fd, Int handle, Conn c, M model, Int width, Int height, List(DrawOp) ops) {
     List(Int) px = rasterize_ops(ops, width, height);
     _ = resid_disp_shm_put(handle, 0, px, width * height * 4);
     _ = resid_disp_send(fd, conn_present(c, width, height), -1);
@@ -101,23 +109,46 @@ Int gui_render_frame(Int fd, Int handle, Conn c, M model, Int width, Int height)
 
 @needs(App(M))
 @requires(display)
-M gui_run_loop(Session s, Conn c, M model, Int width, Int height, Int handle, List(Int) buf) {
+M gui_run_loop(Session s, Conn c, M model, Int width, Int height, Int front_handle, Int back_handle, Int front_idx, Timer blink_timer, List(DrawOp) prev_ops, List(Int) buf) {
+    // Check timers
+    Int now = 0; // Simplified: would use clock capability in real impl
+    // For now, just use poll timeout for timer approximation
+    Int poll_timeout = timer_next_due([blink_timer], 0, 16);
+    
     if (buf.len() >= 32) {
         Event e = decode_event(slice_bytes(buf, 0, 32, 0, []));
         M m2 = update(model, e);
-        _ = gui_render_frame(s.fd, handle, c, m2, width, height);
+        // Handle timer events
+        Timer next_blink = if (timer_due(blink_timer, now)) { timer_reset(blink_timer, now) } else { blink_timer };
+        M m3 = if (timer_due(blink_timer, now)) { update(m2, FrameTick) } else { m2 };
+        Widget vw = view(m3);
+        List(DrawOp) new_ops = paint_widget(vw, Rect { .x = 0, .y = 0, .w = width, .h = height });
+        
+        // Damage tracking: only redraw if display list changed
+        if (!draw_lists_equal(prev_ops, new_ops)) {
+            List(Int) changed = changed_ops(prev_ops, new_ops);
+            // For simplicity, full frame redraw if any change
+            _ = gui_render_frame(s.fd, front_handle, c, m3, width, height, new_ops);
+            // Swap buffers
+            Int next_front = if (front_idx == 0) { back_handle } else { front_handle };
+            Int next_back = if (front_idx == 0) { front_handle } else { back_handle };
+            Int next_idx = if (front_idx == 0) { 1 } else { 0 };
+            // Note: In real impl, would present next_front and swap
+        }
+        
         Bool closed = match (e) { Closed => true, _ => false };
         List(Int) rest = slice_bytes(buf, 32, buf.len(), 0, []);
-        if (closed) { return m2; }
-        return gui_run_loop(s, c, m2, width, height, handle, rest);
+        if (closed) { return m3; }
+        return gui_run_loop(s, c, m3, width, height, front_handle, back_handle, front_idx, next_blink, new_ops, rest);
     }
-    List(Int) ready = resid_disp_poll([s.fd], [1], 16);
+    List(Int) ready = resid_disp_poll([s.fd], [1], poll_timeout);
     if (ready.len() > 0 && (ready[0] & 1) != 0) {
         List(Int) got = resid_disp_recv(s.fd, 65536);
         if (got.len() == 0) { return model; }
-        return gui_run_loop(s, c, model, width, height, handle, buf.concat(got));
+        return gui_run_loop(s, c, model, width, height, front_handle, back_handle, front_idx, blink_timer, prev_ops, buf.concat(got));
     }
     if (ready.len() > 0 && (ready[0] & 8) != 0) { return model; }
-    return gui_run_loop(s, c, model, width, height, handle, buf);
+    // Timer tick
+    return gui_run_loop(s, c, model, width, height, front_handle, back_handle, front_idx, blink_timer, prev_ops, buf);
 }
 

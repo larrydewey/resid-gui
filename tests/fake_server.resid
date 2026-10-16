@@ -21,6 +21,7 @@ import "../src/x11/events.resid";
 import "../src/x11/stream.resid";
 import "../src/x11/connect.resid";
 import "../src/x11/x11.resid";
+import "../src/backend/keymap.resid";
 
 /// The extension opcode and first event the fake server gives MIT-SHM.
 Int fake_shm() { return 130; }
@@ -42,7 +43,22 @@ List(Int) answer(List(Int) r, Int seq) {
         return reply_words(seq, [1 | (fake_shm() << 8) | (fake_shm_event() << 16)]);
     }
     if (op == fake_shm() && r[1] == shm_query_version()) { return reply_words(seq, [1 | (2 << 16)]); }
+    if (op == op_get_keyboard_mapping()) { return mapping_reply(seq, r[4], r[5]); }
     return [];
+}
+
+/// A keyboard mapping of two keysyms per key code, all empty but key code
+/// 38 (evdev 30, US `a`), which types q and Q as on a French layout.
+List(Int) mapping_reply(Int seq, Int first, Int count) {
+    ListBuf(Int) h = enc_words(enc_word16(enc_byte(enc_byte(enc_new(), 1), 2), seq), [count * 2]);
+    ListBuf(Int) b = enc_bytes(h, 24, 0);
+    return enc_finish(mapping_syms(b, first, 0, count));
+}
+
+ListBuf(Int) mapping_syms(ListBuf(Int) b, Int first, Int i, Int count) {
+    if (i >= count) { return b; }
+    List(Int) two = if (first + i == 38) { [113, 81] } else { [0, 0] };
+    return mapping_syms(enc_words(b, two), first, i + 1, count);
 }
 
 /// What the server saw.
@@ -93,6 +109,7 @@ Int client(Int fd) {
     if (!x.alive) { return 2; }
     if (x.shm != fake_shm() || x.shm_event != fake_shm_event()) { return 3; }
     if (x.w != 64 || x.h != 48 || x.wid != 0x00400001) { return 4; }
+    if (key_text_in(x.keys.map, 30, mods_none()) != "q" || key_text_in(x.keys.map, 30, mods_from_mask(1, 0)) != "Q") { return 6; }
     List(DrawOp) ops = [OpFill(Rect { .x = 8, .y = 8, .w = 16, .h = 16 }, rgb(255, 0, 0))];
     X11 y = x11_present(x, Frame { .ops = ops, .scale = 1, .font = font_builtin() }, [Rect { .x = 0, .y = 0, .w = 64, .h = 48 }]);
     return if (y.s0.busy) { 0 } else { 5 };
@@ -114,6 +131,7 @@ test "the X11 backend opens a window and presents through MIT-SHM" {
     expect(seen.bad).toEqual(false);
     expect(r else { -1 }).toEqual(0);
     expect(has(seen.ops, op_intern_atom(), 0)).toEqual(true);
+    expect(has(seen.ops, op_get_keyboard_mapping(), 0)).toEqual(true);
     expect(has(seen.ops, op_create_window(), 0)).toEqual(true);
     expect(has(seen.ops, op_change_property(), 0)).toEqual(true);
     expect(has(seen.ops, op_create_gc(), 0)).toEqual(true);

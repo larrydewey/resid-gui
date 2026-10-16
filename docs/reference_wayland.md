@@ -17,18 +17,15 @@ generated bindings. One xdg-shell toplevel, frames through `wl_shm`.
 ```
 
 `wl_start` connects to `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` (through
-`resid_disp_connect`), asks for the registry and a sync, and binds
+`resid_disp_connect_wayland`, which also honours `WAYLAND_SOCKET`), asks for the registry and a sync, and binds
 `wl_compositor` (up to version 6, for `preferred_buffer_scale`), `wl_shm`,
 `xdg_wm_base`, `wl_seat` (up to 5) and, when offered,
 `wp_cursor_shape_manager_v1`. It creates the surface, xdg surface and
 toplevel, sets the title and app id (and equal minimum and maximum sizes
 for a fixed-size window), commits, and waits for the first configure.
 
-`resid_disp_connect` falls back to the X11 socket when no compositor
-answers, and does not say which it returned. An X server closes a
-connection whose first byte is not a byte-order mark, so a peer that hangs
-up before announcing any global is taken to be X11, and `gui_run` moves on
-to the X11 backend.
+With no compositor to connect to, `wl_start` fails with an empty `err`
+and `gui_run` moves on to the X11 backend.
 
 ## Frames
 
@@ -48,11 +45,16 @@ device size and repaints everything.
 `wl_pointer` enter, motion, button (272 left, 274 middle, 273 right become
 1, 2, 3) and axis (one `Wheel` notch per event); the cursor is set to the
 default shape on enter when the cursor-shape protocol is there.
-`wl_keyboard` key, modifiers (Shift, Caps Lock, Ctrl, Alt), enter and
-leave (`Focused`, `Blurred`) and repeat info: a held key repeats at the
-compositor's rate after its delay, on the monotonic clock. The keymap's
-descriptor is closed unread and keys are typed through the US layout (see
-the README's open items). `xdg_wm_base.ping` is answered,
+`wl_keyboard` keymap, key, modifiers (Shift, Caps Lock, Ctrl, Alt, Num
+Lock, AltGr), enter and leave (`Focused`, `Blurred`) and repeat info: a
+held key repeats at the compositor's rate after its delay, on the
+monotonic clock. The keymap arrives as XKB text in a descriptor, read once
+with `resid_disp_fd_read` and parsed by `src/backend/xkb.resid` (key
+codes, and each key's first group's four levels); until it arrives, and
+if it does not parse, keys type the US layout. A new keymap event (a
+layout switch, or a tool such as `wtype` uploading its own) replaces it.
+A key whose keysym names a function key is reported as that key's evdev
+code, and a key that types text inserts it whatever its code. `xdg_wm_base.ping` is answered,
 `xdg_toplevel.close` is `Closed`, and `wl_display.error` ends the
 connection with its message.
 

@@ -21,6 +21,7 @@ pub Int op_create_gc() { return 55; }
 pub Int op_free_gc() { return 60; }
 pub Int op_put_image() { return 72; }
 pub Int op_query_extension() { return 98; }
+pub Int op_get_keyboard_mapping() { return 101; }
 pub Int op_no_operation() { return 127; }
 
 // MIT-SHM's minor opcodes. Its major opcode is whatever `QueryExtension`
@@ -128,6 +129,12 @@ pub List(Int) size_hints_fixed(Int w, Int h) {
 pub List(Int) req_query_extension(Str name) {
     ListBuf(Int) b = enc_words16(enc_new(), [str_len(name), 0]);
     return req(op_query_extension(), 0, enc_finish(enc_str_at(b, name, 0)));
+}
+
+/// `GetKeyboardMapping` for `count` key codes from `first`: the keysyms
+/// each one types, which is how the client learns the server's layout.
+pub List(Int) req_get_keyboard_mapping(Int first, Int count) {
+    return req(op_get_keyboard_mapping(), 0, [first, count, 0, 0]);
 }
 
 // ─── Images ─────────────────────────────────────────────────────────

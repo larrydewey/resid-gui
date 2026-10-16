@@ -83,7 +83,8 @@ type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int
 Coordinates are logical pixels. Buttons are 1 (left), 2 (middle) and
 3 (right). `Wheel(dx, dy)` is one notch per event, with a positive `dy`
 meaning down. Key codes are Linux evdev codes (`KEY_A` is 30) on both
-backends, and the `Str` is the text the key types under the US layout.
+backends, and the `Str` is the text the key types under the server's
+keyboard layout.
 `FrameTick` arrives every 500 ms (it also blinks the caret). `Closed` is
 the last event `update` sees.
 

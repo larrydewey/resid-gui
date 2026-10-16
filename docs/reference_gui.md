@@ -130,9 +130,25 @@ into it redraws the damage plus what it missed.
 ## `backend/keymap.resid`
 
 ```resid
-pub type Mods = { Bool shift; Bool caps; Bool ctrl; Bool alt; };
+pub type Mods = { Bool shift; Bool caps; Bool ctrl; Bool alt; Bool altgr; Bool num; };
+pub Mods mods_from_mask(Int held, Int locked)
+pub type Keymap = { List(Int) levels; };
+pub type Keys = { Mods mods; Keymap map; };
+pub Keymap keymap_us()
+pub Keymap keymap_of(List(Int) levels)
+pub Str key_text_in(Keymap k, Int code, Mods m)
 pub Str key_text(Int code, Mods m)
 pub Int key_enter() ... key_delete()
 ```
 
-Evdev codes to text under the US layout. Ctrl or Alt held types nothing.
+Evdev codes to text. A `Keymap` holds four code points per evdev code:
+plain, Shift, AltGr, and AltGr with Shift. Caps Lock capitalizes a key
+whose two levels are a letter's small and capital forms; a keypad key
+(nothing plain, a digit shifted) swaps them under Num Lock. Ctrl or Alt
+held types nothing. `key_text` is `key_text_in` under the US layout.
+
+`backend/keysym.resid` turns keysyms (numbers from X11, names from XKB) into
+code points: printable ASCII, Latin-1, the euro sign, the keypad, and any
+keysym written in the Unicode range or as `U<hex>`. `backend/xkb.resid`
+parses a compositor's XKB keymap text into a `Keymap` (`xkb_keymap`, `None`
+for text that is not one).

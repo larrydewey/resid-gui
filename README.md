@@ -57,31 +57,31 @@ optional native font module; images (PNG, JPEG, BMP, GIF, TGA) decode
 through the native image module. Both run sandboxed, once, at start-up
 (docs/reference_native.md).
 
-Open items:
+Keys type what the server's layout says they type: the Wayland backend
+reads the compositor's XKB keymap (`src/backend/xkb.resid`) and the X11
+backend asks for the keyboard mapping, both down to a `Keymap` with four
+levels per key (plain, Shift, AltGr, AltGr with Shift), Caps Lock and the
+keypad's Num Lock. The X11 backend authenticates with the
+`MIT-MAGIC-COOKIE-1` the session's authority file holds for `$DISPLAY`,
+and each backend connects to its own protocol's socket.
 
-- **Keyboard layouts.** Keys are typed through a built-in US layout. A
-  Wayland compositor sends its keymap as a file descriptor, and Resid has no
-  builtin that reads a received descriptor, so the keymap is closed unread;
-  that needs a runtime addition (`resid_disp_fd_read` or a read-only map).
-- **X11 authorization.** The X11 backend connects without a cookie, which
-  Xwayland, Xephyr, Xnest and servers started without `-auth` accept. A
-  server that demands `MIT-MAGIC-COOKIE-1` needs `~/.Xauthority`, which the
-  `display` family should read itself, like `$DISPLAY`: another runtime
-  addition.
-- **Choosing a backend.** `resid_disp_connect` prefers Wayland and falls
-  back to X11 without saying which it returned; the Wayland backend tells
-  them apart by the first exchange. `WAYLAND_DISPLAY=` forces X11, and
-  `gui_run_x11` skips Wayland. A builtin per protocol would be cleaner.
-- **Speed.** The rasterizer is plain Resid lists, about 0.4 s for a whole
-  2700x2200 frame; damage tracking keeps ordinary frames to the changed
-  rectangles. `Vec` lanes and packed pixels are the next step
-  (PLAN-gui.md G0, G3's 4 ms gate).
+These need four `display` builtins from Resid's `display-builtins` branch
+(`resid_disp_connect_wayland`, `resid_disp_connect_x11`,
+`resid_disp_fd_read`, `resid_disp_x11_auth`), which also fixes
+`resid_disp_recv_fd` handing back the wrong descriptor. Until that branch
+is merged and installed, build with its compiler:
+`RESIDC=../resid.worktrees/display/build/boot/residc tests/run.sh`.
+
+Speed: a whole 2700x2200 frame of 800 draw ops rasterizes in about 70 ms
+and copies into shared memory in about 30 ms, and an ordinary frame
+redraws only its damaged rectangles, typically well under a millisecond
+(`bench/raster_bench.resid`).
 
 | Layer | What it is |
 |---|---|
 | `src/app.resid` | `App(M)`, `Event`, `Msg`, `Widget`, `WindowOptions` |
 | `src/gui.resid` | `gui_run` and the loop, written once against `Backend(B)` |
-| `src/backend/` | the `Backend(B)` behavior, shared-buffer slots, the US keymap |
+| `src/backend/` | the `Backend(B)` behavior, shared-buffer slots, keymaps (US, XKB, keysyms) |
 | `src/wayland/` | Wayland: wire codec, requests, the xdg-shell toplevel |
 | `src/x11/` | X11: wire codec, setup, requests, events, MIT-SHM |
 | `src/gfx/` | canvas, display lists, the rasterizer, the bitmap font, PNG |

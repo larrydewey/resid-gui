@@ -1,0 +1,88 @@
+// keyboard.resid — the X server's keyboard layout, from GetKeyboardMapping.
+//
+// The reply lists `per` keysyms for each key code from the first asked
+// for: group 1's first and second level, group 2's two, then (from XKB)
+// group 1's third and fourth. A `Keymap` keeps group 1's four. When a
+// key's second level is NoSymbol and its first is a letter, the core
+// protocol's rule makes the second that letter's capital.
+
+import "../backend/keymap.resid";
+import "../backend/keysym.resid";
+import "wire.resid";
+
+/// The layout a GetKeyboardMapping reply for key codes from `first`
+/// describes, or the US layout when the reply is not one.
+pub Keymap keymap_from_mapping(List(Int) msg, Int first) {
+    Int per = if (msg.len() > 1) { msg[1] } else { 0 };
+    if (msg.len() < 32 || per <= 0) { return keymap_us(); }
+    Int count = (msg.len() - 32) / (per * 4);
+    return keymap_with_codes(mapping_levels(msg, first, count, per, 0, lb()), mapping_functions(msg, first, count, per, 0, lb()));
+}
+
+ListBuf(Int) lb() { ListBuf(Int) b = ListBuf(); return b; }
+
+List(Int) mapping_levels(List(Int) msg, Int first, Int count, Int per, Int code, ListBuf(Int) acc) {
+    if (code >= keymap_codes()) { return acc.finish(); }
+    Int k = code + 8 - first;
+    if (k < 0 || k >= count) { return mapping_levels(msg, first, count, per, code + 1, acc.push(0).push(0).push(0).push(0)); }
+    Int at = 32 + k * per * 4;
+    Int l0 = keysym_cp(sym(msg, at, per, 0));
+    Int l1a = keysym_cp(sym(msg, at, per, 1));
+    Int l1 = if (l1a == 0) { capital(l0) } else { l1a };
+    Int l2 = keysym_cp(sym(msg, at, per, 4));
+    Int l3 = keysym_cp(sym(msg, at, per, 5));
+    return mapping_levels(msg, first, count, per, code + 1, acc.push(l0).push(l1).push(l2).push(l3));
+}
+
+List(Int) mapping_functions(List(Int) msg, Int first, Int count, Int per, Int code, ListBuf(Int) acc) {
+    if (code >= keymap_codes()) { return acc.finish(); }
+    Int k = code + 8 - first;
+    Int f = if (k < 0 || k >= count) { 0 } else { keysym_key(sym(msg, 32 + k * per * 4, per, 0)) };
+    return mapping_functions(msg, first, count, per, code + 1, acc.push(f));
+}
+
+/// The `i`th keysym of a key whose list starts at `at`, or 0.
+Int sym(List(Int) msg, Int at, Int per, Int i) {
+    if (i >= per) { return 0; }
+    return word_at(msg, at + i * 4) else { 0 };
+}
+
+/// The capital of an ASCII or Latin-1 small letter, or the letter itself.
+Int capital(Int c) {
+    if ((c >= 97 && c <= 122) || (c >= 224 && c <= 254 && c != 247)) { return c - 32; }
+    return c;
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+
+List(Int) words(List(Int) ws, Int i, ListBuf(Int) acc) {
+    if (i >= ws.len()) { return acc.finish(); }
+    Int w = ws[i];
+    return words(ws, i + 1, acc.push(w & 255).push((w >> 8) & 255).push((w >> 16) & 255).push((w >> 24) & 255));
+}
+
+/// A reply for key codes 10 and 11 (evdev 2 and 3), six keysyms each.
+List(Int) sample_reply() {
+    List(Int) head = [1, 6, 0, 0, 12, 0, 0, 0].concat(words([0, 0, 0, 0, 0, 0], 0, lb()));
+    // 1 ! (none) (none) ¹ ¡ / q (NoSymbol) ... @ Ω
+    List(Int) syms = words([49, 33, 0, 0, 185, 161, 113, 0, 0, 0, 64, 16778153], 0, lb());
+    return head.concat(syms);
+}
+
+test "a keyboard mapping becomes a keymap" {
+    Keymap k = keymap_from_mapping(sample_reply(), 10);
+    expect(key_text_in(k, 2, mods_none())).toEqual("1");
+    expect(key_text_in(k, 2, mods_from_mask(1, 0))).toEqual("!");
+    expect(key_text_in(k, 2, mods_from_mask(128, 0))).toEqual("¹");
+    expect(key_text_in(k, 2, mods_from_mask(129, 0))).toEqual("¡");
+    expect(key_text_in(k, 3, mods_none())).toEqual("q");
+    expect(key_text_in(k, 3, mods_from_mask(1, 0))).toEqual("Q");
+    expect(key_text_in(k, 3, mods_from_mask(0, 2))).toEqual("Q");
+    expect(key_text_in(k, 3, mods_from_mask(129, 0))).toEqual("Ω");
+    expect(key_text_in(k, 30, mods_none())).toEqual("");
+}
+
+test "a reply that is not a mapping keeps the US layout" {
+    Keymap k = keymap_from_mapping([1, 0, 0, 0], 8);
+    expect(key_text_in(k, 30, mods_none())).toEqual("a");
+}

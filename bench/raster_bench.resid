@@ -1,0 +1,60 @@
+// raster_bench.resid — where a full frame's time goes, at a 4K-class size.
+//
+// Times each stage of a present on its own: a canvas, a full fill, text,
+// the copy into shared memory, and a whole gallery-like frame.
+
+import "../src/gfx/canvas.resid";
+import "../src/gfx/color.resid";
+import "../src/gfx/draw.resid";
+import "../src/gfx/raster.resid";
+import "../src/gfx/font.resid";
+
+@requires(clock(readonly))
+Int ms_since(Int t0) { return (clock.monotonic_ns() - t0) / 1000000; }
+
+List(DrawOp) busy_ops(Int i, Int n, Int kind, ListBuf(DrawOp) acc) {
+    if (i >= n) { return acc.finish(); }
+    Int x = (i % 20) * 64;
+    Int y = (i / 20) * 40;
+    DrawOp op = if (kind == 0) { OpFill(Rect { .x = x, .y = y, .w = 60, .h = 30 }, rgb(200, 210, 220)) }
+                else { OpText(x + 4, y + 8, "Button", rgb(0, 0, 0)) };
+    return busy_ops(i + 1, n, kind, acc.push(op));
+}
+
+@requires(clock(readonly))
+Int time_frame(Str label, List(DrawOp) ops, Int w, Int h) {
+    Int t = clock.monotonic_ns();
+    Canvas e = raster_frame_rect(Frame { .ops = ops, .scale = 2, .font = font_builtin() }, Rect { .x = 0, .y = 0, .w = w, .h = h }, background());
+    println(f"{label} {ms_since(t)} ms ({e.px.len()})");
+    return 0;
+}
+
+@requires(clock(readonly), display)
+Int main() {
+    Int w = 2700;
+    Int h = 2200;
+    Int t0 = clock.monotonic_ns();
+    Canvas c = canvas_new(w, h);
+    println(f"canvas_new      {ms_since(t0)} ms");
+    Int t1 = clock.monotonic_ns();
+    Canvas d = fill_rect(c, canvas_bounds(c), rgb(240, 240, 240));
+    println(f"fill full       {ms_since(t1)} ms");
+    Int t2 = clock.monotonic_ns();
+    Int hnd = resid_disp_shm_new(w * h * 4);
+    _ = resid_disp_shm_put(hnd, 0, d.px, w * h * 4);
+    println(f"shm_put full    {ms_since(t2)} ms");
+    ListBuf(DrawOp) b = ListBuf();
+    ListBuf(DrawOp) b2 = ListBuf();
+    ListBuf(DrawOp) b3 = ListBuf();
+    List(DrawOp) fills = busy_ops(0, 400, 0, b);
+    List(DrawOp) texts = busy_ops(0, 400, 1, b2);
+    List(DrawOp) ops = busy_ops(0, 400, 0, b3).concat(texts);
+    _ = time_frame("400 fills      ", fills, w, h);
+    _ = time_frame("400 texts      ", texts, w, h);
+    _ = time_frame("both           ", ops, w, h);
+    Int t4 = clock.monotonic_ns();
+    Canvas f = raster_frame_rect(Frame { .ops = ops, .scale = 2, .font = font_builtin() }, Rect { .x = 100, .y = 100, .w = 200, .h = 40 }, background());
+    println(f"small damage    {ms_since(t4)} ms ({f.px.len()})");
+    _ = resid_disp_shm_free(hnd);
+    return 0;
+}

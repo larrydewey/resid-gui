@@ -1,0 +1,219 @@
+// xkb.resid — a Wayland compositor's keymap, read into a `Keymap`.
+//
+// A compositor sends its keyboard layout as XKB keymap text (the format
+// libxkbcommon writes): an `xkb_keycodes` section naming each key code
+// (`<AE01> = 10;`) and an `xkb_symbols` section listing what each named
+// key types (`key <AE01> { [ 1, exclam ] };`). Only those two are read:
+// the first group's first four levels, which is what `key_text_in` uses.
+// Key types, actions, compat rules and the other groups are skipped, so a
+// layout's AltGr level and Num Lock behave as the common ones do, and an
+// exotic type's levels may not. Text that is not a keymap gives `None`,
+// and the backend keeps the US layout.
+
+import "keymap.resid";
+import "keysym.resid";
+
+/// The layout the keymap text describes, or None.
+pub Option(Keymap) xkb_keymap(List(Int) text) {
+    List(Str) toks = xkb_tokens(text, 0, sb());
+    Map(Str, Int) codes = key_codes(toks, 0, {});
+    Map(Str, Str) aliases = key_aliases(toks, 0, {});
+    Map(Int, List(Int)) keys = key_symbols(toks, 0, codes, aliases, keysym_table(), {});
+    if (keys.len() == 0) { return None; }
+    return Some(keymap_with_codes(levels_of(keys, 0, lb()), functions_of(keys, 0, lb())));
+}
+
+ListBuf(Str) sb() { ListBuf(Str) b = ListBuf(); return b; }
+ListBuf(Int) lb() { ListBuf(Int) b = ListBuf(); return b; }
+
+// ─── Tokens ─────────────────────────────────────────────────────────
+
+/// Names, numbers, `<KEY>` names, and single punctuation marks. Strings
+/// become one `"` token (their contents are never needed), comments
+/// vanish, and a NUL ends the text.
+List(Str) xkb_tokens(List(Int) b, Int i, ListBuf(Str) acc) {
+    if (i >= b.len() || b[i] == 0) { return acc.finish(); }
+    Int c = b[i];
+    if (c <= 32) { return xkb_tokens(b, i + 1, acc); }
+    if (c == 35 || (c == 47 && i + 1 < b.len() && b[i + 1] == 47)) { return xkb_tokens(b, line_end(b, i), acc); }
+    if (c == 34) { return xkb_tokens(b, past(b, i + 1, 34), acc.push("\"")); }
+    if (c == 60) {
+        Int e = past(b, i + 1, 62);
+        return xkb_tokens(b, e, acc.push(ascii(b, i, e, StrBuf())));
+    }
+    if (word_char(c)) {
+        Int e = word_end(b, i);
+        return xkb_tokens(b, e, acc.push(ascii(b, i, e, StrBuf())));
+    }
+    return xkb_tokens(b, i + 1, acc.push(str_from_code(c)));
+}
+
+Bool word_char(Int c) { return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c == 45 || c == 43; }
+
+Int word_end(List(Int) b, Int i) { return if (i < b.len() && word_char(b[i])) { word_end(b, i + 1) } else { i }; }
+
+Int line_end(List(Int) b, Int i) { return if (i < b.len() && b[i] != 10) { line_end(b, i + 1) } else { i }; }
+
+/// The index after the first `stop` byte at or after `i` (or the end).
+Int past(List(Int) b, Int i, Int stop) {
+    if (i >= b.len()) { return i; }
+    return if (b[i] == stop) { i + 1 } else { past(b, i + 1, stop) };
+}
+
+Str ascii(List(Int) b, Int i, Int stop, StrBuf acc) {
+    if (i >= stop) { return acc.finish(); }
+    return ascii(b, i + 1, stop, acc.push_char(b[i]));
+}
+
+Str tok(List(Str) t, Int i) { return if (i >= 0 && i < t.len()) { t[i] } else { "" }; }
+
+Bool key_name(Str s) { return str_starts_with(s, "<") && str_ends_with(s, ">"); }
+
+// ─── Key codes ──────────────────────────────────────────────────────
+
+/// Every `<NAME> = number;`: the key codes section's definitions.
+Map(Str, Int) key_codes(List(Str) t, Int i, Map(Str, Int) acc) {
+    if (i + 3 >= t.len()) { return acc; }
+    if (key_name(t[i]) && t[i + 1] == "=" && str_is_int(t[i + 2]) && t[i + 3] == ";") {
+        return key_codes(t, i + 4, acc.insert(t[i], str_parse_int(t[i + 2])));
+    }
+    return key_codes(t, i + 1, acc);
+}
+
+/// Every `alias <A> = <B>;`.
+Map(Str, Str) key_aliases(List(Str) t, Int i, Map(Str, Str) acc) {
+    if (i + 3 >= t.len()) { return acc; }
+    if (t[i] == "alias" && key_name(t[i + 1]) && t[i + 2] == "=" && key_name(t[i + 3])) {
+        return key_aliases(t, i + 4, acc.insert(t[i + 1], t[i + 3]));
+    }
+    return key_aliases(t, i + 1, acc);
+}
+
+/// The evdev code a key name stands for, through one alias, or -1.
+Int evdev_of(Str name, Map(Str, Int) codes, Map(Str, Str) aliases) {
+    Str real = aliases.get(name) else { name };
+    Int kc = codes.get(real) else { 0 - 1 };
+    return if (kc >= 8) { kc - 8 } else { 0 - 1 };
+}
+
+// ─── Symbols ────────────────────────────────────────────────────────
+
+/// Every `key <NAME> { ... };`, as an evdev code and its four levels.
+Map(Int, List(Int)) key_symbols(List(Str) t, Int i, Map(Str, Int) codes, Map(Str, Str) aliases, Map(Str, Int) names,
+                                Map(Int, List(Int)) acc) {
+    if (i + 2 >= t.len()) { return acc; }
+    if (t[i] == "key" && key_name(t[i + 1]) && t[i + 2] == "{") {
+        Int end = close_of(t, i + 3, 1);
+        Int code = evdev_of(t[i + 1], codes, aliases);
+        Int at = symbols_at(t, i + 3, end);
+        Bool keep = code >= 0 && code < keymap_codes() && at >= 0;
+        Map(Int, List(Int)) acc2 = if (keep) { acc.insert(code, level_list(t, at + 1, names, 0, lb()).concat([keysym_name_key(tok(t, at + 1))])) } else { acc };
+        return key_symbols(t, end, codes, aliases, names, acc2);
+    }
+    return key_symbols(t, i + 1, codes, aliases, names, acc);
+}
+
+/// The index after the `}` that closes the block whose body starts at `i`.
+Int close_of(List(Str) t, Int i, Int depth) {
+    if (i >= t.len()) { return i; }
+    if (t[i] == "{") { return close_of(t, i + 1, depth + 1); }
+    if (t[i] == "}") { return if (depth == 1) { i + 1 } else { close_of(t, i + 1, depth - 1) }; }
+    return close_of(t, i + 1, depth);
+}
+
+/// Where the first group's symbol list opens in a key's body [i, end): the
+/// `[` after `symbols[Group1]=`, or a bare `[` the body starts with or
+/// lists after a comma. -1 when the key has no symbols.
+Int symbols_at(List(Str) t, Int i, Int end) {
+    if (i >= end) { return 0 - 1; }
+    if (t[i] == "symbols" && tok(t, i + 1) == "[" && tok(t, i + 3) == "]" && tok(t, i + 4) == "=" && tok(t, i + 5) == "[") { return i + 5; }
+    if (t[i] == "[" && (tok(t, i - 1) == "{" || tok(t, i - 1) == ",")) { return i; }
+    return symbols_at(t, i + 1, end);
+}
+
+/// The code points of a symbol list's first four entries, from just after
+/// its `[`.
+List(Int) level_list(List(Str) t, Int i, Map(Str, Int) names, Int n, ListBuf(Int) acc) {
+    if (i >= t.len() || t[i] == "]" || n >= 4) { return pad4(n, acc); }
+    if (t[i] == ",") { return level_list(t, i + 1, names, n, acc); }
+    return level_list(t, i + 1, names, n + 1, acc.push(keysym_name_cp(names, t[i])));
+}
+
+List(Int) pad4(Int n, ListBuf(Int) acc) {
+    if (n >= 4) { return acc.finish(); }
+    return pad4(n + 1, acc.push(0));
+}
+
+/// The function key each evdev code's first keysym names, 0 for none.
+List(Int) functions_of(Map(Int, List(Int)) keys, Int code, ListBuf(Int) acc) {
+    if (code >= keymap_codes()) { return acc.finish(); }
+    List(Int) ls = keys.get(code) else { [0, 0, 0, 0, 0] };
+    return functions_of(keys, code + 1, acc.push(ls[4]));
+}
+
+/// Four levels for every evdev code, zero where the keymap has no key.
+List(Int) levels_of(Map(Int, List(Int)) keys, Int code, ListBuf(Int) acc) {
+    if (code >= keymap_codes()) { return acc.finish(); }
+    List(Int) ls = keys.get(code) else { [0, 0, 0, 0] };
+    return levels_of(keys, code + 1, acc.push(ls[0]).push(ls[1]).push(ls[2]).push(ls[3]));
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+
+List(Int) text_bytes(Str s, Int i, ListBuf(Int) acc) {
+    if (i >= str_len(s)) { return acc.push(0).finish(); }
+    return text_bytes(s, i + 1, acc.push(str_char_at(s, i)));
+}
+
+/// A German-ish keymap in libxkbcommon's own layout, cut to a few keys.
+Str sample_keymap() {
+    return "xkb_keymap {\n"
+        + "xkb_keycodes \"evdev+aliases(qwertz)\" {\n"
+        + "  minimum = 8;\n  maximum = 255;\n"
+        + "  <AE01> = 10;\n  <AD01> = 24;\n  <AD06> = 29;\n  <AC10> = 47;\n  <KP7> = 79;\n  <SPCE> = 65;\n  <CAPS> = 66;\n"
+        + "  indicator 1 = \"Caps Lock\";\n"
+        + "  alias <AB00> = <AD06>;\n"
+        + "};\n"
+        + "xkb_types \"complete\" { virtual_modifiers NumLock; type \"ONE_LEVEL\" { modifiers= none; level_name[Level1]= \"Any\"; }; };\n"
+        + "xkb_compat \"complete\" { interpret Shift_Lock+AnyOf(Shift+Lock) { action= LockMods(modifiers=Shift); }; };\n"
+        + "xkb_symbols \"pc+de\" {\n"
+        + "  name[Group1]=\"German\";\n"
+        + "  key <AE01> {\t[               1,          exclam,     onesuperior,      exclamdown ] };\n"
+        + "  key <AD01> {\n    type= \"FOUR_LEVEL_SEMIALPHABETIC\",\n    symbols[Group1]= [               q,               Q,              at,           Greek_OMEGA ]\n  };\n"
+        + "  key <AD06> { type[Group1]= \"FOUR_LEVEL_ALPHABETIC\", symbols[Group1]= [ z, Z, leftarrow, yen ], symbols[Group2]= [ y, Y ] };\n"
+        + "  key <AC10> {\t[      odiaeresis,      Odiaeresis,     dead_doubleacute ] };\n"
+        + "  key <KP7> { type= \"KEYPAD\", [ KP_Home, KP_7 ] };\n"
+        + "  key <SPCE> {\t[ space ] };\n"
+        + "  key <CAPS> {\t[ Escape ] };\n"
+        + "  modifier_map Shift { <LFSH> };\n"
+        + "};\n"
+        + "};\n";
+}
+
+test "a keymap's key codes and symbols" {
+    Keymap k = xkb_keymap(text_bytes(sample_keymap(), 0, lb())) else { keymap_us() };
+    Mods none = mods_none();
+    expect(key_text_in(k, 2, none)).toEqual("1");
+    expect(key_text_in(k, 2, mods_from_mask(1, 0))).toEqual("!");
+    expect(key_text_in(k, 2, mods_from_mask(128, 0))).toEqual("¹");
+    expect(key_text_in(k, 16, mods_from_mask(128, 0))).toEqual("@");
+    expect(key_text_in(k, 21, none)).toEqual("z");
+    expect(key_text_in(k, 21, mods_from_mask(0, 2))).toEqual("Z");
+    expect(key_text_in(k, 21, mods_from_mask(129, 0))).toEqual("¥");
+    expect(key_text_in(k, 39, none)).toEqual("ö");
+    expect(key_text_in(k, 39, mods_from_mask(0, 2))).toEqual("Ö");
+    expect(key_text_in(k, 39, mods_from_mask(128, 0))).toEqual("ö");
+    expect(key_text_in(k, 71, none)).toEqual("");
+    expect(key_text_in(k, 71, mods_from_mask(0, 16))).toEqual("7");
+    expect(key_text_in(k, 57, mods_from_mask(1, 0))).toEqual(" ");
+    expect(key_text_in(k, 30, none)).toEqual("");
+    expect(key_code_in(k, 58)).toEqual(key_esc());
+    expect(key_code_in(k, 21)).toEqual(21);
+}
+
+test "text that is not a keymap" {
+    Bool none = match (xkb_keymap(text_bytes("hello { world };", 0, lb()))) { Some(_) => false, None => true };
+    expect(none).toEqual(true);
+    Bool empty = match (xkb_keymap([])) { Some(_) => false, None => true };
+    expect(empty).toEqual(true);
+}

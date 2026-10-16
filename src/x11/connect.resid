@@ -19,20 +19,25 @@ type Session = { Int fd; Setup setup; List(Int) buf; Str err; };
 
 Session session_failed(Int fd, Str why) { return Session { .fd = fd, .setup = setup_empty(), .buf = [], .err = why }; }
 
-/// Connect to the display the environment names and complete the
-/// handshake without authorization, which is what a local server started
-/// without `-auth` (Xwayland, Xephyr, Xnest, a test server) accepts.
+/// Connect to the X server DISPLAY names and complete the handshake, with
+/// the MIT-MAGIC-COOKIE-1 the session's authority file holds for it, or
+/// with none when there is no cookie (a server started without `-auth`).
 @requires(display)
 pub Session x11_open() {
-    Int fd = resid_disp_connect();
+    Int fd = resid_disp_connect_x11();
     if (fd < 0) { return session_failed(-1, "x11: no display to connect to"); }
-    return x11_handshake(fd);
+    return x11_handshake_auth(fd, resid_disp_x11_auth());
 }
 
-/// The handshake over an already connected socket.
+/// The handshake over an already connected socket, without authorization.
 @requires(display)
-pub Session x11_handshake(Int fd) {
-    if (!resid_disp_send(fd, setup_request("", []), -1)) { return session_failed(fd, "x11: could not send the setup request"); }
+pub Session x11_handshake(Int fd) { return x11_handshake_auth(fd, []); }
+
+/// The handshake with a cookie, or without one when `cookie` is empty.
+@requires(display)
+pub Session x11_handshake_auth(Int fd, List(Int) cookie) {
+    Str name = if (cookie.len() > 0) { "MIT-MAGIC-COOKIE-1" } else { "" };
+    if (!resid_disp_send(fd, setup_request(name, cookie), -1)) { return session_failed(fd, "x11: could not send the setup request"); }
     List(Int) head = recv_until(fd, 8, []);
     if (head.len() < 8) { return session_failed(fd, "x11: the server closed the connection during setup"); }
     Int need = 8 + (half_at(head, 6) & 65535) * 4;

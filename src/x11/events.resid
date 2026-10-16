@@ -36,6 +36,7 @@ type XEv = XKey(Bool, Int, Int)            // pressed, keycode, modifier state
          | XClient(Int, Int)               // message type, first data word
          | XDestroy
          | XShmDone(Int)                   // the segment the server finished reading
+         | XMapping(Int)                   // what changed: 0 modifiers, 1 keyboard, 2 pointer
          | XOther;
 
 /// A 16-bit field read as a signed coordinate.
@@ -56,6 +57,7 @@ pub XEv x_decode_event(List(Int) e, Int shm_event) {
     if (t == 12) { return XExpose(half_at(e, 8), half_at(e, 10), half_at(e, 12), half_at(e, 14)); }
     if (t == 17) { return XDestroy; }
     if (t == 22) { return XConfigure(half_at(e, 20), half_at(e, 22)); }
+    if (t == 34) { return XMapping(e[4]); }
     if (t == 33) { return XClient(word_at(e, 8) else { 0 }, word_at(e, 12) else { 0 }); }
     if (shm_event > 0 && t == shm_event) { return XShmDone(word_at(e, 12) else { 0 }); }
     return XOther;
@@ -106,6 +108,8 @@ test "events decode to their fields" {
     expect(cfg).toEqual(true);
     Bool done = match (x_decode_event(event_bytes(77, 0, [12], [5]), 77)) { XShmDone(s) => s == 5, _ => false };
     expect(done).toEqual(true);
+    Bool mapping = match (x_decode_event(event_bytes(34, 0, [4], [1]), 0)) { XMapping(w) => w == 1, _ => false };
+    expect(mapping).toEqual(true);
     Bool sent = match (x_decode_event(event_bytes(128 + 33, 32, [8, 12], [9, 10]), 0)) { XClient(t, d) => t == 9 && d == 10, _ => false };
     expect(sent).toEqual(true);
 }

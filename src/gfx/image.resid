@@ -13,7 +13,7 @@ pub Image image_new(Int w, Int h) {
 /// `clip` and to the canvas. Each pixel is laid over what is there by its
 /// alpha, so transparent parts of an image show the window behind them.
 pub Canvas blit_clip(Canvas c, Image im, Int x0, Int y0, Rect clip) {
-    Rect a = rect_intersect(rect_intersect(Rect { .x = x0, .y = y0, .w = im.w, .h = im.h }, clip), canvas_bounds(c));
+    Rect a = rect_intersect(rect_intersect(Rect { .x = x0, .y = y0, .w = im.w, .h = im.h }, clip), Rect { .x = 0, .y = 0, .w = c.w, .h = c.h });
     if (rect_is_empty(a) || im.px.len() < im.w * im.h * 4) { return c; }
     return blit_rows(c, im, x0, y0, a, a.y, a.x);
 }
@@ -50,7 +50,8 @@ Canvas blend_rect(Canvas c, Int x, Int y, Int k, Color col, Int a, Rect clip, In
 
 /// `blit_clip` clipped to the canvas alone.
 pub Canvas blit_at(Canvas c, Image im, Int x0, Int y0) {
-    return blit_clip(c, im, x0, y0, canvas_bounds(c));
+    Rect all = Rect { .x = 0, .y = 0, .w = c.w, .h = c.h };
+    return blit_clip(c, im, x0, y0, all);
 }
 
 test "image shape" {

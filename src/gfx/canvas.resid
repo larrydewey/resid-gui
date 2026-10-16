@@ -5,6 +5,11 @@
 // write threads the pixel list through a tail call and replaces elements
 // with `with`, which the compiler does in place because the old list is
 // dead afterwards; nothing here copies the frame per pixel.
+//
+// A writer reads the canvas's size from its fields, never by passing the
+// canvas to another function first (`canvas_bounds(c)`): the compiler
+// then treats the pixel list as shared and copies all of it on the first
+// write, which made every draw op cost a whole frame.
 
 import "color.resid";
 
@@ -24,6 +29,20 @@ pub Canvas canvas_new(Int ww, Int hh) {
     return Canvas { .w = w, .h = h, .px = canvas_fill(0, w * h * 4, b) };
 }
 
+/// A canvas of the given size, every pixel `col`: one pass, where a new
+/// canvas and a fill would be two.
+pub Canvas canvas_filled(Int ww, Int hh, Color col) {
+    Int w = if (ww < 0) { 0 } else { ww };
+    Int h = if (hh < 0) { 0 } else { hh };
+    ListBuf(Int) b = ListBuf();
+    return Canvas { .w = w, .h = h, .px = pixels_of(0, w * h, col.b & 255, col.g & 255, col.r & 255, col.a & 255, b) };
+}
+
+List(Int) pixels_of(Int i, Int n, Int b, Int g, Int r, Int a, ListBuf(Int) acc) {
+    if (i >= n) { return acc.finish(); }
+    return pixels_of(i + 1, n, b, g, r, a, acc.push(b).push(g).push(r).push(a));
+}
+
 /// `n` zero bytes.
 pub List(Int) canvas_fill(Int i, Int n, ListBuf(Int) acc) {
     if (i >= n) { return acc.finish(); }
@@ -35,15 +54,16 @@ pub Rect canvas_bounds(Canvas c) { return Rect { .x = 0, .y = 0, .w = c.w, .h = 
 
 /// Fill a rectangle, clipped to the canvas.
 pub Canvas fill_rect(Canvas c, Rect r, Color col) {
-    return fill_rect_clip(c, r, col, canvas_bounds(c));
+    Rect all = Rect { .x = 0, .y = 0, .w = c.w, .h = c.h };
+    return fill_rect_clip(c, r, col, all);
 }
 
 /// Fill a rectangle, clipped to `clip` and to the canvas.
 pub Canvas fill_rect_clip(Canvas c, Rect r, Color col, Rect clip) {
-    Rect a = rect_intersect(rect_intersect(r, clip), canvas_bounds(c));
-    if (rect_is_empty(a)) { return c; }
     Int ww = c.w;
     Int hh = c.h;
+    Rect a = rect_intersect(rect_intersect(r, clip), Rect { .x = 0, .y = 0, .w = ww, .h = hh });
+    if (rect_is_empty(a)) { return c; }
     List(Int) px = fill_rows(c.px, ww, a, col.b & 255, col.g & 255, col.r & 255, col.a & 255, a.y, a.x);
     return Canvas { .w = ww, .h = hh, .px = px };
 }

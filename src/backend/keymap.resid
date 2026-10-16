@@ -2,8 +2,9 @@
 //
 // Both display protocols report physical keys: X11 as evdev codes plus 8,
 // Wayland as evdev codes. A backend turns them into evdev codes and asks
-// here what they type. v1 knows the US layout only (PLAN-gui.md §1); a
-// server's own keymap (XKB) is not read.
+// here what they type under the layout the server uses: a `Keymap` it
+// read from the server (X11's keyboard mapping, a Wayland compositor's XKB
+// keymap), or the US layout until it has one.
 
 /// Evdev codes the library acts on.
 pub Int key_esc() { return 1; }
@@ -25,44 +26,145 @@ pub Int key_end() { return 107; }
 pub Int key_down() { return 108; }
 pub Int key_delete() { return 111; }
 
-/// The modifier state a backend tracks.
-pub type Mods = { Bool shift; Bool caps; Bool ctrl; Bool alt; };
+/// The modifier state a backend tracks. `altgr` selects a key's third and
+/// fourth symbols; `num` is Num Lock, which the keypad reads.
+pub type Mods = { Bool shift; Bool caps; Bool ctrl; Bool alt; Bool altgr; Bool num; };
 
 /// No modifier held.
-pub Mods mods_none() { return Mods { .shift = false, .caps = false, .ctrl = false, .alt = false }; }
+pub Mods mods_none() { return Mods { .shift = false, .caps = false, .ctrl = false, .alt = false, .altgr = false, .num = false }; }
+
+/// Modifiers from the core modifier masks both protocols use: Shift 1,
+/// Lock 2, Control 4, Mod1 8 (Alt), Mod2 16 (Num Lock), Mod5 128 (AltGr).
+/// `held` is what is pressed (or latched), `locked` what is locked; X11
+/// reports one mask, which serves as both.
+pub Mods mods_from_mask(Int held, Int locked) {
+    return Mods { .shift = (held & 1) != 0, .caps = (locked & 2) != 0, .ctrl = (held & 4) != 0, .alt = (held & 8) != 0,
+                  .altgr = (held & 128) != 0, .num = (locked & 16) != 0 };
+}
+
+/// A keyboard layout: four code points per evdev code (plain, Shift,
+/// AltGr, AltGr with Shift), 0 where the key types nothing at that level,
+/// and per code the code the library acts on: the function key its keysym
+/// names (a key whose keysym is Escape is `key_esc()` wherever it sits),
+/// else the code itself.
+pub type Keymap = { List(Int) levels; List(Int) codes; };
+
+/// What a backend keeps to turn keys into text: the modifiers held now and
+/// the layout.
+pub type Keys = { Mods mods; Keymap map; };
+
+/// No modifier held, US layout.
+pub Keys keys_us() { return Keys { .mods = mods_none(), .map = keymap_us() }; }
+
+/// How many evdev codes a keymap covers.
+pub Int keymap_codes() { return 256; }
+
+/// A keymap from its levels, four per code, each key acting as its own
+/// code; short lists are padded.
+pub Keymap keymap_of(List(Int) levels) { return keymap_with_codes(levels, []); }
+
+/// A keymap from its levels and, per code, the function key it is (0 for
+/// none, which leaves the code as it is).
+pub Keymap keymap_with_codes(List(Int) levels, List(Int) functions) {
+    Int want = keymap_codes() * 4;
+    List(Int) ls = if (levels.len() >= want) { levels[0..want] } else { levels.concat(zeros(want - levels.len(), lb())) };
+    return Keymap { .levels = ls, .codes = acting_codes(functions, 0, lb()) };
+}
+
+List(Int) acting_codes(List(Int) fs, Int code, ListBuf(Int) acc) {
+    if (code >= keymap_codes()) { return acc.finish(); }
+    Int f = if (code < fs.len()) { fs[code] } else { 0 };
+    return acting_codes(fs, code + 1, acc.push(if (f > 0) { f } else { code }));
+}
+
+/// The code the library acts on for evdev code `code` under `k`.
+pub Int key_code_in(Keymap k, Int code) {
+    return if (code >= 0 && code < keymap_codes()) { k.codes[code] } else { code };
+}
+
+ListBuf(Int) lb() { ListBuf(Int) b = ListBuf(); return b; }
+
+List(Int) zeros(Int n, ListBuf(Int) acc) {
+    if (n <= 0) { return acc.finish(); }
+    return zeros(n - 1, acc.push(0));
+}
 
 // Code points by evdev code, 0 where a key types nothing.
 List(Int) us_plain() { return [0, 0, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 45, 61, 0, 0, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 91, 93, 0, 0, 97, 115, 100, 102, 103, 104, 106, 107, 108, 59, 39, 96, 0, 92, 122, 120, 99, 118, 98, 110, 109, 44, 46, 47, 0, 42, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 55, 56, 57, 45, 52, 53, 54, 43, 49, 50, 51, 48, 46, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 47]; }
 List(Int) us_shift() { return [0, 0, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 0, 0, 81, 87, 69, 82, 84, 89, 85, 73, 79, 80, 123, 125, 0, 0, 65, 83, 68, 70, 71, 72, 74, 75, 76, 58, 34, 126, 0, 124, 90, 88, 67, 86, 66, 78, 77, 60, 62, 63, 0, 42, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 55, 56, 57, 45, 52, 53, 54, 43, 49, 50, 51, 48, 46, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 47]; }
 
-/// Whether the code is a letter key, which Caps Lock affects.
-Bool is_letter(Int code) {
-    return (code >= 16 && code <= 25) || (code >= 30 && code <= 38) || (code >= 44 && code <= 50);
+/// The US layout, which a backend uses until the server says otherwise.
+pub Keymap keymap_us() { return keymap_of(us_levels(0, lb())); }
+
+List(Int) us_levels(Int code, ListBuf(Int) acc) {
+    if (code >= us_plain().len()) { return acc.finish(); }
+    return us_levels(code + 1, acc.push(us_plain()[code]).push(us_shift()[code]).push(0).push(0));
 }
 
-/// The text a key types under the US layout, empty for keys that type
-/// nothing and for any key pressed with Ctrl or Alt held.
-pub Str key_text(Int code, Mods m) {
-    if (code < 0 || code >= 99 || m.ctrl || m.alt) { return ""; }
-    Bool upper = if (is_letter(code)) { m.shift != m.caps } else { m.shift };
-    Int cp = if (upper) { us_shift()[code] } else { us_plain()[code] };
+/// Whether `upper` is the capital of `lower`, so Caps Lock picks it: ASCII
+/// and Latin-1 letters, and the cased scripts whose capitals sit 32, 80 or
+/// one below the small letters.
+Bool cased(Int lower, Int upper) {
+    if (lower >= 97 && lower <= 122) { return upper == lower - 32; }
+    if (lower >= 224 && lower <= 254 && lower != 247) { return upper == lower - 32; }
+    if (lower >= 256) { return upper == lower - 32 || upper == lower - 80 || upper == lower - 1; }
+    return false;
+}
+
+/// The text a key types under `k`, empty for keys that type nothing and
+/// for any key pressed with Ctrl or Alt held.
+pub Str key_text_in(Keymap k, Int code, Mods m) {
+    if (code < 0 || code >= keymap_codes() || m.ctrl || m.alt) { return ""; }
+    Int at = code * 4;
+    Bool third = m.altgr && (k.levels[at + 2] != 0 || k.levels[at + 3] != 0);
+    Int lo = if (third) { k.levels[at + 2] } else { k.levels[at] };
+    Int hi = if (third) { k.levels[at + 3] } else { k.levels[at + 1] };
+    // A keypad key types nothing plain (Home) and its digit shifted, and
+    // Num Lock swaps the two.
+    Bool keypad = !third && lo == 0 && hi != 0;
+    Bool upper = if (keypad) { m.num != m.shift } else { if (cased(lo, hi)) { m.shift != m.caps } else { m.shift } };
+    Int cp = if (upper && hi != 0) { hi } else { if (upper && keypad) { 0 } else { lo } };
     return if (cp == 0) { "" } else { str_from_code(cp) };
 }
 
+/// The text a key types under the US layout.
+pub Str key_text(Int code, Mods m) { return key_text_in(keymap_us(), code, m); }
+
 test "keys type US text" {
     Mods none = mods_none();
-    Mods shift = Mods { .shift = true, .caps = false, .ctrl = false, .alt = false };
-    Mods caps = Mods { .shift = false, .caps = true, .ctrl = false, .alt = false };
-    Mods ctrl = Mods { .shift = false, .caps = false, .ctrl = true, .alt = false };
+    Mods shift = mods_from_mask(1, 0);
+    Mods caps = mods_from_mask(0, 2);
+    Mods ctrl = mods_from_mask(4, 0);
     expect(key_text(30, none)).toEqual("a");
     expect(key_text(30, shift)).toEqual("A");
     expect(key_text(30, caps)).toEqual("A");
+    expect(key_text(30, mods_from_mask(1, 2))).toEqual("a");
     expect(key_text(2, caps)).toEqual("1");
     expect(key_text(2, shift)).toEqual("!");
+    expect(key_text(39, caps)).toEqual(";");
     expect(key_text(40, shift)).toEqual("\"");
     expect(key_text(43, none)).toEqual("\\");
     expect(key_text(57, none)).toEqual(" ");
     expect(key_text(30, ctrl)).toEqual("");
     expect(key_text(key_enter(), none)).toEqual("");
     expect(key_text(-1, none)).toEqual("");
+    expect(key_text(300, none)).toEqual("");
+}
+
+test "AltGr, Caps Lock on other scripts and the keypad" {
+    // Code 16: q, Q, @, Ω. Code 17: Cyrillic small zhe and its capital.
+    // Code 71: KP_Home, KP_7.
+    List(Int) ls = zeros(16 * 4, lb()).concat([113, 81, 64, 937, 1078, 1046, 0, 0]).concat(zeros((71 - 18) * 4, lb())).concat([0, 55, 0, 0]);
+    Keymap k = keymap_of(ls);
+    expect(key_text_in(k, 16, mods_from_mask(128, 0))).toEqual("@");
+    expect(key_text_in(k, 16, mods_from_mask(129, 0))).toEqual("Ω");
+    expect(key_text_in(k, 17, mods_from_mask(128, 0))).toEqual("ж");
+    expect(key_text_in(k, 17, mods_from_mask(0, 2))).toEqual("Ж");
+    expect(key_text_in(k, 71, mods_none())).toEqual("");
+    expect(key_text_in(k, 71, mods_from_mask(0, 16))).toEqual("7");
+    expect(key_text_in(k, 71, mods_from_mask(1, 16))).toEqual("");
+    expect(key_code_in(k, 16)).toEqual(16);
+    Keymap swapped = keymap_with_codes([], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    expect(key_code_in(swapped, 58)).toEqual(1);
+    expect(key_code_in(swapped, 1)).toEqual(1);
 }

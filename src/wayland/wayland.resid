@@ -7,17 +7,13 @@
 // compositor holds is busy until its `release`, and a frame callback paces
 // the client to the compositor's refresh, so `wl_ready` is false while
 // either says wait. Input comes from the seat's pointer and keyboard;
-// keys are evdev codes, typed through the US keymap (the compositor's XKB
-// keymap is closed unread).
-//
-// `resid_disp_connect` prefers a Wayland socket and falls back to X11, and
-// does not say which it gave. The first exchange tells them apart: an X
-// server closes a connection whose first byte is not a byte-order mark,
-// and a Wayland compositor answers `get_registry`.
+// keys are evdev codes, typed through the compositor's own XKB keymap
+// (src/backend/xkb.resid), and through the US layout until it arrives.
 
 import "../app.resid";
 import "../backend/backend.resid";
 import "../backend/keymap.resid";
+import "../backend/xkb.resid";
 import "../gfx/canvas.resid";
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
@@ -50,7 +46,7 @@ type WlRepeat = { Int key; Str text; Int next; Int rate; Int delay; };
 type Wl = {
     Int fd; Bool alive; Str err; Int next_id; Int sync_cb; Bool synced;
     List(Global) globals; WlObjs o; WlBufs bufs; WlWin win; WlRepeat rep;
-    Mods mods; Int px; Int py; List(Int) buf;
+    Keys keys; Int px; Int py; List(Int) buf;
 };
 
 WlObjs objs_none() {
@@ -69,60 +65,66 @@ pub Wl wl_failed(Str why) {
                 .o = objs_none(), .bufs = bufs_none(),
                 .win = WlWin { .configured = false, .cfg_w = 0, .cfg_h = 0, .lw = 1, .lh = 1, .scale = 1, .resizable = true, .dw = 1, .dh = 1 },
                 .rep = WlRepeat { .key = 0, .text = "", .next = 0, .rate = 25, .delay = 600 },
-                .mods = mods_none(), .px = 0, .py = 0, .buf = [] };
+                .keys = keys_us(), .px = 0, .py = 0, .buf = [] };
 }
 
 // ─── Field updates ──────────────────────────────────────────────────
 
 Wl with_o(Wl w, WlObjs o) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+                .globals = w.globals, .o = o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl with_bufs(Wl w, WlBufs b) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = w.o, .bufs = b, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+                .globals = w.globals, .o = w.o, .bufs = b, .win = w.win, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl with_win(Wl w, WlWin v) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = v, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = v, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl with_rep(Wl w, WlRepeat r) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = r, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = r, .keys = w.keys, .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl with_input(Wl w, Mods m, Int px, Int py) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = m, .px = px, .py = py, .buf = w.buf };
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = Keys { .mods = m, .map = w.keys.map }, .px = px, .py = py, .buf = w.buf };
+}
+
+Wl with_keymap(Wl w, Keymap k) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = Keys { .mods = w.keys.mods, .map = k },
+                .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl with_buf(Wl w, List(Int) buf) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = buf };
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = buf };
 }
 
 /// `n` fresh object ids taken.
 Wl with_ids(Wl w, Int n) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id + n, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl with_sync(Wl w, Int cb, Bool synced) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = cb, .synced = synced,
-                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl with_globals(Wl w, List(Global) gs) {
     return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = gs, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+                .globals = gs, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = w.buf };
 }
 
 Wl dead(Wl w, Str why) {
     return Wl { .fd = w.fd, .alive = false, .err = why, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
-                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = [] };
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .keys = w.keys, .px = w.px, .py = w.py, .buf = [] };
 }
 
 // ─── Sending ────────────────────────────────────────────────────────
@@ -158,7 +160,7 @@ Global global_of(List(Global) gs, Str iface, Int i) {
 /// names. Not alive, with an empty `err`, when there is none.
 @requires(display, clock(readonly))
 pub Wl wl_start(WindowOptions opts) {
-    Int fd = resid_disp_connect();
+    Int fd = resid_disp_connect_wayland();
     if (fd < 0) { return wl_failed(""); }
     return wl_start_on(fd, opts);
 }
@@ -173,13 +175,12 @@ pub Wl wl_start_on(Int fd, WindowOptions opts) {
                  .bufs = w0.bufs,
                  .win = WlWin { .configured = false, .cfg_w = 0, .cfg_h = 0, .lw = max1(opts.width), .lh = max1(opts.height), .scale = 1,
                                 .resizable = opts.resizable, .dw = 0, .dh = 0 },
-                 .rep = w0.rep, .mods = mods_none(), .px = 0, .py = 0, .buf = [] };
+                 .rep = w0.rep, .keys = keys_us(), .px = 0, .py = 0, .buf = [] };
     Wl w2 = send(w1, [wl_display_get_registry(2), wl_display_sync(3)]);
     Wl w3 = wait_until(w2, 0);
     if (!w3.alive) {
-        // A peer that hung up without a word was an X server.
         _ = resid_disp_close(fd);
-        return wl_failed(if (w3.globals.len() == 0) { "" } else { w3.err });
+        return wl_failed(if (str_len(w3.err) > 0) { w3.err } else { "wayland: the compositor closed the connection" });
     }
     Global comp = global_of(w3.globals, "wl_compositor", 0);
     Global shm = global_of(w3.globals, "wl_shm", 0);
@@ -446,14 +447,14 @@ WlStep on_pointer(Wl w, Int op, List(Int) m) {
     if (op == 0) {
         Int x = (wl_i32(m, 16) * s) / 256;
         Int y = (wl_i32(m, 20) * s) / 256;
-        Wl w2 = with_input(w, w.mods, x, y);
+        Wl w2 = with_input(w, w.keys.mods, x, y);
         Wl w3 = if (w.o.cursor_dev != 0) { send(w2, [cursor_shape_set_shape(w.o.cursor_dev, wl_u32(m, 8), wl_cursor_default())]) } else { w2 };
         return WlStep { .w = w3, .events = [PointerMoved(x, y)] };
     }
     if (op == 2) {
         Int x = (wl_i32(m, 12) * s) / 256;
         Int y = (wl_i32(m, 16) * s) / 256;
-        return WlStep { .w = with_input(w, w.mods, x, y), .events = [PointerMoved(x, y)] };
+        return WlStep { .w = with_input(w, w.keys.mods, x, y), .events = [PointerMoved(x, y)] };
     }
     if (op == 3) {
         Int b = button_number(wl_u32(m, 16));
@@ -471,17 +472,25 @@ WlStep on_pointer(Wl w, Int op, List(Int) m) {
 @requires(display)
 WlStep on_keyboard(Wl w, Int op, List(Int) m, Int now) {
     if (op == 0) {
-        // The keymap's descriptor: v1 keeps the US layout and closes it.
+        // The layout, as XKB keymap text in the descriptor that came with
+        // the event (format 1). Anything else keeps the layout there is.
         Int fd = resid_disp_recv_fd();
-        _ = if (fd >= 0) { resid_disp_close(fd) } else { false };
-        return quiet(w);
+        Int size = wl_u32(m, 12);
+        List(Int) text = if (fd >= 0) { resid_disp_fd_read(fd, if (wl_u32(m, 8) == 1) { size } else { 0 }) } else { [] };
+        return match (xkb_keymap(text)) {
+            Some(k) => quiet(with_keymap(w, k)),
+            None => quiet(w)
+        };
     }
     if (op == 1) { return WlStep { .w = w, .events = [Focused] }; }
     if (op == 2) { return WlStep { .w = with_rep(w, stop_repeat(w.rep)), .events = [Blurred] }; }
     if (op == 3) {
-        Int key = wl_u32(m, 16);
+        // `raw` is where the key sits; `key` is what the keymap says it is
+        // (its function key, when its keysym names one).
+        Int raw = wl_u32(m, 16);
+        Int key = key_code_in(w.keys.map, raw);
         Bool down = wl_u32(m, 20) == 1;
-        Str text = key_text(key, w.mods);
+        Str text = key_text_in(w.keys.map, raw, w.keys.mods);
         WlRepeat r = w.rep;
         WlRepeat r2 = if (down) { WlRepeat { .key = if (repeats(key)) { key } else { 0 }, .text = text, .next = now + r.delay, .rate = r.rate, .delay = r.delay } }
                       else { if (key == r.key) { stop_repeat(r) } else { r } };
@@ -490,8 +499,7 @@ WlStep on_keyboard(Wl w, Int op, List(Int) m, Int now) {
     if (op == 4) {
         Int held = wl_u32(m, 12) | wl_u32(m, 16);
         Int locked = wl_u32(m, 20);
-        Mods mods = Mods { .shift = (held & 1) != 0, .caps = (locked & 2) != 0, .ctrl = (held & 4) != 0, .alt = (held & 8) != 0 };
-        return quiet(with_input(w, mods, w.px, w.py));
+        return quiet(with_input(w, mods_from_mask(held, locked), w.px, w.py));
     }
     if (op == 5) {
         WlRepeat r = w.rep;

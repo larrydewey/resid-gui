@@ -35,16 +35,28 @@ exposures; maps the window; and attaches two segments.
 Only depth-24 screens stored at 32 bits per pixel are accepted, which is
 every TrueColor X server in practice.
 
-The connection is made without authorization. Xwayland, Xephyr, Xnest
-and servers started without `-auth` accept that; a server that wants a
-`MIT-MAGIC-COOKIE-1` refuses it, because reading `~/.Xauthority` would
-take filesystem and environment authority a GUI program should not need
-(see the README's open items).
+`x11_open` connects with `resid_disp_connect_x11` and authenticates with
+the `MIT-MAGIC-COOKIE-1` that `resid_disp_x11_auth` finds for `$DISPLAY`
+in `$XAUTHORITY` (else `~/.Xauthority`): the runtime reads that one file
+for the `display` grant, so the program needs no filesystem or
+environment authority. With no cookie the setup carries none, which
+Xwayland, Xephyr, Xnest and servers started without `-auth` accept.
+`x11_handshake_auth(fd, cookie)` takes a cookie directly.
+
+The keyboard layout comes from `GetKeyboardMapping` over the setup's key
+code range (`src/x11/keyboard.resid`): group 1's two levels and XKB's
+third and fourth, with the core rule that a letter with no second keysym
+has its capital there. A key whose keysym names a function key (Escape,
+BackSpace, Return, the arrows, ...) is reported as that key's evdev code.
+When the layout changes the server sends `MappingNotify`; the backend asks
+for the mapping again and holds key events back until the reply arrives,
+so keys typed right after a switch decode under the new layout.
 
 ## Requests
 
 `CreateWindow`, `MapWindow`, `DestroyWindow`, `CreateGC`, `FreeGC`,
 `InternAtom`, `ChangeProperty` (8- and 32-bit), `QueryExtension`,
+`GetKeyboardMapping`,
 `PutImage`, `NoOperation`, and MIT-SHM's `QueryVersion`, `AttachFd`,
 `Detach` and `PutImage`. Each test checks the fields at their protocol
 offsets and that the length field matches the bytes.

@@ -165,11 +165,13 @@ UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
 }
 
 UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo) {
-    if (code == key_tab()) {
+    // A key that types something types it, whatever its code.
+    Bool typing = str_len(text) > 0;
+    if (code == key_tab() && !typing) {
         return none(ui_with_focus(ui, next_input(inputs(root), ui.focus)));
     }
     if (ui.focus < 0) { return none(ui); }
-    if (code == key_esc()) { return none(ui_with_focus(ui, -1)); }
+    if (code == key_esc() && !typing) { return none(ui_with_focus(ui, -1)); }
     Found f = find_in(root, area, ui.focus, fo);
     return match (f.w) {
         TextInput(s, k, m) => UiStep { .ui = ui_with_caret(ui, true), .out = edit(s, clamp_int(k, 0, str_len(s)), m, code, text) },
@@ -180,6 +182,7 @@ UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo)
 /// What a key does to a text input holding `s` with the caret at `k`.
 pub List(Event) edit(Str s, Int k, Msg m, Int code, Str text) {
     Int n = str_len(s);
+    if (str_len(text) > 0) { return [TextEdited(m, str_slice(s, 0, k) + text + str_slice(s, k, n), k + str_len(text))]; }
     if (code == key_enter() || code == key_kp_enter()) { return [AppMsg(m)]; }
     if (code == key_backspace()) {
         return if (k > 0) { [TextEdited(m, str_slice(s, 0, k - 1) + str_slice(s, k, n), k - 1)] } else { [] };
@@ -191,8 +194,7 @@ pub List(Event) edit(Str s, Int k, Msg m, Int code, Str text) {
     if (code == key_right()) { return if (k < n) { [TextEdited(m, s, k + 1)] } else { [] }; }
     if (code == key_home()) { return [TextEdited(m, s, 0)]; }
     if (code == key_end()) { return [TextEdited(m, s, n)]; }
-    if (str_len(text) == 0) { return []; }
-    return [TextEdited(m, str_slice(s, 0, k) + text + str_slice(s, k, n), k + str_len(text))];
+    return [];
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────

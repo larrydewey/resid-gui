@@ -29,7 +29,7 @@ pub Canvas raster_region_scaled(Canvas c, List(DrawOp) ops, Rect region, Color b
 
 /// `raster_region_scaled` with text in font `f`.
 pub Canvas raster_region_font(Canvas c, List(DrawOp) ops, Rect region, Color bg, Int scale, Font f) {
-    Rect r = rect_intersect(region, canvas_bounds(c));
+    Rect r = rect_intersect(region, Rect { .x = 0, .y = 0, .w = c.w, .h = c.h });
     if (rect_is_empty(r)) { return c; }
     Int s = if (scale < 1) { 1 } else { scale };
     return raster_ops(fill_rect(c, r, bg), ops, 0, [r], s, 0, 0, f);
@@ -51,9 +51,8 @@ pub Canvas raster_rect(List(DrawOp) ops, Rect r, Color bg, Int scale) {
 /// `raster_rect` for a whole frame, font included.
 pub Canvas raster_frame_rect(Frame fr, Rect r, Color bg) {
     Int s = if (fr.scale < 1) { 1 } else { fr.scale };
-    Canvas c = canvas_new(r.w, r.h);
-    Rect all = canvas_bounds(c);
-    return raster_ops(fill_rect(c, all, bg), fr.ops, 0, [all], s, r.x, r.y, fr.font);
+    Rect all = Rect { .x = 0, .y = 0, .w = if (r.w < 0) { 0 } else { r.w }, .h = if (r.h < 0) { 0 } else { r.h } };
+    return raster_ops(canvas_filled(r.w, r.h, bg), fr.ops, 0, [all], s, r.x, r.y, fr.font);
 }
 
 /// A logical rectangle in device pixels.

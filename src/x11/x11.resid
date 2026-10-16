@@ -11,6 +11,7 @@
 import "../app.resid";
 import "../backend/backend.resid";
 import "../backend/keymap.resid";
+import "keyboard.resid";
 import "../gfx/canvas.resid";
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
@@ -31,14 +32,15 @@ type X11 = {
     Int seg0; Int seg1; Slot s0; Slot s1;
     Int w; Int h; Int scale;
     Int wm_protocols; Int wm_delete;
-    Mods mods; List(Int) buf; List(Rect) redraw;
+    Keys keys; List(Int) buf; List(Rect) redraw;
+    Int km_wait; List(Int) held;
 };
 
 /// A backend that failed to start, carrying why.
 pub X11 x11_failed(Int fd, Str why) {
     return X11 { .fd = fd, .alive = false, .err = why, .setup = setup_empty(), .wid = 0, .gc = 0, .next_id = 0,
                  .shm = 0, .shm_event = 0, .seg0 = 0, .seg1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0),
-                 .w = 0, .h = 0, .scale = 1, .wm_protocols = 0, .wm_delete = 0, .mods = mods_none(), .buf = [], .redraw = [] };
+                 .w = 0, .h = 0, .scale = 1, .wm_protocols = 0, .wm_delete = 0, .keys = keys_us(), .buf = [], .redraw = [], .km_wait = 0, .held = [] };
 }
 
 /// The scale a screen's DPI calls for.
@@ -84,7 +86,8 @@ pub X11 x11_start_on(Session s, WindowOptions opts) {
     Reply a2 = intern(fd, "WM_DELETE_WINDOW", a1.buf);
     Reply a3 = intern(fd, "_NET_WM_NAME", a2.buf);
     Reply a4 = intern(fd, "UTF8_STRING", a3.buf);
-    Reply qe = x11_call(fd, req_query_extension("MIT-SHM"), a4.buf);
+    Reply km = x11_call(fd, mapping_request(st), a4.buf);
+    Reply qe = x11_call(fd, req_query_extension("MIT-SHM"), km.buf);
     if (str_len(a1.err) + str_len(a2.err) + str_len(a3.err) + str_len(a4.err) + str_len(qe.err) > 0) {
         _ = x11_close_fd(fd);
         return x11_failed(-1, "x11: the server refused a setup request");
@@ -119,7 +122,7 @@ pub X11 x11_start_on(Session s, WindowOptions opts) {
                   .shm = shm, .shm_event = if (shm > 0) { reply_byte(qe, 10) } else { 0 },
                   .seg0 = 0, .seg1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0),
                   .w = w, .h = h, .scale = scale, .wm_protocols = reply_word(a1, 8), .wm_delete = reply_word(a2, 8),
-                  .mods = mods_none(), .buf = qv.buf, .redraw = [] };
+                  .keys = Keys { .mods = mods_none(), .map = keymap_from_mapping(km.msg, first_keycode(st)) }, .buf = qv.buf, .redraw = [], .km_wait = 0, .held = [] };
     return if (shm > 0) { x11_attach(x) } else { x };
 }
 
@@ -157,7 +160,7 @@ X11 x11_with_shm(X11 x, Int shm, Int seg0, Int seg1, Slot s0, Slot s1, Int next_
     return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = next_id,
                  .shm = shm, .shm_event = x.shm_event, .seg0 = seg0, .seg1 = seg1, .s0 = s0, .s1 = s1,
                  .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
-                 .mods = x.mods, .buf = x.buf, .redraw = x.redraw };
+                 .keys = x.keys, .buf = x.buf, .redraw = x.redraw, .km_wait = x.km_wait, .held = x.held };
 }
 
 /// Detach and free both segments.
@@ -179,7 +182,7 @@ X11 x11_resized(X11 x, Int w, Int h) {
     X11 y = X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
                   .shm = shm, .shm_event = x.shm_event, .seg0 = 0, .seg1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0),
                   .w = w, .h = h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
-                  .mods = x.mods, .buf = x.buf, .redraw = [] };
+                  .keys = x.keys, .buf = x.buf, .redraw = [], .km_wait = x.km_wait, .held = x.held };
     return if (shm > 0) { x11_attach(y) } else { y };
 }
 
@@ -206,14 +209,54 @@ X11 x11_with_buf(X11 x, List(Int) buf) {
     return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
                  .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
                  .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
-                 .mods = x.mods, .buf = buf, .redraw = x.redraw };
+                 .keys = x.keys, .buf = buf, .redraw = x.redraw, .km_wait = x.km_wait, .held = x.held };
+}
+
+/// The key codes the server has, as a `GetKeyboardMapping` asks for them.
+Int first_keycode(Setup st) { return if (st.min_keycode >= 8) { st.min_keycode } else { 8 }; }
+
+List(Int) mapping_request(Setup st) {
+    Int first = first_keycode(st);
+    Int last = if (st.max_keycode >= first) { st.max_keycode } else { 255 };
+    return req_get_keyboard_mapping(first, last - first + 1);
+}
+
+/// The layout changed (MappingNotify): ask for it again. The reply is read
+/// with the events, in `x11_drain`.
+@requires(display)
+X11 x11_refetch_mapping(X11 x) {
+    return if (resid_disp_send(x.fd, mapping_request(x.setup), -1)) { x11_held(x, x.km_wait + 1, x.held) } else { x11_dead(x, "x11: send failed") };
+}
+
+X11 x11_with_keymap(X11 x, Keymap k) {
+    return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
+                 .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
+                 .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                 .keys = Keys { .mods = x.keys.mods, .map = k }, .buf = x.buf, .redraw = x.redraw,
+                 .km_wait = if (x.km_wait > 0) { x.km_wait - 1 } else { 0 }, .held = x.held };
+}
+
+/// `x` waiting for `wait` keyboard mappings, with key events `held` back
+/// (pressed, key code, state, three numbers each) until they arrive.
+X11 x11_held(X11 x, Int wait, List(Int) held) {
+    return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
+                 .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
+                 .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                 .keys = x.keys, .buf = x.buf, .redraw = x.redraw, .km_wait = wait, .held = held };
+}
+
+/// The held key events, decoded now.
+XStep x11_replay(X11 x, List(Int) held, Int i, List(Event) acc) {
+    if (i + 2 >= held.len()) { return XStep { .x = x, .events = acc }; }
+    XStep s = x11_key(x, held[i] == 1, held[i + 1] - 8, mods_of(held[i + 2]));
+    return x11_replay(s.x, held, i + 3, acc.concat(s.events));
 }
 
 X11 x11_dead(X11 x, Str why) {
     return X11 { .fd = x.fd, .alive = false, .err = why, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
                  .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
                  .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
-                 .mods = x.mods, .buf = [], .redraw = x.redraw };
+                 .keys = x.keys, .buf = [], .redraw = x.redraw, .km_wait = x.km_wait, .held = x.held };
 }
 
 @requires(display)
@@ -226,20 +269,26 @@ XStep x11_drain(X11 x, List(Event) acc) {
         eprintln(x_error_text(m.msg));
         return x11_drain(rest, acc);
     }
-    if (m.kind == 1) { return x11_drain(rest, acc); }
+    // The one request the event loop sends that has a reply is the
+    // keyboard mapping it asks for again after a MappingNotify; the keys
+    // held back while it was on its way are decoded under it.
+    if (m.kind == 1) {
+        X11 y = x11_with_keymap(rest, keymap_from_mapping(m.msg, first_keycode(x.setup)));
+        XStep r = if (y.km_wait == 0) { x11_replay(x11_held(y, 0, []), y.held, 0, []) } else { XStep { .x = y, .events = [] } };
+        return x11_drain(r.x, acc.concat(r.events));
+    }
     XStep s = x11_event(rest, x_decode_event(m.msg, x.shm_event));
     return x11_drain(s.x, acc.concat(s.events));
 }
 
 /// The modifiers a key or button event's state field says are held.
-Mods mods_of(Int state) {
-    return Mods { .shift = (state & 1) != 0, .caps = (state & 2) != 0, .ctrl = (state & 4) != 0, .alt = (state & 8) != 0 };
-}
+Mods mods_of(Int state) { return mods_from_mask(state, state); }
 
 @requires(display)
 XStep x11_event(X11 x, XEv e) {
     return match (e) {
-        XKey(down, kc, state) => x11_key(x, down, kc - 8, mods_of(state)),
+        XKey(down, kc, state) => if (x.km_wait > 0) { XStep { .x = x11_held(x, x.km_wait, x.held.concat([if (down) { 1 } else { 0 }, kc, state])), .events = [] } }
+                                 else { x11_key(x, down, kc - 8, mods_of(state)) },
         XButton(down, b, px, py) => XStep { .x = x, .events = button_events(down, b, px, py) },
         XMotion(px, py) => XStep { .x = x, .events = [PointerMoved(px, py)] },
         XFocus(on) => XStep { .x = x, .events = [if (on) { Focused } else { Blurred }] },
@@ -248,6 +297,7 @@ XStep x11_event(X11 x, XEv e) {
         XClient(t, d) => XStep { .x = x, .events = if (t == x.wm_protocols && d == x.wm_delete) { [Closed] } else { [] } },
         XDestroy => XStep { .x = x11_dead(x, ""), .events = [Closed] },
         XShmDone(seg) => XStep { .x = x11_shm_done(x, seg), .events = [] },
+        XMapping(what) => XStep { .x = if (what == 1) { x11_refetch_mapping(x) } else { x }, .events = [] },
         XOther => XStep { .x = x, .events = [] }
     };
 }
@@ -256,8 +306,9 @@ XStep x11_key(X11 x, Bool down, Int code, Mods m) {
     X11 y = X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
                   .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
                   .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
-                  .mods = m, .buf = x.buf, .redraw = x.redraw };
-    return XStep { .x = y, .events = [if (down) { KeyDown(code, key_text(code, m)) } else { KeyUp(code) }] };
+                  .keys = Keys { .mods = m, .map = x.keys.map }, .buf = x.buf, .redraw = x.redraw, .km_wait = x.km_wait, .held = x.held };
+    Int key = key_code_in(x.keys.map, code);
+    return XStep { .x = y, .events = [if (down) { KeyDown(key, key_text_in(x.keys.map, code, m)) } else { KeyUp(key) }] };
 }
 
 /// Buttons 4-7 are the wheel: one notch per press, nothing on release.
@@ -273,7 +324,7 @@ X11 x11_with_redraw(X11 x, List(Rect) r) {
     return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
                  .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
                  .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
-                 .mods = x.mods, .buf = x.buf, .redraw = r };
+                 .keys = x.keys, .buf = x.buf, .redraw = r, .km_wait = x.km_wait, .held = x.held };
 }
 
 X11 x11_shm_done(X11 x, Int seg) {

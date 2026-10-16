@@ -21,7 +21,7 @@ type Setup = {
     Str vendor;
     Int root; Int root_visual; Int root_depth;
     Int width_px; Int height_px; Int width_mm; Int height_mm;
-    Int bpp24;
+    Int bpp24; Int min_keycode; Int max_keycode;
 };
 
 // The reply's fixed part is 8 bytes; the fields the client needs start
@@ -73,7 +73,8 @@ pub Setup setup_empty() {
     return Setup { .release = 0, .id_base = 0, .id_mask = 0, .motion_buf = 0,
                    .max_request_len = 0, .screens = 0, .formats = 0, .vendor = "",
                    .root = 0, .root_visual = 0, .root_depth = 0,
-                   .width_px = 0, .height_px = 0, .width_mm = 0, .height_mm = 0, .bpp24 = 0 };
+                   .width_px = 0, .height_px = 0, .width_mm = 0, .height_mm = 0, .bpp24 = 0,
+                   .min_keycode = 0, .max_keycode = 0 };
 }
 
 /// Parse the server's first reply. `bs[0]` is the success byte: 1 for
@@ -107,7 +108,9 @@ pub Result(Setup, Str) setup_parse(List(Int) bs) {
         .height_px = setup_word16(bs, screen_at + 22),
         .width_mm = setup_word16(bs, screen_at + 24),
         .height_mm = setup_word16(bs, screen_at + 26),
-        .bpp24 = format_bpp(bs, formats_at, nformats, 24, 0)
+        .bpp24 = format_bpp(bs, formats_at, nformats, 24, 0),
+        .min_keycode = bs[34],
+        .max_keycode = bs[35]
     });
 }
 
@@ -171,6 +174,8 @@ test "a generated reply parses, screen included" {
     expect(s.width_mm).toEqual(508);
     expect(s.bpp24).toEqual(32);
     expect(s.max_request_len).toEqual(65535);
+    expect(s.min_keycode).toEqual(8);
+    expect(s.max_keycode).toEqual(255);
 }
 
 test "a reply with no screen is refused" {

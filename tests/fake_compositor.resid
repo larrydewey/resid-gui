@@ -5,8 +5,9 @@
 // `wl_pump`, in a spawned region. The compositor here announces four
 // globals, configures the toplevel on its first commit, receives the two
 // pools' descriptors, and once a buffer is committed sends scripted input:
-// the pointer enters, the primary button goes down and up, the A key goes
-// down and up, and the window is asked to close. The client counts the
+// a keymap, the pointer enters, the primary button goes down and up, the
+// key a US keyboard calls A goes down and up (typing q under the keymap),
+// and the window is asked to close. The client counts the
 // events it decoded; the compositor counts what it received.
 
 import "../src/app.resid";
@@ -126,7 +127,9 @@ Comp commit(Int fd, Comp c) {
         return c;
     }
     if (c.attached != 0 && !c.input_sent) {
-        // enter at (10.5, 20), button 272 down and up, key 30 (A) down and up, close
+        // a French keymap, enter at (10.5, 20), button 272 down and up,
+        // key 30 (A on a US keyboard, Q here) down and up, close
+        _ = send_keymap(fd, c.keyboard);
         List(List(Int)) input = [
             wl_msg(c.pointer, 0, wl_words([1, c.surface, 10 * 256 + 128, 20 * 256])),
             wl_msg(c.pointer, 3, wl_words([2, 0, 272, 1])),
@@ -139,6 +142,32 @@ Comp commit(Int fd, Comp c) {
         return set(c, "input_sent", 1);
     }
     return c;
+}
+
+/// The keymap the compositor hands over: key code 38 (evdev 30) types q.
+Str azerty() {
+    return "xkb_keymap {\n xkb_keycodes \"evdev\" { minimum = 8; maximum = 255; <AC01> = 38; };\n"
+        + " xkb_symbols \"pc+fr\" { key <AC01> { [ q, Q ] }; };\n};\n";
+}
+
+/// `wl_keyboard.keymap` (format 1, XKB text) with the text in a shared
+/// mapping whose descriptor rides along.
+@requires(display)
+Bool send_keymap(Int fd, Int keyboard) {
+    Str t = azerty();
+    List(Int) bytes = text_bytes(t, 0, lb()).concat([0]);
+    Int h = resid_disp_shm_new(bytes.len());
+    if (h == 0 || !resid_disp_shm_put(h, 0, bytes, bytes.len())) { return false; }
+    Bool sent = resid_disp_send(fd, wl_msg(keyboard, 0, wl_words([1, bytes.len()])), resid_disp_shm_fd(h));
+    _ = resid_disp_shm_free(h);
+    return sent;
+}
+
+ListBuf(Int) lb() { ListBuf(Int) b = ListBuf(); return b; }
+
+List(Int) text_bytes(Str s, Int i, ListBuf(Int) acc) {
+    if (i >= str_len(s)) { return acc.finish(); }
+    return text_bytes(s, i + 1, acc.push(str_char_at(s, i)));
 }
 
 /// What the client decoded.
@@ -191,7 +220,7 @@ test "the Wayland backend configures, presents and decodes input" {
     expect(c.pools).toEqual(2);
     expect(c.attached != 0).toEqual(true);
     expect(c.frames).toEqual(1);
-    expect(g.text).toEqual("a");
+    expect(g.text).toEqual("q");
     expect(g.downs).toEqual(1);
     expect(g.ups).toEqual(1);
     expect(g.keys).toEqual(1);

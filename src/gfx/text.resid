@@ -61,7 +61,8 @@ Canvas blend_block(Canvas c, Int x, Int y, Int k, Color col, Int a, Rect clip, I
 
 /// Draw `s` clipped to the canvas alone.
 pub Canvas render_text(Canvas c, Int x0, Int y0, Str s, Color col) {
-    return render_text_clip(c, x0, y0, s, col, canvas_bounds(c));
+    Rect all = Rect { .x = 0, .y = 0, .w = c.w, .h = c.h };
+    return render_text_clip(c, x0, y0, s, col, all);
 }
 
 Canvas text_chars(Canvas c, Int x0, Int y0, Str s, Int n, Color col, Rect clip, Int i, Int k) {

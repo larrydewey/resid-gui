@@ -3,25 +3,40 @@
 //
 // Widgets are numbered in pre-order (`node_count` in layout.resid); the
 // numbers name the focused text input and the widget a pointer button went
-// down on. The caret's blink phase lives here too.
+// down on. The caret's blink phase lives here too, and so do the selection
+// anchor and the Shift and Ctrl keys held: the program owns the text and
+// the caret (`TextInput(text, caret, m)`), the library owns the rest of
+// editing.
 
 /// The library's own widget state.
 pub type UiState = {
     Int focus;      // the focused TextInput's number, or -1
     Int pressed;    // the widget the primary button went down on, or -1
     Bool caret_on;  // the caret's blink phase
+    Int anchor;     // where the focused input's selection starts, or -1;
+                    // it runs from here to the caret
+    Bool shift;     // a Shift key is held
+    Bool ctrl;      // a Ctrl key is held
 };
 
 /// Nothing focused, nothing pressed, caret visible.
-pub UiState ui_new() { return UiState { .focus = -1, .pressed = -1, .caret_on = true }; }
+pub UiState ui_new() { return UiState { .focus = -1, .pressed = -1, .caret_on = true, .anchor = -1, .shift = false, .ctrl = false }; }
 
-pub UiState ui_with_focus(UiState u, Int f) { return UiState { .focus = f, .pressed = u.pressed, .caret_on = true }; }
-pub UiState ui_with_pressed(UiState u, Int p) { return UiState { .focus = u.focus, .pressed = p, .caret_on = u.caret_on }; }
-pub UiState ui_with_caret(UiState u, Bool on) { return UiState { .focus = u.focus, .pressed = u.pressed, .caret_on = on }; }
+/// A new focus drops the selection.
+pub UiState ui_with_focus(UiState u, Int f) {
+    return UiState { .focus = f, .pressed = u.pressed, .caret_on = true, .anchor = if (f == u.focus) { u.anchor } else { -1 }, .shift = u.shift, .ctrl = u.ctrl };
+}
+pub UiState ui_with_pressed(UiState u, Int p) { return UiState { .focus = u.focus, .pressed = p, .caret_on = u.caret_on, .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl }; }
+pub UiState ui_with_caret(UiState u, Bool on) { return UiState { .focus = u.focus, .pressed = u.pressed, .caret_on = on, .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl }; }
+pub UiState ui_with_anchor(UiState u, Int a) { return UiState { .focus = u.focus, .pressed = u.pressed, .caret_on = u.caret_on, .anchor = a, .shift = u.shift, .ctrl = u.ctrl }; }
+pub UiState ui_with_mods(UiState u, Bool shift, Bool ctrl) { return UiState { .focus = u.focus, .pressed = u.pressed, .caret_on = u.caret_on, .anchor = u.anchor, .shift = shift, .ctrl = ctrl }; }
 
 test "state updates one field at a time" {
     UiState u = ui_with_pressed(ui_with_focus(ui_new(), 3), 5);
     expect(u.focus).toEqual(3);
     expect(u.pressed).toEqual(5);
     expect(ui_with_caret(u, false).caret_on).toEqual(false);
+    UiState s = ui_with_anchor(u, 2);
+    expect(ui_with_focus(s, 3).anchor).toEqual(2);
+    expect(ui_with_focus(s, 4).anchor).toEqual(-1);
 }

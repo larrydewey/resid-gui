@@ -394,7 +394,7 @@ Bool put_bands(X11 x, Canvas c, Rect r, Int y0) {
     Int per = if (r.w * 4 > limit) { 0 } else { limit / (r.w * 4) };
     if (per <= 0) { return false; }
     Int rows = if (y0 + per > r.h) { r.h - y0 } else { per };
-    List(Int) px = c.px[(y0 * r.w * 4)..((y0 + rows) * r.w * 4)];
+    List(Int) px = canvas_rows(c, y0, y0 + rows);
     if (!resid_disp_send(x.fd, req_put_image(x.wid, x.gc, r.w, rows, r.x, r.y + y0, 24, px), -1)) { return false; }
     return put_bands(x, c, r, y0 + rows);
 }

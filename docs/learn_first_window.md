@@ -117,17 +117,19 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
 | `Padding(n, w)` | `n` pixels around `w` |
 | `Align(ax, ay, w)` | `w` placed at `ax`/`ay` percent of the free space |
 | `Scroll(offset, w)` | `w` shifted up by `offset` and clipped; move `offset` on `Wheel` |
+| `Rows(offset, row_h, rows)` | a long list of `row_h`-pixel rows, scrolled like `Scroll`; only the rows in view cost anything |
 | `Bitmap(w, h, px)` | a `w` x `h` image, four bytes per pixel, blue-green-red-alpha |
 
-Text inputs, sliders, scroll areas and aligned boxes stretch along a row
-or column; everything else keeps its natural size along the axis and
-fills the box across it. Tab moves focus between text inputs and Escape
-clears it.
+Text inputs, sliders, scroll areas, lists and aligned boxes stretch along
+a row or column; everything else keeps its natural size along the axis
+and fills the box across it. Tab and Shift+Tab move focus between text
+inputs and Escape clears it. In an input, Shift with the arrows, Home and
+End selects, as does dragging, and Ctrl+A selects everything.
 
 The model owns every piece of state the program cares about, including a
 text input's caret and a scroll offset. The library keeps only what
 belongs to the widgets themselves: which input has focus, which control is
-held down, and the caret's blink phase.
+held down, the caret's blink phase and where a selection is anchored.
 
 ## Starting from loaded data
 

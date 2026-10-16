@@ -40,17 +40,44 @@ Rect damage_at(List(DrawOp) old, List(DrawOp) now, Int i, Rect acc, Font f) {
 pub List(Rect) damage_rects(List(DrawOp) old, List(DrawOp) now) { return damage_rects_in(old, now, font_builtin()); }
 
 /// `damage_rects` with text in font `f`.
-pub List(Rect) damage_rects_in(List(DrawOp) old, List(DrawOp) now, Font f) { return damage_rects_at(old, now, 0, [], f); }
+///
+/// The lists are matched from both ends: the ops they share at the start
+/// and at the end are unchanged, even when an op appeared or vanished
+/// between them (a caret blinking off, a checkbox mark, a new list row)
+/// and shifted everything after it. Only the middle is damage: op by op
+/// when both middles are the same length, else every op in either.
+pub List(Rect) damage_rects_in(List(DrawOp) old, List(DrawOp) now, Font f) {
+    Int lo = old.len();
+    Int ln = now.len();
+    Int p = common_prefix(old, now, 0, min_len(lo, ln));
+    Int s = common_suffix(old, now, 0, min_len(lo, ln) - p);
+    if (lo == ln) { return damage_rects_at(old, now, p, lo - s, [], f); }
+    return bounds_add(now, p, ln - s, bounds_add(old, p, lo - s, [], f), f);
+}
 
-List(Rect) damage_rects_at(List(DrawOp) old, List(DrawOp) now, Int i, List(Rect) acc, Font f) {
-    Bool in_old = i < old.len();
-    Bool in_now = i < now.len();
-    if (!in_old && !in_now) { return acc; }
-    if (in_old && in_now) {
-        if (draw_op_eq(old[i], now[i])) { return damage_rects_at(old, now, i + 1, acc, f); }
-        return damage_rects_at(old, now, i + 1, rects_add(rects_add(acc, diff_bounds(old[i], f)), diff_bounds(now[i], f)), f);
-    }
-    return damage_rects_at(old, now, i + 1, rects_add(acc, if (in_old) { diff_bounds(old[i], f) } else { diff_bounds(now[i], f) }), f);
+Int min_len(Int a, Int b) { return if (a < b) { a } else { b }; }
+
+Int common_prefix(List(DrawOp) a, List(DrawOp) b, Int i, Int cap) {
+    if (i >= cap || !draw_op_eq(a[i], b[i])) { return i; }
+    return common_prefix(a, b, i + 1, cap);
+}
+
+Int common_suffix(List(DrawOp) a, List(DrawOp) b, Int k, Int cap) {
+    if (k >= cap || !draw_op_eq(a[a.len() - 1 - k], b[b.len() - 1 - k])) { return k; }
+    return common_suffix(a, b, k + 1, cap);
+}
+
+/// Op-by-op damage over positions `i` to `end` of two equal-length lists.
+List(Rect) damage_rects_at(List(DrawOp) old, List(DrawOp) now, Int i, Int end, List(Rect) acc, Font f) {
+    if (i >= end) { return acc; }
+    if (draw_op_eq(old[i], now[i])) { return damage_rects_at(old, now, i + 1, end, acc, f); }
+    return damage_rects_at(old, now, i + 1, end, rects_add(rects_add(acc, diff_bounds(old[i], f)), diff_bounds(now[i], f)), f);
+}
+
+/// The bounds of ops `i` to `end` added to `acc`.
+List(Rect) bounds_add(List(DrawOp) xs, Int i, Int end, List(Rect) acc, Font f) {
+    if (i >= end) { return acc; }
+    return bounds_add(xs, i + 1, end, rects_add(acc, diff_bounds(xs[i], f)), f);
 }
 
 /// Whether two display lists are the same frame.
@@ -88,4 +115,14 @@ test "ops only one frame has are damage, and so are changed clips" {
     expect(d.h).toEqual(16);
     Rect c = damage([OpClipPush(Rect { .x = 0, .y = 0, .w = 5, .h = 5 })], [OpClipPush(Rect { .x = 0, .y = 0, .w = 9, .h = 5 })]);
     expect(c.w).toEqual(9);
+}
+
+test "an op that appears shifts nothing after it into the damage" {
+    List(DrawOp) a = [OpText(0, 0, "a", rgb(0, 0, 0)), OpText(0, 500, "b", rgb(0, 0, 0))];
+    List(DrawOp) b = [OpText(0, 0, "a", rgb(0, 0, 0)), OpFill(Rect { .x = 40, .y = 40, .w = 1, .h = 16 }, rgb(0, 0, 0)), OpText(0, 500, "b", rgb(0, 0, 0))];
+    List(Rect) d = damage_rects(a, b);
+    expect(d.len()).toEqual(1);
+    expect(d[0].x).toEqual(40);
+    expect(d[0].w).toEqual(1);
+    expect(damage_rects(b, a).len()).toEqual(1);
 }

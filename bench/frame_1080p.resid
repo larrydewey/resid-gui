@@ -1,0 +1,87 @@
+// frame_1080p.resid — the performance gate of PLAN-gui.md §4 (G3): a whole
+// 1920x1080 frame of mixed UI, from widget tree to shared memory.
+//
+//   residc bench/frame_1080p.resid -o frame && ./frame
+//
+// The view is 45 rows of a label, a button, a checkbox, a text input and a
+// slider: about 900 draw ops, more than any ordinary window shows. Each
+// stage is timed on its own, best of five runs: paint (widget tree to
+// display list), the full-frame rasterization, the copy into shared
+// memory, and a damaged-rectangle redraw of one caret blink.
+
+import "../src/app.resid";
+import "../src/gfx/canvas.resid";
+import "../src/gfx/color.resid";
+import "../src/gfx/draw.resid";
+import "../src/gfx/font.resid";
+import "../src/gfx/raster.resid";
+import "../src/ui/damage.resid";
+import "../src/ui/paint.resid";
+import "../src/ui/state.resid";
+
+Widget row_of(Int i) {
+    return Row([Text(f"item {i}"), Button("open", Custom(i)), Checkbox("done", i % 3 == 0, Toggled),
+                TextInput(f"note for {i}", 4, Custom(1000 + i)), Slider((i * 7) % 100, Custom(2000 + i))]);
+}
+
+List(Widget) rows_from(Int i, Int n, ListBuf(Widget) b) {
+    if (i >= n) { return b.finish(); }
+    return rows_from(i + 1, n, b.push(row_of(i)));
+}
+
+@requires(clock(readonly))
+Int now_us() { return clock.monotonic_ns() / 1000; }
+
+/// The best of `n` timings of a full paint, in microseconds.
+@requires(clock(readonly))
+Int best_paint(Widget v, Rect r, UiState u, Int n, Int best) {
+    if (n <= 0) { return best; }
+    Int t = now_us();
+    Int k = paint(v, r, u).len();
+    Int d = now_us() - t + k * 0;
+    return best_paint(v, r, u, n - 1, if (best < 0 || d < best) { d } else { best });
+}
+
+@requires(clock(readonly))
+Int best_raster(List(DrawOp) ops, Rect r, Int n, Int best) {
+    if (n <= 0) { return best; }
+    Int t = now_us();
+    Int k = raster_frame_rect(Frame { .ops = ops, .scale = 1, .font = font_builtin() }, r, background()).px.len();
+    Int d = now_us() - t + k * 0;
+    return best_raster(ops, r, n - 1, if (best < 0 || d < best) { d } else { best });
+}
+
+@requires(clock(readonly), display)
+Int best_put(Int hnd, List(UInt(32)) px, Int n, Int best) {
+    if (n <= 0) { return best; }
+    Int t = now_us();
+    _ = resid_disp_shm_put32(hnd, 0, px, 0, px.len());
+    Int d = now_us() - t;
+    return best_put(hnd, px, n - 1, if (best < 0 || d < best) { d } else { best });
+}
+
+@requires(clock(readonly), display)
+Int main() {
+    Rect screen = Rect { .x = 0, .y = 0, .w = 1920, .h = 1080 };
+    Widget v = Padding(8, Column(rows_from(0, 45, ListBuf())));
+    UiState lit = ui_with_focus(ui_new(), 6);   // the first row's text input
+    List(DrawOp) ops = paint(v, screen, lit);
+    Int p = best_paint(v, screen, lit, 5, -1);
+    Int r = best_raster(ops, screen, 5, -1);
+    Canvas frame = raster_frame_rect(Frame { .ops = ops, .scale = 1, .font = font_builtin() }, screen, background());
+    Int hnd = resid_disp_shm_new(1920 * 1080 * 4);
+    Int s = best_put(hnd, frame.px, 5, -1);
+    _ = resid_disp_shm_free(hnd);
+    List(DrawOp) dark = paint(v, screen, ui_with_caret(lit, false));
+    List(Rect) d = damage_rects(ops, dark);
+    Int t = now_us();
+    Int k = raster_frame_rect(Frame { .ops = dark, .scale = 1, .font = font_builtin() }, d[0], background()).px.len();
+    Int blink = now_us() - t + k * 0;
+    println(f"1920x1080, {ops.len()} draw ops (best of 5)");
+    println(f"paint           {p / 1000}.{(p % 1000) / 100} ms");
+    println(f"rasterize full  {r / 1000}.{(r % 1000) / 100} ms");
+    println(f"shm_put full    {s / 1000}.{(s % 1000) / 100} ms");
+    println(f"full frame      {(p + r + s) / 1000}.{((p + r + s) % 1000) / 100} ms (gate: 4 ms)");
+    println(f"caret blink     {blink} us for {d.len()} rectangle(s), {d[0].w}x{d[0].h}");
+    return 0;
+}

@@ -56,17 +56,29 @@ static void *bump(size_t n) {
     return p;
 }
 
-static double ffloor(double x) { double t = (double)(int64_t)x; return t > x ? t - 1 : t; }
-static double fceil(double x) { double t = (double)(int64_t)x; return t < x ? t + 1 : t; }
+/* A hostile font can make any of these NaN or huge, and converting such a
+ * double to an integer is undefined in C: every conversion goes through
+ * toi, which maps NaN to 0 and clamps to +-2^31 (a coordinate that large
+ * fails the module's own size checks). */
+static int64_t toi(double x) {
+    if (x != x) return 0;
+    if (x > 2147483647.0) return 2147483647;
+    if (x < -2147483648.0) return -2147483648LL;
+    return (int64_t)x;
+}
+static double ffloor(double x) { double t = (double)toi(x); return t > x ? t - 1 : t; }
+static double fceil(double x) { double t = (double)toi(x); return t < x ? t + 1 : t; }
+static int ifloor(double x) { return (int)toi(ffloor(x)); }
+static int iceil(double x) { return (int)toi(fceil(x)); }
 static double ffabs(double x) { return x < 0 ? -x : x; }
 static double fsqrt(double x) { return __builtin_sqrt(x); }
-static double ffmod(double x, double y) { return x - (double)(int64_t)(x / y) * y; }
+static double ffmod(double x, double y) { return x - (double)toi(x / y) * y; }
 
 /* exp and log by range reduction and series: used only by the cubic
  * solver of signed-distance fields, which this module never asks for, but
  * stb_truetype must still link. */
 static double fexp(double x) {
-    int k = (int)(x / 0.6931471805599453);
+    int k = (int)toi(x / 0.6931471805599453);
     double r = x - k * 0.6931471805599453, term = 1, sum = 1;
     for (int i = 1; i < 20; i++) { term *= r / i; sum += term; }
     while (k > 0) { sum *= 2; k--; }
@@ -103,8 +115,8 @@ static double facos(double x) {
 }
 static size_t fstrlen(const char *s) { size_t n = 0; while (s[n]) n++; return n; }
 
-#define STBTT_ifloor(x)     ((int)ffloor(x))
-#define STBTT_iceil(x)      ((int)fceil(x))
+#define STBTT_ifloor(x)     ifloor(x)
+#define STBTT_iceil(x)      iceil(x)
 #define STBTT_sqrt(x)       fsqrt(x)
 #define STBTT_pow(x, y)     fpow(x, y)
 #define STBTT_fmod(x, y)    ffmod(x, y)
@@ -138,13 +150,16 @@ void font_atlas(const uint8_t *font, int64_t cap, int64_t len, int64_t px, uint8
     if (px < 4 || px > 256) { fail(out, 2); return; }
     if (len <= 0 || len > cap) { fail(out, 1); return; }
     stbtt_fontinfo info;
+    stbtt__lo = font;
+    stbtt__hi = font + len;
     int off = stbtt_GetFontOffsetForIndex(font, 0);
     if (off < 0 || off >= len || !stbtt_InitFont(&info, font, off)) { fail(out, 1); return; }
     float scale = stbtt_ScaleForPixelHeight(&info, (float)px);
     int ascent, descent, gap;
     stbtt_GetFontVMetrics(&info, &ascent, &descent, &gap);
-    int asc = (int)fceil(ascent * scale);
-    int line = asc + (int)fceil(-descent * scale) + (int)(gap * scale);
+    if (!(scale > 0 && scale < 65536)) { fail(out, 1); return; }
+    int asc = iceil(ascent * scale);
+    int line = asc + iceil(-descent * scale) + (int)toi(gap * scale);
 
     /* Pack the glyphs left to right in rows ATLAS_W wide. */
     int64_t room = (ocap < OUT_CAP ? ocap : OUT_CAP) - ATLAS_AT;
@@ -160,7 +175,7 @@ void font_atlas(const uint8_t *font, int64_t cap, int64_t len, int64_t px, uint8
         if (x + w > ATLAS_W) { x = 0; y += row + 1; row = 0; }
         if ((int64_t)(y + h) * ATLAS_W > room) { fail(out, 3); return; }
         int64_t r = HEADER + (int64_t)i * RECORD;
-        put32(out, r, (int32_t)fceil(adv * scale));
+        put32(out, r, (int32_t)iceil(adv * scale));
         put32(out, r + 4, x0);
         put32(out, r + 8, asc + y0);
         put32(out, r + 12, w);
@@ -177,7 +192,7 @@ void font_atlas(const uint8_t *font, int64_t cap, int64_t len, int64_t px, uint8
     int kerns = 0;
     for (int a = 32; a <= 126; a++)
         for (int b = 32; b <= 126 && kerns < KERN_MAX; b++) {
-            int k = (int)(stbtt_GetCodepointKernAdvance(&info, a, b) * scale);
+            int k = (int)toi(stbtt_GetCodepointKernAdvance(&info, a, b) * scale);
             if (k == 0) continue;
             int64_t at = HEADER + GLYPHS * RECORD + (int64_t)kerns * 4;
             out[at] = (uint8_t)a; out[at + 1] = (uint8_t)b;

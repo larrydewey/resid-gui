@@ -21,7 +21,7 @@ import "../native/image/image.resid";
 Int check_png() {
     Canvas c = fill_rect(fill_rect(canvas_new(3, 2), Rect { .x = 0, .y = 0, .w = 3, .h = 2 }, rgb(10, 20, 30)), Rect { .x = 2, .y = 1, .w = 1, .h = 1 }, rgb(200, 100, 50));
     Image im = image_from_bytes(canvas_to_png(c).bytes) else { image_new(0, 0) };
-    return ok("PNG decodes to its pixels", im.w == 3 && im.h == 2 && f"{im.px}" == f"{c.px}");
+    return ok("PNG decodes to its pixels", im.w == 3 && im.h == 2 && f"{im.px}" == f"{finish(c)}");
 }
 
 @requires(native_image)

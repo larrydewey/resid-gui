@@ -1,7 +1,8 @@
 import "../src/gui.resid";
 
 // A todo list: a text input with an Add button, then one checkbox per item
-// with a remove button, in a scrolling column.
+// with a remove button, in a scrolling list (`Rows`: only the rows in
+// view are laid out and painted, however long the list grows).
 
 type Item = { Str text; Bool done; };
 type Todo = { List(Item) items; Str draft; Int caret; Int scroll; };
@@ -41,8 +42,11 @@ Todo on_msg(Todo t, Msg m) {
     };
 }
 
+/// One item's row: a 28-pixel button and the gap below it.
+Int row_h() { return 32; }
+
 Int clamp_scroll(Todo t, Int v) {
-    Int most = t.items.len() * 32;
+    Int most = t.items.len() * row_h();
     return if (v < 0) { 0 } else { if (v > most) { most } else { v } };
 }
 
@@ -50,7 +54,7 @@ Todo todo_update(Todo t, Event e) {
     return match (e) {
         AppMsg(m) => on_msg(t, m),
         TextEdited(m, s, k) => Todo { .items = t.items, .draft = s, .caret = k, .scroll = t.scroll },
-        Wheel(dx, dy) => Todo { .items = t.items, .draft = t.draft, .caret = t.caret, .scroll = clamp_scroll(t, t.scroll + dy * 32) },
+        Wheel(dx, dy) => Todo { .items = t.items, .draft = t.draft, .caret = t.caret, .scroll = clamp_scroll(t, t.scroll + dy * row_h()) },
         _ => t
     };
 }
@@ -68,7 +72,7 @@ Int left(List(Item) xs, Int i, Int acc) {
 Widget todo_view(Todo t) {
     return Padding(8, Column([
         Row([TextInput(t.draft, t.caret, add()), Button("Add", add())]),
-        Scroll(t.scroll, Column(rows(t.items, 0, []))),
+        Rows(t.scroll, row_h(), rows(t.items, 0, [])),
         Text(f"{left(t.items, 0, 0)} of {t.items.len()} left")
     ]));
 }

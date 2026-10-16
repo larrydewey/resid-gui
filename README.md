@@ -49,8 +49,11 @@ tests/run.sh     # every test file under src/ and tests/, then every example
 ```
 
 It includes a fake X server and a fake Wayland compositor that drive the
-real backends over socket pairs, golden images compared by SHA-256, and
-real calls into both native modules.
+real backends over socket pairs, golden images compared by SHA-256, real
+calls into both native modules, a deliberately malicious font module
+(`tests/evil.sh`), and a check that every program in docs/ compiles and
+every signature it lists exists (`tools/check_docs.py`). The native
+modules' C is fuzzed separately (`native/fuzz/run.sh`).
 
 Text is the built-in 8x16 bitmap font, or any TrueType font through the
 optional native font module; images (PNG, JPEG, BMP, GIF, TGA) decode
@@ -68,8 +71,11 @@ and each backend connects to its own protocol's socket.
 These need four `display` builtins (`resid_disp_connect_wayland`,
 `resid_disp_connect_x11`, `resid_disp_fd_read`, `resid_disp_x11_auth`) and
 the fix to `resid_disp_recv_fd` handing back the wrong descriptor, all in
-Resid since `d71c0d33`; a Resid installed from an earlier commit cannot
-build the backends.
+Resid since `d71c0d33`. They also need `resid_disp_shm_put32` (a frame's
+pixels copied into shared memory a word at a time) and spawn regions with
+room for the native modules' 16 MB values, both on Resid's `gui-runtime`
+branch: until it is merged and installed, build with its compiler,
+`RESIDC=../resid.worktrees/gui-runtime/build/boot/residc tests/run.sh`.
 
 Speed: a whole 2700x2200 frame of 800 draw ops rasterizes in about 70 ms
 and copies into shared memory in about 30 ms, and an ordinary frame
@@ -140,7 +146,12 @@ is pure, so:
   more; one that loads fonts or images adds `filesystem(readonly)` and
   `native_font` or `native_image`.
 - Font and image bytes are untrusted input to native code. The process
-  boundary contains a crash, and the Resid side validates the answer.
+  boundary contains an escape attempt (`tests/evil.sh` tries a dozen),
+  and the Resid side validates the answer. The calls run in spawn
+  regions, so a crash is an `Err`, not the end of the program; the
+  vendored decoders are fuzzed and patched so that they do not crash
+  (stb_truetype's reads of the file are bounds-checked,
+  docs/reference_native.md).
 - Everything the server sends is untrusted input. Every decoder
   bounds-checks; a reply longer than 1 MB, a Wayland message over 4096
   bytes or a string that overruns its message is refused, and a corrupt

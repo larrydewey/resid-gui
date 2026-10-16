@@ -1,0 +1,26 @@
+// probe.resid — calls the malicious font module (evil/font.c) through the
+// real wrapper, native/font/font.resid, so the attack meets exactly what a
+// GUI program would. Built and run by tests/evil.sh:
+//
+//   probe ATTACK PATH
+//
+// The module receives PATH as its "font" bytes (attack 1 tries to create
+// it). The wrapper calls the module in a spawn region, so an attack the
+// host stops comes back as an `Err`; every outcome is printed as
+// "accepted" or "refused: <why>".
+
+import "../font/font.resid";
+
+List(Int) ascii(Str s, Int i, ListBuf(Int) b) {
+    if (i >= str_len(s)) { return b.push(0).finish(); }
+    return ascii(s, i + 1, b.push(str_char_at(s, i)));
+}
+
+@requires(args, native_font)
+Int main() {
+    Int attack = str_parse_int(args.get(1));
+    List(Int) bytes = ascii(args.get(2), 0, ListBuf());
+    Str said = match (font_from_ttf(bytes, attack, 1)) { Ok(f) => "accepted", Err(e) => f"refused: {e}" };
+    println(said);
+    return 0;
+}

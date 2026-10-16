@@ -204,3 +204,32 @@ test "a lying atlas answer is refused" {
     Bool notfont = match (font_parse(good.with(4, 1), 1)) { Ok(f) => false, Err(e) => e == "font: not a TrueType font" };
     expect(notfont).toEqual(true);
 }
+
+/// The next value of a 31-bit linear congruential generator, for the
+/// mutation tests below.
+Int lcg(Int x) { return (x * 1103515245 + 12345) % 2147483648; }
+
+/// `n` answers, each a copy of `good` with up to four random bytes
+/// replaced by random values and some cut short, fed to `font_parse`:
+/// every one must come back as `Ok` or `Err`, never an abort. Returns how
+/// many were refused.
+Int parse_mutants(List(Int) good, Int n, Int seed, Int refused) {
+    if (n <= 0) { return refused; }
+    Int s1 = lcg(seed);
+    Int s2 = lcg(s1);
+    Int s3 = lcg(s2);
+    Int s4 = lcg(s3);
+    // Mutate the header and glyph records most: that is where lies hide.
+    Int span = if (s1 % 4 == 0) { good.len() } else { 32 + 95 * 28 + 8 };
+    List(Int) m1 = good.with(s1 % span, s2 % 256);
+    List(Int) m2 = if (s2 % 2 == 0) { m1.with(s3 % span, s4 % 256) } else { m1 };
+    List(Int) m3 = if (s3 % 3 == 0) { m2.with((s4 / 7) % span, if (s4 % 2 == 0) { 255 } else { 128 }) } else { m2 };
+    List(Int) m = if (s4 % 16 == 0) { m3[0..(s1 % m3.len())] } else { m3 };
+    Bool no = match (font_parse(m, 1)) { Ok(f) => false, Err(e) => true };
+    return parse_mutants(good, n - 1, s4, refused + if (no) { 1 } else { 0 });
+}
+
+test "mutated atlas answers are parsed or refused, never an abort" {
+    Int refused = parse_mutants(test_atlas_answer(), 400, 7, 0);
+    expect(refused > 0).toEqual(true);
+}

@@ -72,7 +72,50 @@ im.px)`; transparent pixels blend over the window.
 ## The stack
 
 A call carries 16 MB fixed-size values inline (the font file in, the
-decoded image out). Make these calls on the main thread, in `main` or
-what it calls directly, not in a `spawn` region or a `test` block, whose
-stacks are smaller. That is why `tests/native.resid` is a program that
-`tests/run.sh` runs rather than a test file.
+decoded image out), on the stack of the spawn region the wrapper runs it
+in. A `test` block's stack is smaller, which is why `tests/native.resid`
+is a program that `tests/run.sh` runs rather than a test file.
+
+Both wrappers make the call inside a `spawn` region, because a failed
+native call (a crash, a signal, a malformed reply) aborts the program
+anywhere else (spec §47); in a region it is the region's `Err`, which
+the wrappers return as `Err("font: the font module failed")` or
+`Err("image: the image module failed")`. A region holds the 16 MB values
+on its own thread stack, 256 MB by default (`RESID_SPAWN_STACK_MB`;
+decoding takes about 112 MB of it). Still, a decoder that crashes is a
+bug, which is what the next section is about.
+
+## Hostile input
+
+Font and image files are untrusted, and the C that reads them was not
+written for that: stb_truetype follows whatever offsets a font file holds.
+Three checks stand between a crafted file and the program.
+
+- **Fuzzing.** `native/fuzz/run.sh font|image [seconds]` compiles the
+  module's own source with libFuzzer, AddressSanitizer and
+  UndefinedBehaviorSanitizer, seeded with a system font or small images,
+  and feeds it the buffer a Resid caller would (16 MB, the file then
+  zeros). What it found is fixed in the vendored headers, marked
+  `resid-gui patch`: every read stb_truetype makes of the font file goes
+  through one bounds check; a composite glyph expands at most 8 levels
+  and 1024 glyphs (a crafted one otherwise ran for minutes, past the
+  host's CPU limit); a failed allocation means no shape or no pixels
+  rather than a write through a null pointer; and stb_image never
+  copies from a null pointer. The font module converts every double to an integer through
+  one saturating function (NaN is 0), and both modules build with
+  `-fwrapv`, so signed overflow on hostile input is a wrong pixel, never
+  undefined behavior.
+- **A malicious module.** `native/evil/font.c` has the font module's
+  entry point and attacks instead: it opens a file for writing, writes to
+  stdout, opens a socket, forks, executes a shell, maps executable memory,
+  reads the time-stamp counter, makes an x32 call, calls the vsyscall
+  page, writes past its answer and spins forever. `tests/evil.sh` links it
+  under the real wrapper and checks that the host is killed for each, the
+  program gets an `Err` and goes on, nothing is left behind, and that
+  seven answers that lie (an atlas too big, a
+  glyph outside it, too many kerning pairs, no magic, ...) are refused by
+  `font_parse`. The spin runs only with `EVIL_SLOW=1`: it takes the host's
+  60-second CPU limit.
+- **Validation.** `font_parse` and `image_parse` check every field of the
+  answer before a pixel is used, and test blocks feed each of them 400
+  randomly mutated answers.

@@ -62,8 +62,8 @@ List(Int) rgba_rows(Canvas c, Int y, ListBuf(Int) b) {
 
 ListBuf(Int) rgba_row(Canvas c, Int y, Int x, ListBuf(Int) b) {
     if (x >= c.w) { return b; }
-    Int i = (y * c.w + x) * 4;
-    return rgba_row(c, y, x + 1, b.push(c.px[i + 2]).push(c.px[i + 1]).push(c.px[i]).push(c.px[i + 3]));
+    Int v = (Int)c.px[y * c.w + x];
+    return rgba_row(c, y, x + 1, b.push((v >> 16) & 255).push((v >> 8) & 255).push(v & 255).push((v >> 24) & 255));
 }
 
 /// A zlib stream (RFC 1950) holding `data` in stored deflate blocks of at

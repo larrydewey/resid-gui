@@ -1125,6 +1125,17 @@ typedef int stbtt__test_oversample_pow2[(STBTT_MAX_OVERSAMPLE & (STBTT_MAX_OVERS
 #define STBTT__NOTUSED(v)  (void)sizeof(v)
 #endif
 
+// resid-gui patch: stb_truetype trusts the offsets a font file holds, so a
+// crafted file makes it read anywhere in memory. Every read of the file
+// goes through stbtt__rd, which reads 0 outside [stbtt__lo, stbtt__hi);
+// the caller sets those to the file's bytes before calling stbtt_InitFont.
+// native/fuzz/fuzz_font.c is what found the reads.
+static const stbtt_uint8 *stbtt__lo, *stbtt__hi;
+static stbtt_uint8 stbtt__rd(const stbtt_uint8 *p)
+{
+   return ((size_t)p >= (size_t)stbtt__lo && (size_t)p < (size_t)stbtt__hi) ? *p : 0;
+}
+
 //////////////////////////////////////////////////////////////////////////
 //
 // stbtt__buf helpers to parse data from file
@@ -1134,14 +1145,14 @@ static stbtt_uint8 stbtt__buf_get8(stbtt__buf *b)
 {
    if (b->cursor >= b->size)
       return 0;
-   return b->data[b->cursor++];
+   return stbtt__rd(b->data + b->cursor++);
 }
 
 static stbtt_uint8 stbtt__buf_peek8(stbtt__buf *b)
 {
    if (b->cursor >= b->size)
       return 0;
-   return b->data[b->cursor];
+   return stbtt__rd(b->data + b->cursor);
 }
 
 static void stbtt__buf_seek(stbtt__buf *b, int o)
@@ -1279,14 +1290,23 @@ static stbtt__buf stbtt__cff_index_get(stbtt__buf b, int i)
 // on platforms that don't allow misaligned reads, if we want to allow
 // truetype fonts that aren't padded to alignment, define ALLOW_UNALIGNED_TRUETYPE
 
-#define ttBYTE(p)     (* (stbtt_uint8 *) (p))
-#define ttCHAR(p)     (* (stbtt_int8 *) (p))
+// resid-gui patch: a float to a vertex coordinate, saturating (NaN is 0);
+// a plain cast of an out-of-range float is undefined behavior.
+static short stbtt__f2s(float f)
+{
+   if (!(f == f)) return 0;
+   if (f > 32767.0f) return 32767;
+   if (f < -32768.0f) return -32768;
+   return (short) f;
+}
+#define ttBYTE(p)     stbtt__rd((const stbtt_uint8 *) (p))
+#define ttCHAR(p)     ((stbtt_int8) stbtt__rd((const stbtt_uint8 *) (p)))
 #define ttFixed(p)    ttLONG(p)
 
-static stbtt_uint16 ttUSHORT(stbtt_uint8 *p) { return p[0]*256 + p[1]; }
-static stbtt_int16 ttSHORT(stbtt_uint8 *p)   { return p[0]*256 + p[1]; }
-static stbtt_uint32 ttULONG(stbtt_uint8 *p)  { return (p[0]<<24) + (p[1]<<16) + (p[2]<<8) + p[3]; }
-static stbtt_int32 ttLONG(stbtt_uint8 *p)    { return (p[0]<<24) + (p[1]<<16) + (p[2]<<8) + p[3]; }
+static stbtt_uint16 ttUSHORT(stbtt_uint8 *p) { return ttBYTE(p)*256 + ttBYTE(p+1); }
+static stbtt_int16 ttSHORT(stbtt_uint8 *p)   { return (stbtt_int16) (ttBYTE(p)*256 + ttBYTE(p+1)); }
+static stbtt_uint32 ttULONG(stbtt_uint8 *p)  { return ((stbtt_uint32) ttBYTE(p)<<24) + ((stbtt_uint32) ttBYTE(p+1)<<16) + ((stbtt_uint32) ttBYTE(p+2)<<8) + ttBYTE(p+3); }
+static stbtt_int32 ttLONG(stbtt_uint8 *p)    { return (stbtt_int32) ttULONG(p); }
 
 #define stbtt_tag4(p,c0,c1,c2,c3) ((p)[0] == (c0) && (p)[1] == (c1) && (p)[2] == (c2) && (p)[3] == (c3))
 #define stbtt_tag(p,str)           stbtt_tag4(p,str[0],str[1],str[2],str[3])
@@ -1698,9 +1718,12 @@ static int stbtt__GetGlyphShapeTT(const stbtt_fontinfo *info, int glyph_index, s
       n = 1+ttUSHORT(endPtsOfContours + numberOfContours*2-2);
 
       m = n + 2*numberOfContours;  // a loose bound on how many vertices we might need
-      vertices = (stbtt_vertex *) STBTT_malloc(m * sizeof(vertices[0]), info->userdata);
+      // resid-gui patch: one spare vertex, zeroed: a contour whose last point
+      // is off the curve looks at vertices[off+n] (native/fuzz found it).
+      vertices = (stbtt_vertex *) STBTT_malloc((m + 1) * sizeof(vertices[0]), info->userdata);
       if (vertices == 0)
          return 0;
+      STBTT_memset(&vertices[m], 0, sizeof(vertices[0]));
 
       next_move = 0;
       flagcount=0;
@@ -1715,9 +1738,9 @@ static int stbtt__GetGlyphShapeTT(const stbtt_fontinfo *info, int glyph_index, s
 
       for (i=0; i < n; ++i) {
          if (flagcount == 0) {
-            flags = *points++;
+            flags = stbtt__rd(points++);
             if (flags & 8)
-               flagcount = *points++;
+               flagcount = stbtt__rd(points++);
          } else
             --flagcount;
          vertices[off+i].type = flags;
@@ -1728,11 +1751,11 @@ static int stbtt__GetGlyphShapeTT(const stbtt_fontinfo *info, int glyph_index, s
       for (i=0; i < n; ++i) {
          flags = vertices[off+i].type;
          if (flags & 2) {
-            stbtt_int16 dx = *points++;
+            stbtt_int16 dx = stbtt__rd(points++);
             x += (flags & 16) ? dx : -dx; // ???
          } else {
             if (!(flags & 16)) {
-               x = x + (stbtt_int16) (points[0]*256 + points[1]);
+               x = x + (stbtt_int16) ttUSHORT(points);
                points += 2;
             }
          }
@@ -1744,11 +1767,11 @@ static int stbtt__GetGlyphShapeTT(const stbtt_fontinfo *info, int glyph_index, s
       for (i=0; i < n; ++i) {
          flags = vertices[off+i].type;
          if (flags & 4) {
-            stbtt_int16 dy = *points++;
+            stbtt_int16 dy = stbtt__rd(points++);
             y += (flags & 32) ? dy : -dy; // ???
          } else {
             if (!(flags & 32)) {
-               y = y + (stbtt_int16) (points[0]*256 + points[1]);
+               y = y + (stbtt_int16) ttUSHORT(points);
                points += 2;
             }
          }
@@ -1863,11 +1886,11 @@ static int stbtt__GetGlyphShapeTT(const stbtt_fontinfo *info, int glyph_index, s
                stbtt_vertex* v = &comp_verts[i];
                stbtt_vertex_type x,y;
                x=v->x; y=v->y;
-               v->x = (stbtt_vertex_type)(m * (mtx[0]*x + mtx[2]*y + mtx[4]));
-               v->y = (stbtt_vertex_type)(n * (mtx[1]*x + mtx[3]*y + mtx[5]));
+               v->x = stbtt__f2s(m * (mtx[0]*x + mtx[2]*y + mtx[4]));
+               v->y = stbtt__f2s(n * (mtx[1]*x + mtx[3]*y + mtx[5]));
                x=v->cx; y=v->cy;
-               v->cx = (stbtt_vertex_type)(m * (mtx[0]*x + mtx[2]*y + mtx[4]));
-               v->cy = (stbtt_vertex_type)(n * (mtx[1]*x + mtx[3]*y + mtx[5]));
+               v->cx = stbtt__f2s(m * (mtx[0]*x + mtx[2]*y + mtx[4]));
+               v->cy = stbtt__f2s(n * (mtx[1]*x + mtx[3]*y + mtx[5]));
             }
             // Append vertices.
             tmp = (stbtt_vertex*)STBTT_malloc((num_vertices+comp_num_verts)*sizeof(stbtt_vertex), info->userdata);
@@ -2273,6 +2296,7 @@ static int stbtt__GetGlyphShapeT2(const stbtt_fontinfo *info, int glyph_index, s
    stbtt__csctx output_ctx = STBTT__CSCTX_INIT(0);
    if (stbtt__run_charstring(info, glyph_index, &count_ctx)) {
       *pvertices = (stbtt_vertex*)STBTT_malloc(count_ctx.num_vertices*sizeof(stbtt_vertex), info->userdata);
+      if (*pvertices == NULL) return 0;  // resid-gui patch: out of memory is no shape
       output_ctx.pvertices = *pvertices;
       if (stbtt__run_charstring(info, glyph_index, &output_ctx)) {
          STBTT_assert(output_ctx.num_vertices == count_ctx.num_vertices);
@@ -2296,10 +2320,23 @@ static int stbtt__GetGlyphInfoT2(const stbtt_fontinfo *info, int glyph_index, in
 
 STBTT_DEF int stbtt_GetGlyphShape(const stbtt_fontinfo *info, int glyph_index, stbtt_vertex **pvertices)
 {
+   // resid-gui patch: a composite glyph names other glyphs, and a crafted
+   // font can make one name itself, or name many glyphs that each name
+   // many more. Past 8 levels, or past 1024 glyphs expanded for one
+   // top-level glyph, a glyph has no shape: the recursion would otherwise
+   // run off the stack, or take minutes (native/fuzz found both).
+   static int depth, budget;
+   int n;
+   if (depth == 0) budget = 1024;
+   if (depth >= 8 || budget <= 0) { *pvertices = NULL; return 0; }
+   budget--;
+   depth++;
    if (!info->cff.size)
-      return stbtt__GetGlyphShapeTT(info, glyph_index, pvertices);
+      n = stbtt__GetGlyphShapeTT(info, glyph_index, pvertices);
    else
-      return stbtt__GetGlyphShapeT2(info, glyph_index, pvertices);
+      n = stbtt__GetGlyphShapeT2(info, glyph_index, pvertices);
+   depth--;
+   return n;
 }
 
 STBTT_DEF void stbtt_GetGlyphHMetrics(const stbtt_fontinfo *info, int glyph_index, int *advanceWidth, int *leftSideBearing)
@@ -2934,6 +2971,7 @@ static void stbtt__rasterize_sorted_edges(stbtt__bitmap *result, stbtt__edge *e,
       scanline = (unsigned char *) STBTT_malloc(result->w, userdata);
    else
       scanline = scanline_data;
+   if (scanline == NULL) return;  // resid-gui patch: out of memory draws nothing
 
    y = off_y * vsubsample;
    e[n].y0 = (off_y + result->h) * (float) vsubsample + 1;
@@ -3307,6 +3345,7 @@ static void stbtt__rasterize_sorted_edges(stbtt__bitmap *result, stbtt__edge *e,
       scanline = (float *) STBTT_malloc((result->w*2+1) * sizeof(float), userdata);
    else
       scanline = scanline_data;
+   if (scanline == NULL) return;  // resid-gui patch: out of memory draws nothing
 
    scanline2 = scanline + result->w;
 

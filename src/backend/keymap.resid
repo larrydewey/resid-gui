@@ -12,6 +12,7 @@ pub Int key_backspace() { return 14; }
 pub Int key_tab() { return 15; }
 pub Int key_enter() { return 28; }
 pub Int key_left_ctrl() { return 29; }
+pub Int key_a() { return 30; }
 pub Int key_left_shift() { return 42; }
 pub Int key_right_shift() { return 54; }
 pub Int key_left_alt() { return 56; }

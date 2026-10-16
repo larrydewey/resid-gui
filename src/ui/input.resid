@@ -22,6 +22,10 @@ Found not_found() { return Found { .id = -1, .w = Spacer, .r = rect_none() }; }
 /// What one event did: the new widget state and the events for `update`.
 type UiStep = { UiState ui; List(Event) out; };
 
+/// What a key did to a text input: the events for `update`, and where the
+/// selection's anchor is now (-1: no selection).
+type Edited = { List(Event) out; Int anchor; };
+
 /// Whether a widget reacts to the pointer or the keyboard.
 pub Bool interactive(Widget w) {
     return match (w) {
@@ -42,8 +46,17 @@ pub Found hit_in(Widget w, Rect r, Int x, Int y, Font f) { return hit_node(w, r,
 Found hit_node(Widget w, Rect r, Int x, Int y, Int id, Font f) {
     if (!rect_contains(r, x, y)) { return not_found(); }
     if (interactive(w)) { return Found { .id = id, .w = w, .r = r }; }
+    Found row = match (w) { Rows(o, rh, xs) => hit_row(xs, r, o, rh, x, y, id, f), _ => Found { .id = -2, .w = Spacer, .r = r } };
+    if (row.id != -2) { return row; }
     List(Widget) kids = children(w);
     return hit_kids(kids, child_rects_in(w, r, f), x, y, kids.len() - 1, kid_ids(kids, id + 1, 0, []), f);
+}
+
+/// In a `Rows`, the row under the pointer is the only one asked.
+Found hit_row(List(Widget) xs, Rect r, Int o, Int rh, Int x, Int y, Int id, Font f) {
+    Int k = (y - r.y + o) / max_int(rh, 1);
+    if (y - r.y + o < 0 || k >= xs.len()) { return not_found(); }
+    return hit_node(xs[k], row_rect(r, o, rh, k), x, y, id + 1 + count_nodes(xs, 0, k, 0), f);
 }
 
 /// The number of each child, given the first child's.
@@ -68,8 +81,17 @@ pub Found find_in(Widget w, Rect r, Int target, Font f) { return find_node(w, r,
 Found find_node(Widget w, Rect r, Int target, Int id, Font f) {
     if (target < id || target >= id + node_count(w)) { return not_found(); }
     if (target == id) { return Found { .id = id, .w = w, .r = r }; }
+    Found row = match (w) { Rows(o, rh, xs) => find_row(xs, r, o, rh, target, 0, id + 1, f), _ => Found { .id = -2, .w = Spacer, .r = r } };
+    if (row.id != -2) { return row; }
     List(Widget) kids = children(w);
     return find_kids(kids, child_rects_in(w, r, f), target, 0, id + 1, f);
+}
+
+Found find_row(List(Widget) xs, Rect r, Int o, Int rh, Int target, Int i, Int id, Font f) {
+    if (i >= xs.len()) { return not_found(); }
+    Int n = node_count(xs[i]);
+    if (target < id + n) { return find_node(xs[i], row_rect(r, o, rh, i), target, id, f); }
+    return find_row(xs, r, o, rh, target, i + 1, id + n, f);
 }
 
 Found find_kids(List(Widget) xs, List(Rect) rs, Int target, Int i, Int id, Font f) {
@@ -114,7 +136,8 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
         PointerMoved(x, y) => pointer_moved(ui, root, area, x, f),
         PointerUp(x, y, b) => if (b == 1) { pointer_up(ui, root, area, x, y, f) } else { none(ui) },
         KeyDown(code, text) => key_down(ui, root, area, code, text, f),
-        Blurred => UiStep { .ui = ui_with_pressed(ui, -1), .out = [] },
+        KeyUp(code) => none(mods_after(ui, code, false)),
+        Blurred => UiStep { .ui = ui_with_mods(ui_with_pressed(ui, -1), false, false), .out = [] },
         _ => none(ui)
     };
     return UiStep { .ui = s.ui, .out = [e].concat(s.out) };
@@ -122,14 +145,31 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
 
 UiStep none(UiState ui) { return UiStep { .ui = ui, .out = [] }; }
 
+Bool is_shift(Int code) { return code == key_left_shift() || code == key_right_shift(); }
+Bool is_ctrl(Int code) { return code == key_left_ctrl() || code == key_right_ctrl(); }
+
+/// The held modifiers after `code` went down (`down`) or up.
+UiState mods_after(UiState ui, Int code, Bool down) {
+    return ui_with_mods(ui, if (is_shift(code)) { down } else { ui.shift }, if (is_ctrl(code)) { down } else { ui.ctrl });
+}
+
 UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     Found f = hit_in(root, area, x, y, fo);
     UiState pressed = ui_with_pressed(ui, f.id);
     return match (f.w) {
-        TextInput(s, k, m) => UiStep { .ui = ui_with_focus(pressed, f.id), .out = [TextEdited(m, s, caret_at_in(f.r, s, k, x, fo))] },
+        TextInput(s, k, m) => press_input(pressed, f.id, s, k, m, caret_at_in(f.r, s, k, x, fo)),
         Slider(v, m) => UiStep { .ui = ui_with_focus(pressed, -1), .out = [SliderSet(m, slider_value_at(f.r, x))] },
         _ => UiStep { .ui = ui_with_focus(pressed, -1), .out = [] }
     };
+}
+
+/// A press in an input puts the caret under the pointer and the anchor
+/// there too, so a drag selects; with Shift held the press extends the
+/// selection from where it was anchored, or from the old caret.
+UiStep press_input(UiState ui, Int id, Str s, Int k, Msg m, Int c) {
+    Int keep = if (ui.focus == id && ui.anchor >= 0) { ui.anchor } else { k };
+    UiState u = ui_with_anchor(ui_with_focus(ui, id), if (ui.shift) { keep } else { c });
+    return UiStep { .ui = u, .out = [TextEdited(m, s, c)] };
 }
 
 /// The caret position a click at `x` puts in an input showing `s`, in the
@@ -148,6 +188,7 @@ UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
     Found f = find_in(root, area, ui.pressed, fo);
     return match (f.w) {
         Slider(v, m) => UiStep { .ui = ui, .out = [SliderSet(m, slider_value_at(f.r, x))] },
+        TextInput(s, k, m) => UiStep { .ui = ui, .out = [TextEdited(m, s, caret_at_in(f.r, s, k, x, fo))] },
         _ => none(ui)
     };
 }
@@ -167,19 +208,63 @@ UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
 UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo) {
     // A key that types something types it, whatever its code.
     Bool typing = str_len(text) > 0;
+    if ((is_shift(code) || is_ctrl(code)) && !typing) { return none(mods_after(ui, code, true)); }
     if (code == key_tab() && !typing) {
-        return none(ui_with_focus(ui, next_input(inputs(root), ui.focus)));
+        List(Int) ids = inputs(root);
+        return none(ui_with_focus(ui, if (ui.shift) { prev_input(ids, ui.focus) } else { next_input(ids, ui.focus) }));
     }
     if (ui.focus < 0) { return none(ui); }
     if (code == key_esc() && !typing) { return none(ui_with_focus(ui, -1)); }
     Found f = find_in(root, area, ui.focus, fo);
     return match (f.w) {
-        TextInput(s, k, m) => UiStep { .ui = ui_with_caret(ui, true), .out = edit(s, clamp_int(k, 0, str_len(s)), m, code, text) },
+        TextInput(s, k, m) => key_in_input(ui, s, clamp_int(k, 0, str_len(s)), m, code, text),
         _ => none(ui_with_focus(ui, -1))
     };
 }
 
-/// What a key does to a text input holding `s` with the caret at `k`.
+UiStep key_in_input(UiState ui, Str s, Int k, Msg m, Int code, Str text) {
+    Edited e = edit_sel(s, k, ui.anchor, m, code, text, ui.shift, ui.ctrl);
+    return UiStep { .ui = ui_with_anchor(ui_with_caret(ui, true), e.anchor), .out = e.out };
+}
+
+/// The input before `cur` in tab order, wrapping; -1 when there is none.
+pub Int prev_input(List(Int) ids, Int cur) {
+    if (ids.len() == 0) { return -1; }
+    return prev_input_at(ids, cur, ids.len() - 1);
+}
+
+Int prev_input_at(List(Int) ids, Int cur, Int i) {
+    if (i < 0) { return ids[ids.len() - 1]; }
+    if (ids[i] < cur || cur < 0) { return ids[i]; }
+    return prev_input_at(ids, cur, i - 1);
+}
+
+/// What a key does to a text input holding `s` with the caret at `k` and
+/// the selection anchored at `a` (-1 for none), with Shift or Ctrl held.
+/// Typing, Backspace and Delete replace a selection; the arrows, Home and
+/// End move the caret, extending the selection with Shift and collapsing
+/// it without; Ctrl+A selects everything.
+pub Edited edit_sel(Str s, Int k, Int a0, Msg m, Int code, Str text, Bool shift, Bool ctrl) {
+    Int n = str_len(s);
+    Int a = if (a0 < 0 || a0 > n) { k } else { a0 };
+    Int lo = min_int(a, k);
+    Int hi = max_int(a, k);
+    Bool sel = lo != hi;
+    if (ctrl && code == key_a() && str_len(text) == 0) { return Edited { .out = [TextEdited(m, s, n)], .anchor = 0 }; }
+    if (str_len(text) > 0) { return Edited { .out = [TextEdited(m, str_slice(s, 0, lo) + text + str_slice(s, hi, n), lo + str_len(text))], .anchor = -1 }; }
+    if (code == key_enter() || code == key_kp_enter()) { return Edited { .out = [AppMsg(m)], .anchor = a0 }; }
+    Bool erase = code == key_backspace() || code == key_delete();
+    if (erase && sel) { return Edited { .out = [TextEdited(m, str_slice(s, 0, lo) + str_slice(s, hi, n), lo)], .anchor = -1 }; }
+    if (erase) { return Edited { .out = edit(s, k, m, code, text), .anchor = -1 }; }
+    Int t = if (code == key_left()) { if (sel && !shift) { lo } else { max_int(k - 1, 0) } }
+            else { if (code == key_right()) { if (sel && !shift) { hi } else { min_int(k + 1, n) } }
+            else { if (code == key_home()) { 0 } else { if (code == key_end()) { n } else { -1 } } } };
+    if (t < 0) { return Edited { .out = [], .anchor = a0 }; }
+    return Edited { .out = if (t != k) { [TextEdited(m, s, t)] } else { [] }, .anchor = if (shift) { a } else { -1 } };
+}
+
+/// What a key does to a text input holding `s` with the caret at `k`,
+/// with nothing selected.
 pub List(Event) edit(Str s, Int k, Msg m, Int code, Str text) {
     Int n = str_len(s);
     if (str_len(text) > 0) { return [TextEdited(m, str_slice(s, 0, k) + text + str_slice(s, k, n), k + str_len(text))]; }
@@ -251,4 +336,64 @@ test "dragging a slider reports values" {
     UiStep b = ui_event(a.ui, demo(), demo_area(), PointerMoved(500, 100));
     Bool full = match (b.out[1]) { SliderSet(m, v) => v == 100, _ => false };
     expect(full).toEqual(true);
+}
+
+test "a click in a long list reaches the row under it" {
+    List(Widget) rows = [Button("a", Custom(0)), Button("b", Custom(1)), Button("c", Custom(2)), Button("d", Custom(3))];
+    Widget root = Column([Text("title"), Rows(30, 20, rows)]);
+    Rect area = Rect { .x = 0, .y = 0, .w = 100, .h = 100 };
+    // the list starts at y 28 (24 + gap); scrolled 30, y 40 is 42 into it: row 2
+    Found f = hit(root, area, 10, 40);
+    Bool c = match (f.w) { Button(s, m) => s == "c", _ => false };
+    expect(c).toEqual(true);
+    expect(f.id).toEqual(5);
+    expect(find(root, area, 5).r.y).toEqual(f.r.y);
+}
+
+Str edited_text(List(Event) es) { return match (es[es.len() - 1]) { TextEdited(m, s, k) => s, _ => "?" }; }
+Int edited_caret(List(Event) es) { return match (es[es.len() - 1]) { TextEdited(m, s, k) => k, _ => -1 }; }
+
+test "Shift-Tab moves focus backwards" {
+    UiState down = ui_event(ui_new(), demo(), demo_area(), KeyDown(key_left_shift(), "")).ui;
+    expect(down.shift).toEqual(true);
+    expect(ui_event(down, demo(), demo_area(), KeyDown(key_tab(), "")).ui.focus).toEqual(5);
+    UiState at5 = ui_with_focus(down, 5);
+    expect(ui_event(at5, demo(), demo_area(), KeyDown(key_tab(), "")).ui.focus).toEqual(3);
+    UiState up = ui_event(at5, demo(), demo_area(), KeyUp(key_left_shift())).ui;
+    expect(up.shift).toEqual(false);
+    expect(ui_event(up, demo(), demo_area(), KeyDown(key_tab(), "")).ui.focus).toEqual(3);
+    expect(prev_input([3, 5], 3)).toEqual(5);
+}
+
+test "Shift and the arrows select, and typing replaces the selection" {
+    Edited a = edit_sel("hello", 5, -1, Clicked, key_left(), "", true, false);
+    expect(a.anchor).toEqual(5);
+    expect(edited_caret(a.out)).toEqual(4);
+    Edited b = edit_sel("hello", 4, 5, Clicked, key_home(), "", true, false);
+    expect(b.anchor).toEqual(5);
+    expect(edited_caret(b.out)).toEqual(0);
+    Edited c = edit_sel("hello", 0, 5, Clicked, 0, "J", false, false);
+    expect(edited_text(c.out)).toEqual("J");
+    expect(c.anchor).toEqual(-1);
+    Edited d = edit_sel("hello", 1, 4, Clicked, key_backspace(), "", false, false);
+    expect(edited_text(d.out)).toEqual("ho");
+    expect(edited_caret(d.out)).toEqual(1);
+    // an arrow without Shift collapses the selection to its edge
+    Edited e = edit_sel("hello", 1, 4, Clicked, key_right(), "", false, false);
+    expect(edited_caret(e.out)).toEqual(4);
+    expect(e.anchor).toEqual(-1);
+    Edited all = edit_sel("hello", 2, -1, Clicked, key_a(), "", false, true);
+    expect(all.anchor).toEqual(0);
+    expect(edited_caret(all.out)).toEqual(5);
+}
+
+test "dragging across an input selects" {
+    Widget w = Column([TextInput("abcdef", 0, Custom(1))]);
+    Rect area = Rect { .x = 0, .y = 0, .w = 200, .h = 40 };
+    // characters are 8 pixels wide from x 5
+    UiStep a = ui_event(ui_new(), w, area, PointerDown(5 + 8, 10, 1));
+    expect(a.ui.anchor).toEqual(1);
+    UiStep b = ui_event(a.ui, w, area, PointerMoved(5 + 32, 10));
+    expect(edited_caret(b.out)).toEqual(4);
+    expect(b.ui.anchor).toEqual(1);
 }

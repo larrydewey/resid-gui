@@ -18,8 +18,8 @@ version = "0.1.0"
 # these hashes. A build refuses an artifact whose hash differs.
 [native.font]
 path = "native/font/font.ll"
-sha256 = "d8a590e1e018ef24d83ac127315489ed6242aa6f79ecbc2341ace5b3c3660bab"
+sha256 = "a75834e13e2b1a601ad566d4210e122d5a42cb17f4b7ab5fc799bca276398649"
 
 [native.image]
 path = "native/image/image.ll"
-sha256 = "f67dd649dbed221d868d58c24740ffb980875692dcdeab722f7c69501757c4ae"
+sha256 = "b599ae983a09e41c34cf073b4c68b1f44b06be0e92da20b7747e735edde07203"

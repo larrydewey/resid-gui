@@ -5,7 +5,7 @@
 // natural-size: each widget has a preferred size; a `Row` or `Column`
 // gives each child its preferred extent along its axis, then shares what
 // is left equally among the children that stretch (`Spacer`, `TextInput`,
-// `Slider`, `Scroll`, `Align`, and containers holding one of those). Across the
+// `Slider`, `Scroll`, `Rows`, `Align`, and containers holding one of those). Across the
 // axis, a child gets the whole box.
 
 import "../app.resid";
@@ -42,6 +42,7 @@ pub Size pref_size_in(Widget w, Font f) {
         Padding(n, c) => pad_size(pref_size_in(c, f), n),
         Align(ax, ay, c) => pref_size_in(c, f),
         Scroll(o, c) => pref_size_in(c, f),
+        Rows(o, rh, xs) => Size { .w = 0, .h = 0 },
         Bitmap(bw, bh, px) => Size { .w = max_int(bw, 0), .h = max_int(bh, 0) },
         Slider(v, m) => Size { .w = 120, .h = lh },
         Spacer => Size { .w = 0, .h = 0 }
@@ -67,6 +68,7 @@ pub Bool stretches_x(Widget w) {
         TextInput(s, k, m) => true,
         Slider(v, m) => true,
         Scroll(o, c) => true,
+        Rows(o, rh, xs) => true,
         Align(ax, ay, c) => true,
         Row(xs) => any_x(xs, 0),
         Column(xs) => any_x_across(xs, 0),
@@ -81,6 +83,7 @@ pub Bool stretches_y(Widget w) {
     return match (w) {
         Spacer => true,
         Scroll(o, c) => true,
+        Rows(o, rh, xs) => true,
         Align(ax, ay, c) => true,
         Row(xs) => any_y_across(xs, 0),
         Column(xs) => any_y(xs, 0),
@@ -109,6 +112,7 @@ pub List(Widget) children(Widget w) {
         Padding(n, c) => [c],
         Align(ax, ay, c) => [c],
         Scroll(o, c) => [c],
+        Rows(o, rh, xs) => xs,
         _ => []
     };
 }
@@ -126,6 +130,7 @@ pub List(Rect) child_rects_in(Widget w, Rect r, Font f) {
         Padding(n, c) => [Rect { .x = r.x + n, .y = r.y + n, .w = max_int(r.w - 2 * n, 0), .h = max_int(r.h - 2 * n, 0) }],
         Align(ax, ay, c) => [align_rect(pref_size_in(c, f), r, ax, ay)],
         Scroll(o, c) => [Rect { .x = r.x, .y = r.y - o, .w = r.w, .h = max_int(pref_size_in(c, f).h, r.h) }],
+        Rows(o, rh, xs) => all_row_rects(r, o, rh, xs.len(), 0, ListBuf()),
         _ => []
     };
 }
@@ -161,6 +166,27 @@ pub Rect align_rect(Size s, Rect r, Int ax, Int ay) {
 
 /// How many widgets the tree rooted at `w` holds, `w` included. Widgets
 /// are numbered in pre-order, so a subtree's numbers are contiguous.
+/// Row `i` of a `Rows(offset, row_h, _)` occupying `r`.
+pub Rect row_rect(Rect r, Int offset, Int row_h, Int i) {
+    return Rect { .x = r.x, .y = r.y - offset + i * max_int(row_h, 1), .w = r.w, .h = max_int(row_h, 1) };
+}
+
+/// The rows of a `Rows` in view in `r`: from `first` up to, not including,
+/// `last`, never outside 0 to `n`.
+pub type RowSpan = { Int first; Int last; };
+
+pub RowSpan rows_in_view(Rect r, Int offset, Int row_h, Int n) {
+    Int h = max_int(row_h, 1);
+    Int first = clamp_int(offset / h, 0, n);
+    Int last = clamp_int((offset + max_int(r.h, 0) + h - 1) / h, first, n);
+    return RowSpan { .first = first, .last = last };
+}
+
+List(Rect) all_row_rects(Rect r, Int o, Int rh, Int n, Int i, ListBuf(Rect) acc) {
+    if (i >= n) { return acc.finish(); }
+    return all_row_rects(r, o, rh, n, i + 1, acc.push(row_rect(r, o, rh, i)));
+}
+
 pub Int node_count(Widget w) { return 1 + node_count_list(children(w), 0, 0); }
 
 Int node_count_list(List(Widget) xs, Int i, Int acc) {

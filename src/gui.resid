@@ -243,3 +243,15 @@ test "device events become logical" {
     Bool same = match (to_logical(KeyDown(30, "a"), 2)) { KeyDown(k, t) => k == 30 && t == "a", _ => false };
     expect(same).toEqual(true);
 }
+
+test "a caret blink damages only the caret" {
+    Widget v = Column([TextInput("hello", 5, Clicked), Button("ok", Clicked), Text("below")]);
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 120 };
+    UiState on = ui_with_focus(ui_new(), 1);
+    List(DrawOp) lit = paint(v, r, on);
+    List(DrawOp) dark = paint(v, r, ui_with_caret(on, false));
+    List(Rect) d = damage_rects(lit, dark);
+    expect(d.len()).toEqual(1);
+    expect(d[0].w).toEqual(1);
+    expect(d[0].h).toEqual(16);
+}

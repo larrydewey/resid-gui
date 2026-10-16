@@ -59,7 +59,7 @@ test "image shape" {
     expect(im.px.len()).toEqual(16);
     Canvas c = canvas_new(4, 4);
     Canvas c2 = blit_at(c, im, 1, 1);
-    expect(c2.px.len()).toEqual(64);
+    expect(c2.px.len()).toEqual(16);
     Image red = Image { .w = 1, .h = 1, .px = [0, 0, 255, 255] };
     Image clear = Image { .w = 1, .h = 1, .px = [0, 0, 255, 0] };
     expect(pixel_at(blit_at(fill_rect(canvas_new(1, 1), Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, rgb(0, 9, 0)), clear, 0, 0), 0, 0).g).toEqual(9);
@@ -98,4 +98,25 @@ test "an image answer parses, and a lying one is refused" {
     expect(big).toEqual(true);
     Bool bad = match (image_parse(ok.with(4, 1))) { Ok(i) => false, Err(e) => true };
     expect(bad).toEqual(true);
+}
+
+Int img_lcg(Int x) { return (x * 1103515245 + 12345) % 2147483648; }
+
+/// Mutated copies of an answer, each parsed: `Ok` or `Err`, never an
+/// abort. Returns how many were refused.
+Int image_mutants(List(Int) good, Int n, Int seed, Int refused) {
+    if (n <= 0) { return refused; }
+    Int s1 = img_lcg(seed);
+    Int s2 = img_lcg(s1);
+    Int s3 = img_lcg(s2);
+    List(Int) m1 = good.with(s1 % good.len(), s2 % 256);
+    List(Int) m2 = if (s2 % 2 == 0) { m1.with(s3 % 16, s1 % 256) } else { m1 };
+    List(Int) m = if (s3 % 8 == 0) { m2[0..(s2 % m2.len())] } else { m2 };
+    Bool no = match (image_parse(m)) { Ok(i) => i.px.len() != i.w * i.h * 4, Err(e) => true };
+    return image_mutants(good, n - 1, s3, refused + if (no) { 1 } else { 0 });
+}
+
+test "mutated image answers are parsed or refused, never an abort" {
+    List(Int) ok = [82, 71, 73, 49, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+    expect(image_mutants(ok, 400, 11, 0) > 0).toEqual(true);
 }

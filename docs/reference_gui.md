@@ -12,7 +12,7 @@ type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int
 
 type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg)
             | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget))
-            | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget)
+            | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget) | Rows(Int, Int, List(Widget))
             | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer;
 
 behavior App(M) {

@@ -40,11 +40,15 @@ type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int
 ///   percent of the free space (0 start, 50 centre, 100 end).
 /// - `Scroll(offset, w)`: `w` shifted up by `offset` pixels and clipped to
 ///   the box; the program moves `offset` on `Wheel` events.
+/// - `Rows(offset, row_h, rows)`: a list of rows `row_h` pixels high,
+///   shifted up by `offset` and clipped like `Scroll`. Only the rows in
+///   view are laid out, painted and hit-tested, so a list of ten thousand
+///   rows costs what the twenty on screen cost.
 /// - `Bitmap(w, h, px)`: a `w` x `h` image, four bytes per pixel in
 ///   blue-green-red-alpha order.
 /// - `Slider(value, m)`: a 0 to 100 slider; see `SliderSet`.
 /// - `Spacer`: empty space that stretches.
-type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget)) | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget) | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer;
+type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget)) | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget) | Rows(Int, Int, List(Widget)) | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer;
 
 /// A program's application: a model, a pure step over events, a pure view.
 behavior App(M) {

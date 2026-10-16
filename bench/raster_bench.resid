@@ -41,7 +41,7 @@ Int main() {
     println(f"fill full       {ms_since(t1)} ms");
     Int t2 = clock.monotonic_ns();
     Int hnd = resid_disp_shm_new(w * h * 4);
-    _ = resid_disp_shm_put(hnd, 0, d.px, w * h * 4);
+    _ = resid_disp_shm_put32(hnd, 0, d.px, 0, w * h);
     println(f"shm_put full    {ms_since(t2)} ms");
     ListBuf(DrawOp) b = ListBuf();
     ListBuf(DrawOp) b2 = ListBuf();

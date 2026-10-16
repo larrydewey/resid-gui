@@ -7,7 +7,9 @@
 // and grant `native_font` (plus `filesystem(readonly)` to read the font
 // file). A call is a fresh, confined process that costs a few
 // milliseconds, so atlases are made once at start-up, one per device
-// scale, and handed to `gui_run_with`.
+// scale, and handed to `gui_run_with`. The call runs in a spawn region,
+// so a module that crashes or answers badly is an `Err`, never an abort
+// of the program.
 
 import "../../src/gfx/font.resid";
 
@@ -41,7 +43,8 @@ List(Int) answer_at(Bytes(1048576) a, Int i, ListBuf(Int) b) {
 pub Result(Font, Str) font_from_ttf(List(Int) ttf, Int px, Int scale) {
     if (ttf.len() == 0 || ttf.len() > font_max_bytes()) { return Err("font: the file is empty or larger than 16 MB"); }
     Int s = if (scale < 1) { 1 } else { scale };
-    return font_parse(answer_list(font_atlas(font_bytes(ttf), ttf.len(), px * s)), s);
+    Result(List(Int), RegionError) r = spawn (native_font) { return answer_list(font_atlas(font_bytes(ttf), ttf.len(), px * s)); };
+    return match (r) { Ok(a) => font_parse(a, s), Err(e) => Err("font: the font module failed") };
 }
 
 /// Atlases at scales 1 and 2, what `gui_run_with` wants for a desktop with

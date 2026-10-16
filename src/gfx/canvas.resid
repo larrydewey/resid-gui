@@ -1,10 +1,14 @@
 // canvas.resid — a frame's pixels and the writes that change them.
 //
-// A canvas is `w * h` pixels of four bytes each in the order a window
-// server reads them: blue, green, red, alpha (ARGB32, little-endian). Every
-// write threads the pixel list through a tail call and replaces elements
-// with `with`, which the compiler does in place because the old list is
-// dead afterwards; nothing here copies the frame per pixel.
+// A canvas is `w * h` pixels, one 32-bit ARGB word each (alpha in the top
+// byte, blue in the bottom one), which in memory is the blue, green, red,
+// alpha byte order a window server reads (ARGB32, little-endian):
+// `resid_disp_shm_put32` copies the words into shared memory as they are.
+// A pixel is one list element, so a fill writes one element where a list
+// of bytes took four. Every write threads the pixel list through a tail
+// call and replaces elements with `with`, which the compiler does in place
+// because the old list is dead afterwards; nothing here copies the frame
+// per pixel.
 //
 // A writer reads the canvas's size from its fields, never by passing the
 // canvas to another function first (`canvas_bounds(c)`): the compiler
@@ -13,20 +17,29 @@
 
 import "color.resid";
 
-/// A frame: its size and its pixels, four bytes each.
-pub type Canvas = { Int w; Int h; List(Int) px; };
+/// A frame: its size and its pixels, one ARGB word each.
+pub type Canvas = { Int w; Int h; List(UInt(32)) px; };
 
 /// A colour as one 32-bit ARGB word.
 pub Int color_pack(Color c) {
     return ((c.a & 255) << 24) | ((c.r & 255) << 16) | ((c.g & 255) << 8) | (c.b & 255);
 }
 
+/// A colour as the canvas stores it.
+pub UInt(32) color_word(Color c) { return (UInt(32))color_pack(c); }
+
+/// The colour a canvas word holds.
+pub Color word_color(UInt(32) w) {
+    Int v = (Int)w;
+    return Color { .b = v & 255, .g = (v >> 8) & 255, .r = (v >> 16) & 255, .a = (v >> 24) & 255 };
+}
+
 /// A canvas of the given size, every pixel transparent black.
 pub Canvas canvas_new(Int ww, Int hh) {
     Int w = if (ww < 0) { 0 } else { ww };
     Int h = if (hh < 0) { 0 } else { hh };
-    ListBuf(Int) b = ListBuf();
-    return Canvas { .w = w, .h = h, .px = canvas_fill(0, w * h * 4, b) };
+    ListBuf(UInt(32)) b = ListBuf();
+    return Canvas { .w = w, .h = h, .px = words_of(0, w * h, (UInt(32))0, b) };
 }
 
 /// A canvas of the given size, every pixel `col`: one pass, where a new
@@ -34,16 +47,16 @@ pub Canvas canvas_new(Int ww, Int hh) {
 pub Canvas canvas_filled(Int ww, Int hh, Color col) {
     Int w = if (ww < 0) { 0 } else { ww };
     Int h = if (hh < 0) { 0 } else { hh };
-    ListBuf(Int) b = ListBuf();
-    return Canvas { .w = w, .h = h, .px = pixels_of(0, w * h, col.b & 255, col.g & 255, col.r & 255, col.a & 255, b) };
+    ListBuf(UInt(32)) b = ListBuf();
+    return Canvas { .w = w, .h = h, .px = words_of(0, w * h, color_word(col), b) };
 }
 
-List(Int) pixels_of(Int i, Int n, Int b, Int g, Int r, Int a, ListBuf(Int) acc) {
+List(UInt(32)) words_of(Int i, Int n, UInt(32) v, ListBuf(UInt(32)) acc) {
     if (i >= n) { return acc.finish(); }
-    return pixels_of(i + 1, n, b, g, r, a, acc.push(b).push(g).push(r).push(a));
+    return words_of(i + 1, n, v, acc.push(v));
 }
 
-/// `n` zero bytes.
+/// `n` zero bytes (an image's pixels start as these).
 pub List(Int) canvas_fill(Int i, Int n, ListBuf(Int) acc) {
     if (i >= n) { return acc.finish(); }
     return canvas_fill(i + 1, n, acc.push(0));
@@ -64,24 +77,25 @@ pub Canvas fill_rect_clip(Canvas c, Rect r, Color col, Rect clip) {
     Int hh = c.h;
     Rect a = rect_intersect(rect_intersect(r, clip), Rect { .x = 0, .y = 0, .w = ww, .h = hh });
     if (rect_is_empty(a)) { return c; }
-    List(Int) px = fill_rows(c.px, ww, a, col.b & 255, col.g & 255, col.r & 255, col.a & 255, a.y, a.x);
+    List(UInt(32)) px = fill_rows(c.px, ww, a.x, a.x + a.w, a.y + a.h, color_word(col), a.y * ww + a.x, a.y);
     return Canvas { .w = ww, .h = hh, .px = px };
 }
 
-List(Int) fill_rows(List(Int) px, Int ww, Rect a, Int b, Int g, Int r, Int al, Int y, Int x) {
-    if (y >= a.y + a.h) { return px; }
-    if (x >= a.x + a.w) { return fill_rows(px, ww, a, b, g, r, al, y + 1, a.x); }
-    Int i = (y * ww + x) * 4;
-    return fill_rows(px.with(i, b).with(i + 1, g).with(i + 2, r).with(i + 3, al), ww, a, b, g, r, al, y, x + 1);
+/// Pixels `x0` up to `x1` of rows `y` up to `y1`, `i` being the index of
+/// the next one to write.
+List(UInt(32)) fill_rows(List(UInt(32)) px, Int ww, Int x0, Int x1, Int y1, UInt(32) v, Int i, Int y) {
+    if (y >= y1) { return px; }
+    Int end = y * ww + x1;
+    if (i >= end) { return fill_rows(px, ww, x0, x1, y1, v, (y + 1) * ww + x0, y + 1); }
+    return fill_rows(px.with(i, v), ww, x0, x1, y1, v, i + 1, y);
 }
 
 /// One pixel, when it lies inside `clip` and the canvas.
 pub Canvas set_pixel_clip(Canvas c, Int x, Int y, Color col, Rect clip) {
     if (x < 0 || y < 0 || x >= c.w || y >= c.h || !rect_contains(clip, x, y)) { return c; }
-    Int i = (y * c.w + x) * 4;
     Int ww = c.w;
     Int hh = c.h;
-    return Canvas { .w = ww, .h = hh, .px = c.px.with(i, col.b & 255).with(i + 1, col.g & 255).with(i + 2, col.r & 255).with(i + 3, col.a & 255) };
+    return Canvas { .w = ww, .h = hh, .px = c.px.with(y * ww + x, color_word(col)) };
 }
 
 /// `col` laid over one pixel with coverage `a` (0 to 255), when the pixel
@@ -89,51 +103,63 @@ pub Canvas set_pixel_clip(Canvas c, Int x, Int y, Color col, Rect clip) {
 pub Canvas blend_pixel_clip(Canvas c, Int x, Int y, Color col, Int a, Rect clip) {
     if (a <= 0 || x < 0 || y < 0 || x >= c.w || y >= c.h || !rect_contains(clip, x, y)) { return c; }
     if (a >= 255) { return set_pixel_clip(c, x, y, col, clip); }
-    Int i = (y * c.w + x) * 4;
-    Int na = 255 - a;
-    Int b = (col.b * a + c.px[i] * na) / 255;
-    Int g = (col.g * a + c.px[i + 1] * na) / 255;
-    Int r = (col.r * a + c.px[i + 2] * na) / 255;
     Int ww = c.w;
     Int hh = c.h;
-    return Canvas { .w = ww, .h = hh, .px = c.px.with(i, b).with(i + 1, g).with(i + 2, r).with(i + 3, 255) };
+    Int i = y * ww + x;
+    Int old = (Int)c.px[i];
+    Int na = 255 - a;
+    Int b = (col.b * a + (old & 255) * na) / 255;
+    Int g = (col.g * a + ((old >> 8) & 255) * na) / 255;
+    Int r = (col.r * a + ((old >> 16) & 255) * na) / 255;
+    UInt(32) v = (UInt(32))((255 << 24) | (r << 16) | (g << 8) | b);
+    return Canvas { .w = ww, .h = hh, .px = c.px.with(i, v) };
 }
 
 /// The colour of one pixel; transparent black outside the canvas.
 pub Color pixel_at(Canvas c, Int x, Int y) {
     if (x < 0 || y < 0 || x >= c.w || y >= c.h) { return Color { .b = 0, .g = 0, .r = 0, .a = 0 }; }
-    Int i = (y * c.w + x) * 4;
-    return Color { .b = c.px[i], .g = c.px[i + 1], .r = c.px[i + 2], .a = c.px[i + 3] };
+    return word_color(c.px[y * c.w + x]);
 }
 
-/// The bytes of rows `y0` up to (not including) `y1`, the band a damaged
-/// rectangle needs uploaded.
+/// The bytes of rows `y0` up to (not including) `y1`, blue, green, red and
+/// alpha for each pixel: the band a `PutImage` sends.
 pub List(Int) canvas_rows(Canvas c, Int y0, Int y1) {
     Int a = if (y0 < 0) { 0 } else { y0 };
     Int b = if (y1 > c.h) { c.h } else { y1 };
     if (b <= a) { return []; }
-    return c.px[(a * c.w * 4)..(b * c.w * 4)];
+    ListBuf(Int) acc = ListBuf();
+    return bytes_of(c.px, a * c.w, b * c.w, acc);
 }
 
-/// The pixel bytes, for presenting or encoding.
-pub List(Int) finish(Canvas c) { return c.px; }
+List(Int) bytes_of(List(UInt(32)) px, Int i, Int end, ListBuf(Int) acc) {
+    if (i >= end) { return acc.finish(); }
+    Int v = (Int)px[i];
+    return bytes_of(px, i + 1, end, acc.push(v & 255).push((v >> 8) & 255).push((v >> 16) & 255).push((v >> 24) & 255));
+}
+
+/// The pixel bytes, blue, green, red and alpha each, for encoding.
+pub List(Int) finish(Canvas c) { return canvas_rows(c, 0, c.h); }
 
 test "canvas allocates" {
     Canvas c = canvas_new(4, 3);
-    expect(c.px.len()).toEqual(48);
+    expect(c.px.len()).toEqual(12);
+    expect(finish(c).len()).toEqual(48);
 }
 
 test "fill_rect writes inside and only inside" {
     Canvas c0 = canvas_new(4, 3);
     Color col = Color { .b = 1, .g = 2, .r = 3, .a = 4 };
     Canvas c1 = fill_rect(c0, Rect { .x = 1, .y = 1, .w = 2, .h = 1 }, col);
+    List(Int) bytes = finish(c1);
     Int base = (1 * 4 + 1) * 4;
-    expect(c1.px[base + 0]).toEqual(1);
-    expect(c1.px[base + 1]).toEqual(2);
-    expect(c1.px[base + 2]).toEqual(3);
-    expect(c1.px[base + 3]).toEqual(4);
-    expect(c1.px[0]).toEqual(0);
-    expect(c1.px[(1 * 4 + 3) * 4]).toEqual(0);
+    expect(bytes[base + 0]).toEqual(1);
+    expect(bytes[base + 1]).toEqual(2);
+    expect(bytes[base + 2]).toEqual(3);
+    expect(bytes[base + 3]).toEqual(4);
+    expect(bytes[0]).toEqual(0);
+    expect(bytes[(1 * 4 + 3) * 4]).toEqual(0);
+    expect((Int)c1.px[1 * 4 + 2]).toEqual(67305985);
+    expect((Int)c1.px[1 * 4 + 3]).toEqual(0);
 }
 
 test "fill_rect clips to the canvas and to the clip" {
@@ -154,15 +180,16 @@ test "blending mixes by coverage" {
     expect(pixel_at(d, 0, 0).a).toEqual(255);
 }
 
+test "a filled canvas and a word round-trip a colour" {
+    Color col = Color { .b = 10, .g = 20, .r = 30, .a = 40 };
+    expect(pixel_at(canvas_filled(2, 2, col), 1, 1).g).toEqual(20);
+    expect(word_color(color_word(col)).a).toEqual(40);
+}
+
 test "rows are bands of the frame" {
     Canvas c = fill_rect(canvas_new(2, 3), Rect { .x = 0, .y = 1, .w = 2, .h = 1 }, rgb(5, 6, 7));
     List(Int) band = canvas_rows(c, 1, 2);
     expect(band.len()).toEqual(8);
     expect(band[2]).toEqual(5);
     expect(canvas_rows(c, 2, 1).len()).toEqual(0);
-}
-
-test "finish" {
-    Canvas c = canvas_new(2, 2);
-    expect(finish(c).len()).toEqual(16);
 }

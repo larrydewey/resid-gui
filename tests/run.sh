@@ -1,6 +1,6 @@
 #!/bin/sh
 # tests/run.sh — every test file in this repository, every test program,
-# then every example.
+# then every example, the malicious native module, then the documents.
 #
 # A file with `test` blocks is a test file: `residc test` discovers them at
 # compile time and runs the generated entry point. Files under src/ are
@@ -59,6 +59,21 @@ for f in $(find "$ROOT/examples" -name '*.resid' | sort); do
         fail=$((fail + 1))
     fi
 done
+
+# The malicious native module against the real wrapper.
+total=$((total + 1))
+if ! RESIDC="$RESIDC" "$ROOT/tests/evil.sh" >"$OUT/evil.log" 2>&1; then
+    cat "$OUT/evil.log"
+    echo "FAILED: tests/evil.sh"
+    fail=$((fail + 1))
+fi
+
+# The documents: their programs type-check and their signatures exist.
+total=$((total + 1))
+if ! python3 -I "$ROOT/tools/check_docs.py" "$RESIDC"; then
+    echo "FAILED: docs"
+    fail=$((fail + 1))
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then

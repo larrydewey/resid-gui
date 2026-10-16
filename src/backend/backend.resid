@@ -74,17 +74,17 @@ Bool slot_paint_at(Slot s, Int stride, Frame fr, List(Rect) rs, Int i) {
     Rect r = rs[i];
     Canvas c = raster_frame_rect(fr, r, background());
     Bool ok = if (r.x == 0 && r.w == stride) {
-        resid_disp_shm_put(s.handle, r.y * stride * 4, c.px, r.w * r.h * 4)
+        resid_disp_shm_put32(s.handle, r.y * stride * 4, c.px, 0, r.w * r.h)
     } else { put_rows(s.handle, stride, r, c.px, 0) };
     return ok && slot_paint_at(s, stride, fr, rs, i + 1);
 }
 
-/// Row by row, for a rectangle narrower than the buffer.
+/// Row by row, for a rectangle narrower than the buffer: row `y` of the
+/// rectangle's pixels lands at its place in the buffer's row `r.y + y`.
 @requires(display)
-Bool put_rows(Int handle, Int stride, Rect r, List(Int) px, Int y) {
+Bool put_rows(Int handle, Int stride, Rect r, List(UInt(32)) px, Int y) {
     if (y >= r.h) { return true; }
-    Int n = r.w * 4;
-    if (!resid_disp_shm_put(handle, ((r.y + y) * stride + r.x) * 4, px[(y * n)..((y + 1) * n)], n)) { return false; }
+    if (!resid_disp_shm_put32(handle, ((r.y + y) * stride + r.x) * 4, px, y * r.w, r.w)) { return false; }
     return put_rows(handle, stride, r, px, y + 1);
 }
 

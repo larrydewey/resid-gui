@@ -5,8 +5,9 @@
 //   residc prog.resid -native image=native/image/image.ll
 //
 // and grant `native_image` (plus `filesystem(readonly)` to read the
-// file). Decoding runs in a fresh, confined process; the answer is checked
-// by `image_parse` before a pixel is used.
+// file). Decoding runs in a fresh, confined process, inside a spawn region
+// so that a decoder that crashes is an `Err`, not an abort of the program;
+// the answer is checked by `image_parse` before a pixel is used.
 
 import "../../src/gfx/image.resid";
 
@@ -46,5 +47,6 @@ List(Int) image_answer_at(Bytes(16777216) a, Int i, Int n, ListBuf(Int) b) {
 @requires(native_image)
 pub Result(Image, Str) image_from_bytes(List(Int) data) {
     if (data.len() == 0 || data.len() > image_max_bytes()) { return Err("image: the file is empty or larger than 16 MB"); }
-    return image_parse(image_answer(image_decode(image_bytes(data), data.len())));
+    Result(List(Int), RegionError) r = spawn (native_image) { return image_answer(image_decode(image_bytes(data), data.len())); };
+    return match (r) { Ok(a) => image_parse(a), Err(e) => Err("image: the image module failed") };
 }

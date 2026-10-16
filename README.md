@@ -65,12 +65,11 @@ keypad's Num Lock. The X11 backend authenticates with the
 `MIT-MAGIC-COOKIE-1` the session's authority file holds for `$DISPLAY`,
 and each backend connects to its own protocol's socket.
 
-These need four `display` builtins from Resid's `display-builtins` branch
-(`resid_disp_connect_wayland`, `resid_disp_connect_x11`,
-`resid_disp_fd_read`, `resid_disp_x11_auth`), which also fixes
-`resid_disp_recv_fd` handing back the wrong descriptor. Until that branch
-is merged and installed, build with its compiler:
-`RESIDC=../resid.worktrees/display/build/boot/residc tests/run.sh`.
+These need four `display` builtins (`resid_disp_connect_wayland`,
+`resid_disp_connect_x11`, `resid_disp_fd_read`, `resid_disp_x11_auth`) and
+the fix to `resid_disp_recv_fd` handing back the wrong descriptor, all in
+Resid since `d71c0d33`; a Resid installed from an earlier commit cannot
+build the backends.
 
 Speed: a whole 2700x2200 frame of 800 draw ops rasterizes in about 70 ms
 and copies into shared memory in about 30 ms, and an ordinary frame

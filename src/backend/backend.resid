@@ -31,11 +31,11 @@ behavior Backend(B) {
     /// Whether a frame can be presented now: a buffer is free and the
     /// server is not pacing the client.
     Bool be_ready(B b);
-    /// Show the frame `ops` describes (logical pixels, drawn at `scale`),
-    /// of which the device rectangles `damage` changed. The backend draws
-    /// only those rectangles, plus whatever the buffer it draws into
-    /// missed while the other buffer was on screen.
-    B be_present(B b, List(DrawOp) ops, Int scale, List(Rect) damage);
+    /// Show frame `fr` (its display list in logical pixels, drawn at its
+    /// scale in its font), of which the device rectangles `damage`
+    /// changed. The backend draws only those rectangles, plus whatever the
+    /// buffer it draws into missed while the other buffer was on screen.
+    B be_present(B b, Frame fr, List(Rect) damage);
     /// Close the window and the connection.
     Bool be_close(B b);
 }
@@ -63,20 +63,20 @@ pub Slot slot_dirty(Slot s, List(Rect) rs) { return Slot { .handle = s.handle, .
 /// stale pixels, inside `bounds`.
 pub List(Rect) slot_need(Slot s, List(Rect) damage, Rect bounds) { return rects_clip(rects_merge(s.stale, damage), bounds); }
 
-/// Rasterize each rectangle of `rs` from `ops` and copy it into the slot,
-/// whose rows are `stride` pixels wide.
+/// Rasterize each rectangle of `rs` from frame `fr` and copy it into the
+/// slot, whose rows are `stride` pixels wide.
 @requires(display)
-pub Bool slot_paint(Slot s, Int stride, List(DrawOp) ops, Int scale, List(Rect) rs) { return slot_paint_at(s, stride, ops, scale, rs, 0); }
+pub Bool slot_paint(Slot s, Int stride, Frame fr, List(Rect) rs) { return slot_paint_at(s, stride, fr, rs, 0); }
 
 @requires(display)
-Bool slot_paint_at(Slot s, Int stride, List(DrawOp) ops, Int scale, List(Rect) rs, Int i) {
+Bool slot_paint_at(Slot s, Int stride, Frame fr, List(Rect) rs, Int i) {
     if (i >= rs.len()) { return true; }
     Rect r = rs[i];
-    Canvas c = raster_rect(ops, r, background(), scale);
+    Canvas c = raster_frame_rect(fr, r, background());
     Bool ok = if (r.x == 0 && r.w == stride) {
         resid_disp_shm_put(s.handle, r.y * stride * 4, c.px, r.w * r.h * 4)
     } else { put_rows(s.handle, stride, r, c.px, 0) };
-    return ok && slot_paint_at(s, stride, ops, scale, rs, i + 1);
+    return ok && slot_paint_at(s, stride, fr, rs, i + 1);
 }
 
 /// Row by row, for a rectangle narrower than the buffer.

@@ -1,6 +1,7 @@
 # Build output and scratch files
 *.bin
 *.ll
+!native/*/*.ll
 *.resid-notes.cbor
 *.resid-prov*
 *.resid-graph.cbor

@@ -10,6 +10,11 @@ import "color.resid";
 import "draw.resid";
 import "text.resid";
 import "image.resid";
+import "font.resid";
+
+/// A frame as a backend draws it: the display list in logical pixels,
+/// the device pixels per logical pixel, and the font its text is in.
+pub type Frame = { List(DrawOp) ops; Int scale; Font font; };
 
 /// The window background every frame starts from.
 pub Color background() { return rgb(240, 240, 240); }
@@ -19,10 +24,15 @@ pub Color background() { return rgb(240, 240, 240); }
 /// logical pixels and the canvas in device pixels, `scale` of them per
 /// logical pixel; `region` is in device pixels.
 pub Canvas raster_region_scaled(Canvas c, List(DrawOp) ops, Rect region, Color bg, Int scale) {
+    return raster_region_font(c, ops, region, bg, scale, font_builtin());
+}
+
+/// `raster_region_scaled` with text in font `f`.
+pub Canvas raster_region_font(Canvas c, List(DrawOp) ops, Rect region, Color bg, Int scale, Font f) {
     Rect r = rect_intersect(region, canvas_bounds(c));
     if (rect_is_empty(r)) { return c; }
     Int s = if (scale < 1) { 1 } else { scale };
-    return raster_ops(fill_rect(c, r, bg), ops, 0, [r], s, 0, 0);
+    return raster_ops(fill_rect(c, r, bg), ops, 0, [r], s, 0, 0, f);
 }
 
 /// `raster_region_scaled` at one device pixel per logical pixel.
@@ -35,10 +45,15 @@ pub Canvas raster_region(Canvas c, List(DrawOp) ops, Rect region, Color bg) {
 /// only what changed into a small canvas keeps a frame's cost
 /// proportional to its damage, not to the window.
 pub Canvas raster_rect(List(DrawOp) ops, Rect r, Color bg, Int scale) {
-    Int s = if (scale < 1) { 1 } else { scale };
+    return raster_frame_rect(Frame { .ops = ops, .scale = scale, .font = font_builtin() }, r, bg);
+}
+
+/// `raster_rect` for a whole frame, font included.
+pub Canvas raster_frame_rect(Frame fr, Rect r, Color bg) {
+    Int s = if (fr.scale < 1) { 1 } else { fr.scale };
     Canvas c = canvas_new(r.w, r.h);
     Rect all = canvas_bounds(c);
-    return raster_ops(fill_rect(c, all, bg), ops, 0, [all], s, r.x, r.y);
+    return raster_ops(fill_rect(c, all, bg), fr.ops, 0, [all], s, r.x, r.y, fr.font);
 }
 
 /// A logical rectangle in device pixels.
@@ -48,15 +63,15 @@ pub Rect scale_up(Rect r, Int s) { return Rect { .x = r.x * s, .y = r.y * s, .w 
 /// device pixel (`ox`, `oy`).
 Rect place(Rect r, Int s, Int ox, Int oy) { return Rect { .x = r.x * s - ox, .y = r.y * s - oy, .w = r.w * s, .h = r.h * s }; }
 
-Canvas raster_ops(Canvas c, List(DrawOp) ops, Int i, List(Rect) clips, Int s, Int ox, Int oy) {
+Canvas raster_ops(Canvas c, List(DrawOp) ops, Int i, List(Rect) clips, Int s, Int ox, Int oy, Font f) {
     if (i >= ops.len()) { return c; }
     Rect clip = clips[clips.len() - 1];
     return match (ops[i]) {
-        OpFill(r, col) => raster_ops(fill_rect_clip(c, place(r, s, ox, oy), col, clip), ops, i + 1, clips, s, ox, oy),
-        OpText(x, y, t, col) => raster_ops(render_text_scaled(c, x * s - ox, y * s - oy, t, col, clip, s), ops, i + 1, clips, s, ox, oy),
-        OpImage(x, y, w, h, px) => raster_ops(blit_scaled(c, Image { .w = w, .h = h, .px = px }, x * s - ox, y * s - oy, clip, s), ops, i + 1, clips, s, ox, oy),
-        OpClipPush(r) => raster_ops(c, ops, i + 1, clips.concat([rect_intersect(clip, place(r, s, ox, oy))]), s, ox, oy),
-        OpClipPop => raster_ops(c, ops, i + 1, if (clips.len() > 1) { clips[0..(clips.len() - 1)] } else { clips }, s, ox, oy)
+        OpFill(r, col) => raster_ops(fill_rect_clip(c, place(r, s, ox, oy), col, clip), ops, i + 1, clips, s, ox, oy, f),
+        OpText(x, y, t, col) => raster_ops(render_text_font(c, x * s - ox, y * s - oy, t, col, clip, s, f), ops, i + 1, clips, s, ox, oy, f),
+        OpImage(x, y, w, h, px) => raster_ops(blit_scaled(c, Image { .w = w, .h = h, .px = px }, x * s - ox, y * s - oy, clip, s), ops, i + 1, clips, s, ox, oy, f),
+        OpClipPush(r) => raster_ops(c, ops, i + 1, clips.concat([rect_intersect(clip, place(r, s, ox, oy))]), s, ox, oy, f),
+        OpClipPop => raster_ops(c, ops, i + 1, if (clips.len() > 1) { clips[0..(clips.len() - 1)] } else { clips }, s, ox, oy, f)
     };
 }
 

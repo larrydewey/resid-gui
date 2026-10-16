@@ -9,22 +9,21 @@ pub Image image_new(Int w, Int h) {
     return Image { .w = w, .h = h, .px = canvas_fill(0, w * h * 4, b) };
 }
 
-/// Copy `im` onto `c` with its top-left corner at (`x0`, `y0`), clipped to
-/// `clip` and to the canvas. Pixels are copied, not blended.
+/// Draw `im` over `c` with its top-left corner at (`x0`, `y0`), clipped to
+/// `clip` and to the canvas. Each pixel is laid over what is there by its
+/// alpha, so transparent parts of an image show the window behind them.
 pub Canvas blit_clip(Canvas c, Image im, Int x0, Int y0, Rect clip) {
     Rect a = rect_intersect(rect_intersect(Rect { .x = x0, .y = y0, .w = im.w, .h = im.h }, clip), canvas_bounds(c));
     if (rect_is_empty(a) || im.px.len() < im.w * im.h * 4) { return c; }
-    Int ww = c.w;
-    Int hh = c.h;
-    return Canvas { .w = ww, .h = hh, .px = blit_rows(c.px, ww, im, x0, y0, a, a.y, a.x) };
+    return blit_rows(c, im, x0, y0, a, a.y, a.x);
 }
 
-List(Int) blit_rows(List(Int) px, Int ww, Image im, Int x0, Int y0, Rect a, Int y, Int x) {
-    if (y >= a.y + a.h) { return px; }
-    if (x >= a.x + a.w) { return blit_rows(px, ww, im, x0, y0, a, y + 1, a.x); }
-    Int d = (y * ww + x) * 4;
+Canvas blit_rows(Canvas c, Image im, Int x0, Int y0, Rect a, Int y, Int x) {
+    if (y >= a.y + a.h) { return c; }
+    if (x >= a.x + a.w) { return blit_rows(c, im, x0, y0, a, y + 1, a.x); }
     Int s = ((y - y0) * im.w + (x - x0)) * 4;
-    return blit_rows(px.with(d, im.px[s]).with(d + 1, im.px[s + 1]).with(d + 2, im.px[s + 2]).with(d + 3, im.px[s + 3]), ww, im, x0, y0, a, y, x + 1);
+    Color col = Color { .b = im.px[s], .g = im.px[s + 1], .r = im.px[s + 2], .a = 255 };
+    return blit_rows(blend_pixel_clip(c, x, y, col, im.px[s + 3], a), im, x0, y0, a, y, x + 1);
 }
 
 /// `blit_clip` with each image pixel drawn as a `k` x `k` block.
@@ -38,8 +37,15 @@ Canvas blit_blocks(Canvas c, Image im, Int x0, Int y0, Rect clip, Int k, Int i, 
     if (i >= im.h) { return c; }
     if (j >= im.w) { return blit_blocks(c, im, x0, y0, clip, k, i + 1, 0); }
     Int s = (i * im.w + j) * 4;
-    Color col = Color { .b = im.px[s], .g = im.px[s + 1], .r = im.px[s + 2], .a = im.px[s + 3] };
-    return blit_blocks(fill_rect_clip(c, Rect { .x = x0 + j * k, .y = y0 + i * k, .w = k, .h = k }, col, clip), im, x0, y0, clip, k, i, j + 1);
+    Color col = Color { .b = im.px[s], .g = im.px[s + 1], .r = im.px[s + 2], .a = 255 };
+    Canvas next = if (im.px[s + 3] >= 255) { fill_rect_clip(c, Rect { .x = x0 + j * k, .y = y0 + i * k, .w = k, .h = k }, col, clip) }
+                  else { blend_rect(c, x0 + j * k, y0 + i * k, k, col, im.px[s + 3], clip, 0) };
+    return blit_blocks(next, im, x0, y0, clip, k, i, j + 1);
+}
+
+Canvas blend_rect(Canvas c, Int x, Int y, Int k, Color col, Int a, Rect clip, Int i) {
+    if (i >= k * k) { return c; }
+    return blend_rect(blend_pixel_clip(c, x + i % k, y + i / k, col, a, clip), x, y, k, col, a, clip, i + 1);
 }
 
 /// `blit_clip` clipped to the canvas alone.
@@ -54,55 +60,41 @@ test "image shape" {
     Canvas c2 = blit_at(c, im, 1, 1);
     expect(c2.px.len()).toEqual(64);
     Image red = Image { .w = 1, .h = 1, .px = [0, 0, 255, 255] };
+    Image clear = Image { .w = 1, .h = 1, .px = [0, 0, 255, 0] };
+    expect(pixel_at(blit_at(fill_rect(canvas_new(1, 1), Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, rgb(0, 9, 0)), clear, 0, 0), 0, 0).g).toEqual(9);
     Canvas c3 = blit_at(canvas_new(3, 3), red, 1, 1);
     expect(pixel_at(c3, 1, 1).r).toEqual(255);
     expect(pixel_at(c3, 0, 0).r).toEqual(0);
 }
 
-// ─── Native image decode (optional, requires native_image capability) ───
+// ─── Decoded images ─────────────────────────────────────────────────
 
-// Native module binding - returns packed image bytes
-// Result format: [w][h][channels][pixels...] (BGRA premultiplied)
-// @link("image_decode") Bytes(16777216) image_decode_native(Bytes(16777216) data, Int len) {}
-
-/// Result of native image decode
-pub type DecodedImage = {
-    Int w;
-    Int h;
-    Int channels;
-    List(Int) pixels; // premultiplied BGRA
-};
-
-/// Unpack native image decode result
-pub DecodedImage unpack_image(Bytes(16777216) packed, Int len) {
-    if (len < 12) { return empty_image(); }
-    
-    Int w = packed[0] | (packed[1] << 8) | (packed[2] << 16) | (packed[3] << 24);
-    Int h = packed[4] | (packed[5] << 8) | (packed[6] << 16) | (packed[7] << 24);
-    Int channels = packed[8] | (packed[9] << 8) | (packed[10] << 16) | (packed[11] << 24);
-    
-    List(Int) pixels = unpack_pixels(packed, len, 12, w * h * channels, 0, []);
-    
-    return DecodedImage { .w = w, .h = h, .channels = channels, .pixels = pixels };
+Int img_le32(List(Int) b, Int i) {
+    return (b[i] & 255) | ((b[i + 1] & 255) << 8) | ((b[i + 2] & 255) << 16) | ((b[i + 3] & 255) << 24);
 }
 
-List(Int) unpack_pixels(Bytes(16777216) packed, Int len, Int offset, Int count, Int i, List(Int) acc) {
-    if (i >= count) { return acc; }
-    if (offset >= len) { return acc; }
-    return unpack_pixels(packed, len, offset + 1, count, i + 1, acc.concat([packed[offset]]));
+/// An image from the native `image` module's answer (layout in
+/// native/image/image.c): magic, status, width, height, then blue, green,
+/// red and alpha bytes. The answer came from native code, so the size is
+/// checked against what arrived before a pixel is used.
+pub Result(Image, Str) image_parse(List(Int) b) {
+    if (b.len() < 16 || img_le32(b, 0) != 826885970) { return Err("image: not an image module answer"); }
+    Int status = img_le32(b, 4);
+    if (status == 2) { return Err("image: too large (at most 4096 pixels a side and 16 MB of pixels)"); }
+    if (status != 0) { return Err("image: not a PNG, JPEG, BMP, GIF or TGA image"); }
+    Int w = img_le32(b, 8);
+    Int h = img_le32(b, 12);
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || 16 + w * h * 4 > b.len()) { return Err("image: malformed answer"); }
+    return Ok(Image { .w = w, .h = h, .px = b[16..(16 + w * h * 4)] });
 }
 
-DecodedImage empty_image() {
-    return DecodedImage { .w = 0, .h = 0, .channels = 0, .pixels = [] };
-}
-
-/// Convert DecodedImage to Image (Canvas-compatible)
-pub Image decoded_to_image(DecodedImage d) {
-    return Image { .w = d.w, .h = d.h, .px = d.pixels };
-}
-
-test "unpack empty image" {
-    DecodedImage d = empty_image();
-    expect(d.w).toEqual(0);
-    expect(d.h).toEqual(0);
+test "an image answer parses, and a lying one is refused" {
+    List(Int) ok = [82, 71, 73, 49, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 3, 4];
+    Image im = image_parse(ok) else { image_new(0, 0) };
+    expect(im.w).toEqual(1);
+    expect(im.px[2]).toEqual(3);
+    Bool big = match (image_parse(ok.with(8, 9))) { Ok(i) => false, Err(e) => e == "image: malformed answer" };
+    expect(big).toEqual(true);
+    Bool bad = match (image_parse(ok.with(4, 1))) { Ok(i) => false, Err(e) => true };
+    expect(bad).toEqual(true);
 }

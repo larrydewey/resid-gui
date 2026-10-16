@@ -9,6 +9,7 @@
 import "../app.resid";
 import "../gfx/color.resid";
 import "../backend/keymap.resid";
+import "../gfx/font.resid";
 import "layout.resid";
 import "paint.resid";
 import "state.resid";
@@ -33,13 +34,16 @@ pub Bool interactive(Widget w) {
 }
 
 /// The topmost interactive widget under (`x`, `y`), or one with id -1.
-pub Found hit(Widget w, Rect r, Int x, Int y) { return hit_node(w, r, x, y, 0); }
+pub Found hit(Widget w, Rect r, Int x, Int y) { return hit_in(w, r, x, y, font_builtin()); }
 
-Found hit_node(Widget w, Rect r, Int x, Int y, Int id) {
+/// `hit` with text in font `f`.
+pub Found hit_in(Widget w, Rect r, Int x, Int y, Font f) { return hit_node(w, r, x, y, 0, f); }
+
+Found hit_node(Widget w, Rect r, Int x, Int y, Int id, Font f) {
     if (!rect_contains(r, x, y)) { return not_found(); }
     if (interactive(w)) { return Found { .id = id, .w = w, .r = r }; }
     List(Widget) kids = children(w);
-    return hit_kids(kids, child_rects(w, r), x, y, kids.len() - 1, kid_ids(kids, id + 1, 0, []));
+    return hit_kids(kids, child_rects_in(w, r, f), x, y, kids.len() - 1, kid_ids(kids, id + 1, 0, []), f);
 }
 
 /// The number of each child, given the first child's.
@@ -48,28 +52,31 @@ List(Int) kid_ids(List(Widget) xs, Int id, Int i, List(Int) acc) {
 }
 
 // Later children are drawn over earlier ones, so they are asked first.
-Found hit_kids(List(Widget) xs, List(Rect) rs, Int x, Int y, Int i, List(Int) ids) {
+Found hit_kids(List(Widget) xs, List(Rect) rs, Int x, Int y, Int i, List(Int) ids, Font f) {
     if (i < 0 || i >= rs.len()) { return not_found(); }
-    Found f = hit_node(xs[i], rs[i], x, y, ids[i]);
-    if (f.id >= 0) { return f; }
-    return hit_kids(xs, rs, x, y, i - 1, ids);
+    Found h = hit_node(xs[i], rs[i], x, y, ids[i], f);
+    if (h.id >= 0) { return h; }
+    return hit_kids(xs, rs, x, y, i - 1, ids, f);
 }
 
 /// The widget numbered `target`, or one with id -1.
-pub Found find(Widget w, Rect r, Int target) { return find_node(w, r, target, 0); }
+pub Found find(Widget w, Rect r, Int target) { return find_in(w, r, target, font_builtin()); }
 
-Found find_node(Widget w, Rect r, Int target, Int id) {
+/// `find` with text in font `f`.
+pub Found find_in(Widget w, Rect r, Int target, Font f) { return find_node(w, r, target, 0, f); }
+
+Found find_node(Widget w, Rect r, Int target, Int id, Font f) {
     if (target < id || target >= id + node_count(w)) { return not_found(); }
     if (target == id) { return Found { .id = id, .w = w, .r = r }; }
     List(Widget) kids = children(w);
-    return find_kids(kids, child_rects(w, r), target, 0, id + 1);
+    return find_kids(kids, child_rects_in(w, r, f), target, 0, id + 1, f);
 }
 
-Found find_kids(List(Widget) xs, List(Rect) rs, Int target, Int i, Int id) {
+Found find_kids(List(Widget) xs, List(Rect) rs, Int target, Int i, Int id, Font f) {
     if (i >= xs.len() || i >= rs.len()) { return not_found(); }
     Int n = node_count(xs[i]);
-    if (target < id + n) { return find_node(xs[i], rs[i], target, id); }
-    return find_kids(xs, rs, target, i + 1, id + n);
+    if (target < id + n) { return find_node(xs[i], rs[i], target, id, f); }
+    return find_kids(xs, rs, target, i + 1, id + n, f);
 }
 
 /// The numbers of every text input, in order.
@@ -97,13 +104,16 @@ Int next_input_at(List(Int) ids, Int cur, Int i) {
     return next_input_at(ids, cur, i + 1);
 }
 
-/// Fold one raw event through the widgets on screen.
-pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) {
+/// Fold one raw event through the widgets on screen, in the built-in font.
+pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) { return ui_event_in(ui, root, area, e, font_builtin()); }
+
+/// Fold one raw event through the widgets on screen, laid out in font `f`.
+pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
     UiStep s = match (e) {
-        PointerDown(x, y, b) => if (b == 1) { pointer_down(ui, root, area, x, y) } else { none(ui) },
-        PointerMoved(x, y) => pointer_moved(ui, root, area, x),
-        PointerUp(x, y, b) => if (b == 1) { pointer_up(ui, root, area, x, y) } else { none(ui) },
-        KeyDown(code, text) => key_down(ui, root, area, code, text),
+        PointerDown(x, y, b) => if (b == 1) { pointer_down(ui, root, area, x, y, f) } else { none(ui) },
+        PointerMoved(x, y) => pointer_moved(ui, root, area, x, f),
+        PointerUp(x, y, b) => if (b == 1) { pointer_up(ui, root, area, x, y, f) } else { none(ui) },
+        KeyDown(code, text) => key_down(ui, root, area, code, text, f),
         Blurred => UiStep { .ui = ui_with_pressed(ui, -1), .out = [] },
         _ => none(ui)
     };
@@ -112,37 +122,41 @@ pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) {
 
 UiStep none(UiState ui) { return UiStep { .ui = ui, .out = [] }; }
 
-UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y) {
-    Found f = hit(root, area, x, y);
+UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
+    Found f = hit_in(root, area, x, y, fo);
     UiState pressed = ui_with_pressed(ui, f.id);
     return match (f.w) {
-        TextInput(s, k, m) => UiStep { .ui = ui_with_focus(pressed, f.id), .out = [TextEdited(m, s, caret_at(f.r, s, k, x))] },
+        TextInput(s, k, m) => UiStep { .ui = ui_with_focus(pressed, f.id), .out = [TextEdited(m, s, caret_at_in(f.r, s, k, x, fo))] },
         Slider(v, m) => UiStep { .ui = ui_with_focus(pressed, -1), .out = [SliderSet(m, slider_value_at(f.r, x))] },
         _ => UiStep { .ui = ui_with_focus(pressed, -1), .out = [] }
     };
 }
 
-/// The caret position a click at `x` puts in an input showing `s`.
-pub Int caret_at(Rect r, Str s, Int caret, Int x) {
-    Int n = str_len(s);
-    Int first = input_scroll(clamp_int(caret, 0, n), max_int((r.w - 10) / 8, 0));
-    return clamp_int((x - (r.x + 5) + 4) / 8 + first, 0, n);
+/// The caret position a click at `x` puts in an input showing `s`, in the
+/// built-in font.
+pub Int caret_at(Rect r, Str s, Int caret, Int x) { return caret_at_in(r, s, caret, x, font_builtin()); }
+
+/// `caret_at` with the text in font `f`: the character boundary nearest
+/// the click, allowing for how far the text is scrolled.
+pub Int caret_at_in(Rect r, Str s, Int caret, Int x, Font f) {
+    Int shift = input_scroll(caret_offset(s, caret, f), r.w - 2);
+    return index_at_x(f, s, max_int(x - (r.x + 5) + shift, 0));
 }
 
-UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x) {
+UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
     if (ui.pressed < 0) { return none(ui); }
-    Found f = find(root, area, ui.pressed);
+    Found f = find_in(root, area, ui.pressed, fo);
     return match (f.w) {
         Slider(v, m) => UiStep { .ui = ui, .out = [SliderSet(m, slider_value_at(f.r, x))] },
         _ => none(ui)
     };
 }
 
-UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y) {
+UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     UiState released = ui_with_pressed(ui, -1);
     if (ui.pressed < 0) { return none(released); }
-    Found f = find(root, area, ui.pressed);
-    Bool inside = hit(root, area, x, y).id == ui.pressed;
+    Found f = find_in(root, area, ui.pressed, fo);
+    Bool inside = hit_in(root, area, x, y, fo).id == ui.pressed;
     return match (f.w) {
         Button(s, m) => UiStep { .ui = released, .out = if (inside) { [AppMsg(m)] } else { [] } },
         Checkbox(s, c, m) => UiStep { .ui = released, .out = if (inside) { [AppMsg(m)] } else { [] } },
@@ -150,13 +164,13 @@ UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y) {
     };
 }
 
-UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text) {
+UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo) {
     if (code == key_tab()) {
         return none(ui_with_focus(ui, next_input(inputs(root), ui.focus)));
     }
     if (ui.focus < 0) { return none(ui); }
     if (code == key_esc()) { return none(ui_with_focus(ui, -1)); }
-    Found f = find(root, area, ui.focus);
+    Found f = find_in(root, area, ui.focus, fo);
     return match (f.w) {
         TextInput(s, k, m) => UiStep { .ui = ui_with_caret(ui, true), .out = edit(s, clamp_int(k, 0, str_len(s)), m, code, text) },
         _ => none(ui_with_focus(ui, -1))

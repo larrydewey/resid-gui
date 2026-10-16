@@ -1,0 +1,50 @@
+// image.resid — the resid-gui-image native module's Resid side.
+//
+// Build a program that imports this with the artifact beside it:
+//
+//   residc prog.resid -native image=native/image/image.ll
+//
+// and grant `native_image` (plus `filesystem(readonly)` to read the
+// file). Decoding runs in a fresh, confined process; the answer is checked
+// by `image_parse` before a pixel is used.
+
+import "../../src/gfx/image.resid";
+
+/// stb_image in a sandbox: PNG, JPEG, BMP, GIF or TGA bytes (the first
+/// `len`) to blue-green-red-alpha pixels. The layout is in image.c.
+@link("image") Bytes(16777216) image_decode(Bytes(16777216) data, Int len) {}
+
+/// The most encoded image the module takes.
+pub Int image_max_bytes() { return 16777216; }
+
+Bytes(16777216) image_bytes(List(Int) xs) {
+    BytesBuf(16777216) b = BytesBuf();
+    return image_fill(xs, 0, b).finish();
+}
+
+BytesBuf(16777216) image_fill(List(Int) xs, Int i, BytesBuf(16777216) b) {
+    if (i >= xs.len()) { return b; }
+    return image_fill(xs, i + 1, b.push(xs[i] & 255));
+}
+
+/// The answer's header and as many pixel bytes as its size claims, never
+/// more than the answer holds.
+List(Int) image_answer(Bytes(16777216) a) {
+    Int w = a[8] | (a[9] << 8) | (a[10] << 16) | (a[11] << 24);
+    Int h = a[12] | (a[13] << 8) | (a[14] << 16) | (a[15] << 24);
+    Int want = if (w > 0 && h > 0 && w <= 4096 && h <= 4096) { 16 + w * h * 4 } else { 16 };
+    Int n = if (want > 16777216) { 16777216 } else { want };
+    return image_answer_at(a, 0, n, ListBuf());
+}
+
+List(Int) image_answer_at(Bytes(16777216) a, Int i, Int n, ListBuf(Int) b) {
+    if (i >= n) { return b.finish(); }
+    return image_answer_at(a, i + 1, n, b.push(a[i]));
+}
+
+/// An image from the bytes of an encoded file.
+@requires(native_image)
+pub Result(Image, Str) image_from_bytes(List(Int) data) {
+    if (data.len() == 0 || data.len() > image_max_bytes()) { return Err("image: the file is empty or larger than 16 MB"); }
+    return image_parse(image_answer(image_decode(image_bytes(data), data.len())));
+}

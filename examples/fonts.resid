@@ -1,0 +1,48 @@
+// residc-args: -native font=native/font/font.ll
+import "../src/gui.resid";
+import "../native/font/font.resid";
+
+// Text in a TrueType font: the file named on the command line is
+// rasterized by the sandboxed native font module, once at scale 1 and once
+// at scale 2, and every widget's text uses it.
+//
+//   residc examples/fonts.resid -native font=native/font/font.ll -o fonts
+//   ./fonts /usr/share/fonts/noto/NotoSans-Regular.ttf
+
+type Demo = { Str text; Int caret; Int presses; };
+
+Demo demo_init() { return Demo { .text = "Proportional text, kerned: AV To Wa", .caret = 0, .presses = 0 }; }
+
+Demo demo_update(Demo d, Event e) {
+    return match (e) {
+        TextEdited(m, s, k) => Demo { .text = s, .caret = k, .presses = d.presses },
+        AppMsg(m) => Demo { .text = d.text, .caret = d.caret, .presses = d.presses + 1 },
+        _ => d
+    };
+}
+
+Widget demo_view(Demo d) {
+    return Padding(12, Column([
+        Text("The quick brown fox jumps over the lazy dog."),
+        Text("0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
+        TextInput(d.text, d.caret, Submitted),
+        Row([Button("Press me", Clicked), Text(f"pressed {d.presses} times"), Spacer, Checkbox("a checkbox", true, Toggled)])
+    ]));
+}
+
+App(Demo) = { .init = demo_init, .update = demo_update, .view = demo_view };
+
+@requires(display, clock(readonly), args, filesystem(readonly), native_font)
+Int main() {
+    Str path = args.get(1);
+    if (str_len(path) == 0) {
+        eprintln("usage: fonts FONT.ttf");
+        return 2;
+    }
+    List(Font) fonts = fonts_from_ttf(filesystem.read_bytes(path), 16);
+    if (fonts.len() == 0) {
+        eprintln(f"{path}: not a TrueType font");
+        return 1;
+    }
+    return gui_run_with(WindowOptions { .title = "Fonts", .width = 480, .height = 200, .resizable = true }, fonts);
+}

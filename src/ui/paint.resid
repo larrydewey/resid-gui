@@ -8,6 +8,7 @@
 import "../app.resid";
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
+import "../gfx/font.resid";
 import "layout.resid";
 import "state.resid";
 
@@ -21,17 +22,20 @@ pub Color paper() { return rgb(255, 255, 255); }
 /// What painting a subtree produced, and the number of the next widget.
 type Painted = { List(DrawOp) ops; Int next; };
 
-/// The display list for `w` occupying `r`.
-pub List(DrawOp) paint(Widget w, Rect r, UiState ui) { return paint_node(w, r, ui, 0).ops; }
+/// The display list for `w` occupying `r`, in the built-in font.
+pub List(DrawOp) paint(Widget w, Rect r, UiState ui) { return paint_in(w, r, ui, font_builtin()); }
+
+/// The display list for `w` occupying `r`, with text in font `f`.
+pub List(DrawOp) paint_in(Widget w, Rect r, UiState ui, Font f) { return paint_node(w, r, ui, 0, f).ops; }
 
 /// `paint` with no focus and nothing pressed.
 pub List(DrawOp) paint_widget(Widget w, Rect r) { return paint(w, r, ui_new()); }
 
-Painted paint_node(Widget w, Rect r, UiState ui, Int id) {
-    List(DrawOp) own = paint_self(w, r, ui, id);
+Painted paint_node(Widget w, Rect r, UiState ui, Int id, Font f) {
+    List(DrawOp) own = paint_self(w, r, ui, id, f);
     List(Widget) kids = children(w);
     if (kids.len() == 0) { return Painted { .ops = own, .next = id + 1 }; }
-    Painted inner = paint_kids(kids, child_rects(w, r), ui, 0, id + 1, []);
+    Painted inner = paint_kids(kids, child_rects_in(w, r, f), ui, 0, id + 1, [], f);
     List(DrawOp) body = match (w) {
         Scroll(o, c) => [OpClipPush(r)].concat(inner.ops).concat([OpClipPop]),
         _ => inner.ops
@@ -39,51 +43,53 @@ Painted paint_node(Widget w, Rect r, UiState ui, Int id) {
     return Painted { .ops = own.concat(body), .next = inner.next };
 }
 
-Painted paint_kids(List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, List(DrawOp) acc) {
+Painted paint_kids(List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, List(DrawOp) acc, Font f) {
     if (i >= xs.len() || i >= rs.len()) { return Painted { .ops = acc, .next = id }; }
-    Painted p = paint_node(xs[i], rs[i], ui, id);
-    return paint_kids(xs, rs, ui, i + 1, p.next, acc.concat(p.ops));
+    Painted p = paint_node(xs[i], rs[i], ui, id, f);
+    return paint_kids(xs, rs, ui, i + 1, p.next, acc.concat(p.ops), f);
 }
 
 /// Text centred vertically in `r`, `dx` pixels in from its left edge.
-DrawOp label(Rect r, Int dx, Str s, Color c) { return OpText(r.x + dx, r.y + (r.h - 16) / 2, s, c); }
+DrawOp label(Rect r, Int dx, Str s, Color c, Font f) { return OpText(r.x + dx, r.y + (r.h - text_height_in(f)) / 2, s, c); }
 
 /// A one-pixel frame of colour `e` around a fill of colour `f`.
 List(DrawOp) framed(Rect r, Color e, Color f) {
     return [OpFill(r, e), OpFill(Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 }, f)];
 }
 
-List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id) {
+List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id, Font f) {
     return match (w) {
-        Text(s) => [label(r, 4, s, ink())],
-        Button(s, m) => framed(r, edge(), if (ui.pressed == id) { face_down() } else { face() }).concat([label(r, (r.w - str_len(s) * 8) / 2, s, ink())]),
-        Checkbox(s, on, m) => paint_check(r, s, on, ui.pressed == id),
-        TextInput(s, caret, m) => paint_input(r, s, caret, ui.focus == id, ui.caret_on),
+        Text(s) => [label(r, 4, s, ink(), f)],
+        Button(s, m) => framed(r, edge(), if (ui.pressed == id) { face_down() } else { face() }).concat([label(r, (r.w - text_width_in(f, s)) / 2, s, ink(), f)]),
+        Checkbox(s, on, m) => paint_check(r, s, on, ui.pressed == id, f),
+        TextInput(s, caret, m) => paint_input(r, s, caret, ui.focus == id, ui.caret_on, f),
         Slider(v, m) => paint_slider(r, v),
         Bitmap(bw, bh, px) => [OpImage(r.x, r.y, bw, bh, px)],
         _ => []
     };
 }
 
-List(DrawOp) paint_check(Rect r, Str s, Bool on, Bool down) {
+List(DrawOp) paint_check(Rect r, Str s, Bool on, Bool down, Font f) {
     Rect b = Rect { .x = r.x + 4, .y = r.y + (r.h - 16) / 2, .w = 16, .h = 16 };
     List(DrawOp) box = framed(b, if (down) { accent() } else { edge() }, paper());
     List(DrawOp) mark = if (on) { [OpFill(Rect { .x = b.x + 4, .y = b.y + 4, .w = 8, .h = 8 }, accent())] } else { [] };
-    return box.concat(mark).concat([label(r, 26, s, ink())]);
+    return box.concat(mark).concat([label(r, 26, s, ink(), f)]);
 }
 
-/// The leftmost character shown when the caret must stay inside `cols`
-/// visible columns.
-pub Int input_scroll(Int caret, Int cols) { return if (caret > cols) { caret - cols } else { 0 }; }
+/// How far an input's text is shifted left so the caret, `caret_x`
+/// pixels into the text, stays inside a box `inner_w` pixels wide.
+pub Int input_scroll(Int caret_x, Int inner_w) { Int room = max_int(inner_w - 8, 0); return if (caret_x > room) { caret_x - room } else { 0 }; }
 
-List(DrawOp) paint_input(Rect r, Str s, Int caret0, Bool focused, Bool caret_on) {
-    Int n = str_len(s);
-    Int caret = clamp_int(caret0, 0, n);
+/// The caret's offset into the text of an input, in logical pixels.
+pub Int caret_offset(Str s, Int caret, Font f) { return text_width_in(f, str_slice(s, 0, clamp_int(caret, 0, str_len(s)))); }
+
+List(DrawOp) paint_input(Rect r, Str s, Int caret0, Bool focused, Bool caret_on, Font f) {
     Rect inner = Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 };
-    Int first = input_scroll(caret, max_int((inner.w - 8) / 8, 0));
-    Int tx = inner.x + 4 - first * 8;
-    Int ty = r.y + (r.h - 16) / 2;
-    List(DrawOp) caret_op = if (focused && caret_on) { [OpFill(Rect { .x = tx + caret * 8, .y = ty, .w = 1, .h = 16 }, ink())] } else { [] };
+    Int cx = caret_offset(s, caret0, f);
+    Int tx = inner.x + 4 - input_scroll(cx, inner.w);
+    Int th = text_height_in(f);
+    Int ty = r.y + (r.h - th) / 2;
+    List(DrawOp) caret_op = if (focused && caret_on) { [OpFill(Rect { .x = tx + cx, .y = ty, .w = 1, .h = th }, ink())] } else { [] };
     return framed(r, if (focused) { accent() } else { edge() }, paper())
         .concat([OpClipPush(inner), OpText(tx, ty, s, ink())])
         .concat(caret_op)

@@ -290,20 +290,20 @@ pub Bool x11_ready(X11 x) { return x.alive && (x.shm == 0 || !x.s0.busy || !x.s1
 /// Present the damaged rectangles of the frame `ops` describes, plus
 /// whatever the server asked to have redrawn (`Expose`).
 @requires(display)
-pub X11 x11_present(X11 x, List(DrawOp) ops, Int scale, List(Rect) damage) {
+pub X11 x11_present(X11 x, Frame fr, List(Rect) damage) {
     if (!x11_ready(x)) { return x; }
     Rect bounds = Rect { .x = 0, .y = 0, .w = x.w, .h = x.h };
     List(Rect) want = rects_clip(rects_merge(x.redraw, damage), bounds);
     X11 y = x11_with_redraw(x, []);
     if (want.len() == 0) { return y; }
     if (y.shm == 0) {
-        _ = put_rects(y, ops, scale, want, 0);
+        _ = put_rects(y, fr, want, 0);
         return y;
     }
     Bool first = !y.s0.busy;
     Slot s = if (first) { y.s0 } else { y.s1 };
     List(Rect) rs = slot_need(s, want, bounds);
-    _ = slot_paint(s, x.w, ops, scale, rs);
+    _ = slot_paint(s, x.w, fr, rs);
     Int seg = if (first) { y.seg0 } else { y.seg1 };
     _ = shm_puts(y, seg, rs, 0);
     Slot sent = slot_sent(s);
@@ -326,12 +326,12 @@ Bool shm_puts(X11 x, Int seg, List(Rect) rs, Int i) {
 
 /// Without MIT-SHM: rasterize each rectangle and send it with `PutImage`.
 @requires(display)
-Bool put_rects(X11 x, List(DrawOp) ops, Int scale, List(Rect) rs, Int i) {
+Bool put_rects(X11 x, Frame fr, List(Rect) rs, Int i) {
     if (i >= rs.len()) { return true; }
     Rect r = rs[i];
-    Canvas c = raster_rect(ops, r, background(), scale);
+    Canvas c = raster_frame_rect(fr, r, background());
     if (!put_bands(x, c, r, 0)) { return false; }
-    return put_rects(x, ops, scale, rs, i + 1);
+    return put_rects(x, fr, rs, i + 1);
 }
 
 /// `PutImage` the rows of `c` (the pixels of device rectangle `r`) from

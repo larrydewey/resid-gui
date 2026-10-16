@@ -10,6 +10,7 @@
 
 import "../app.resid";
 import "../gfx/color.resid";
+import "../gfx/font.resid";
 
 /// A width and a height in logical pixels.
 pub type Size = { Int w; Int h; };
@@ -17,24 +18,32 @@ pub type Size = { Int w; Int h; };
 /// The space between the children of a `Row` or a `Column`.
 pub Int gap() { return 4; }
 
-/// The height of one line of controls: 16-pixel text plus padding.
+/// The height of one line of controls in the built-in font: 16-pixel
+/// text plus padding.
 pub Int line_h() { return 24; }
 
-/// A widget's preferred size.
-pub Size pref_size(Widget w) {
+/// The height of one line of controls in font `f`.
+pub Int line_h_in(Font f) { return text_height_in(f) + 8; }
+
+/// A widget's preferred size in the built-in font.
+pub Size pref_size(Widget w) { return pref_size_in(w, font_builtin()); }
+
+/// A widget's preferred size with its text in font `f`.
+pub Size pref_size_in(Widget w, Font f) {
+    Int lh = line_h_in(f);
     return match (w) {
-        Text(s) => Size { .w = str_len(s) * 8 + 8, .h = line_h() },
-        Button(s, m) => Size { .w = str_len(s) * 8 + 20, .h = line_h() + 4 },
-        Checkbox(s, c, m) => Size { .w = str_len(s) * 8 + 30, .h = line_h() },
-        TextInput(s, k, m) => Size { .w = max_int(str_len(s) * 8 + 12, 120), .h = line_h() + 4 },
-        Row(xs) => Size { .w = sum_w(xs, 0, 0) + gaps(xs), .h = max_h(xs, 0, 0) },
-        Column(xs) => Size { .w = max_w(xs, 0, 0), .h = sum_h(xs, 0, 0) + gaps(xs) },
-        Stack(xs) => Size { .w = max_w(xs, 0, 0), .h = max_h(xs, 0, 0) },
-        Padding(n, c) => pad_size(pref_size(c), n),
-        Align(ax, ay, c) => pref_size(c),
-        Scroll(o, c) => pref_size(c),
+        Text(s) => Size { .w = text_width_in(f, s) + 8, .h = lh },
+        Button(s, m) => Size { .w = text_width_in(f, s) + 20, .h = lh + 4 },
+        Checkbox(s, c, m) => Size { .w = text_width_in(f, s) + 30, .h = lh },
+        TextInput(s, k, m) => Size { .w = max_int(text_width_in(f, s) + 12, 120), .h = lh + 4 },
+        Row(xs) => Size { .w = sum_w(xs, 0, 0, f) + gaps(xs), .h = max_h(xs, 0, 0, f) },
+        Column(xs) => Size { .w = max_w(xs, 0, 0, f), .h = sum_h(xs, 0, 0, f) + gaps(xs) },
+        Stack(xs) => Size { .w = max_w(xs, 0, 0, f), .h = max_h(xs, 0, 0, f) },
+        Padding(n, c) => pad_size(pref_size_in(c, f), n),
+        Align(ax, ay, c) => pref_size_in(c, f),
+        Scroll(o, c) => pref_size_in(c, f),
         Bitmap(bw, bh, px) => Size { .w = max_int(bw, 0), .h = max_int(bh, 0) },
-        Slider(v, m) => Size { .w = 120, .h = line_h() },
+        Slider(v, m) => Size { .w = 120, .h = lh },
         Spacer => Size { .w = 0, .h = 0 }
     };
 }
@@ -46,10 +55,10 @@ pub Int min_int(Int a, Int b) { return if (a < b) { a } else { b }; }
 pub Int clamp_int(Int v, Int lo, Int hi) { return if (v < lo) { lo } else { if (v > hi) { hi } else { v } }; }
 
 Int gaps(List(Widget) xs) { return if (xs.len() > 1) { (xs.len() - 1) * gap() } else { 0 }; }
-Int sum_w(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { sum_w(xs, i + 1, acc + pref_size(xs[i]).w) }; }
-Int sum_h(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { sum_h(xs, i + 1, acc + pref_size(xs[i]).h) }; }
-Int max_w(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { max_w(xs, i + 1, max_int(acc, pref_size(xs[i]).w)) }; }
-Int max_h(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { max_h(xs, i + 1, max_int(acc, pref_size(xs[i]).h)) }; }
+Int sum_w(List(Widget) xs, Int i, Int acc, Font f) { return if (i >= xs.len()) { acc } else { sum_w(xs, i + 1, acc + pref_size_in(xs[i], f).w, f) }; }
+Int sum_h(List(Widget) xs, Int i, Int acc, Font f) { return if (i >= xs.len()) { acc } else { sum_h(xs, i + 1, acc + pref_size_in(xs[i], f).h, f) }; }
+Int max_w(List(Widget) xs, Int i, Int acc, Font f) { return if (i >= xs.len()) { acc } else { max_w(xs, i + 1, max_int(acc, pref_size_in(xs[i], f).w), f) }; }
+Int max_h(List(Widget) xs, Int i, Int acc, Font f) { return if (i >= xs.len()) { acc } else { max_h(xs, i + 1, max_int(acc, pref_size_in(xs[i], f).h), f) }; }
 
 /// Whether a widget takes leftover width in a `Row`.
 pub Bool stretches_x(Widget w) {
@@ -105,15 +114,18 @@ pub List(Widget) children(Widget w) {
 }
 
 /// The box of each child when `w` occupies `r`, in the order `children`
-/// gives them.
-pub List(Rect) child_rects(Widget w, Rect r) {
+/// gives them, in the built-in font.
+pub List(Rect) child_rects(Widget w, Rect r) { return child_rects_in(w, r, font_builtin()); }
+
+/// `child_rects` with text in font `f`.
+pub List(Rect) child_rects_in(Widget w, Rect r, Font f) {
     return match (w) {
-        Row(xs) => row_rects(xs, r, share(r.w - sum_w(xs, 0, 0) - gaps(xs), count_x(xs, 0, 0)), 0, r.x, []),
-        Column(xs) => col_rects(xs, r, share(r.h - sum_h(xs, 0, 0) - gaps(xs), count_y(xs, 0, 0)), 0, r.y, []),
+        Row(xs) => row_rects(xs, r, share(r.w - sum_w(xs, 0, 0, f) - gaps(xs), count_x(xs, 0, 0)), 0, r.x, [], f),
+        Column(xs) => col_rects(xs, r, share(r.h - sum_h(xs, 0, 0, f) - gaps(xs), count_y(xs, 0, 0)), 0, r.y, [], f),
         Stack(xs) => same_rects(xs.len(), r, 0, []),
         Padding(n, c) => [Rect { .x = r.x + n, .y = r.y + n, .w = max_int(r.w - 2 * n, 0), .h = max_int(r.h - 2 * n, 0) }],
-        Align(ax, ay, c) => [align_rect(pref_size(c), r, ax, ay)],
-        Scroll(o, c) => [Rect { .x = r.x, .y = r.y - o, .w = r.w, .h = max_int(pref_size(c).h, r.h) }],
+        Align(ax, ay, c) => [align_rect(pref_size_in(c, f), r, ax, ay)],
+        Scroll(o, c) => [Rect { .x = r.x, .y = r.y - o, .w = r.w, .h = max_int(pref_size_in(c, f).h, r.h) }],
         _ => []
     };
 }
@@ -121,16 +133,16 @@ pub List(Rect) child_rects(Widget w, Rect r) {
 /// Each stretching child's share of `free` pixels; none when nothing is free.
 Int share(Int free, Int n) { return if (n <= 0 || free <= 0) { 0 } else { free / n }; }
 
-List(Rect) row_rects(List(Widget) xs, Rect r, Int extra, Int i, Int x, List(Rect) acc) {
+List(Rect) row_rects(List(Widget) xs, Rect r, Int extra, Int i, Int x, List(Rect) acc, Font f) {
     if (i >= xs.len()) { return acc; }
-    Int w = pref_size(xs[i]).w + if (stretches_x(xs[i])) { extra } else { 0 };
-    return row_rects(xs, r, extra, i + 1, x + w + gap(), acc.concat([Rect { .x = x, .y = r.y, .w = w, .h = r.h }]));
+    Int w = pref_size_in(xs[i], f).w + if (stretches_x(xs[i])) { extra } else { 0 };
+    return row_rects(xs, r, extra, i + 1, x + w + gap(), acc.concat([Rect { .x = x, .y = r.y, .w = w, .h = r.h }]), f);
 }
 
-List(Rect) col_rects(List(Widget) xs, Rect r, Int extra, Int i, Int y, List(Rect) acc) {
+List(Rect) col_rects(List(Widget) xs, Rect r, Int extra, Int i, Int y, List(Rect) acc, Font f) {
     if (i >= xs.len()) { return acc; }
-    Int h = pref_size(xs[i]).h + if (stretches_y(xs[i])) { extra } else { 0 };
-    return col_rects(xs, r, extra, i + 1, y + h + gap(), acc.concat([Rect { .x = r.x, .y = y, .w = r.w, .h = h }]));
+    Int h = pref_size_in(xs[i], f).h + if (stretches_y(xs[i])) { extra } else { 0 };
+    return col_rects(xs, r, extra, i + 1, y + h + gap(), acc.concat([Rect { .x = r.x, .y = y, .w = r.w, .h = h }]), f);
 }
 
 List(Rect) same_rects(Int n, Rect r, Int i, List(Rect) acc) {

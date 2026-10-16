@@ -3,12 +3,23 @@ name = "resid-gui"
 version = "0.1.0"
 root = "src/gui.resid"
 
-# A GUI program touches the display and the filesystem (fonts, images) and
-# may load native asset modules. Every library function that reaches one of
-# those builtins declares @requires; nothing is granted here implicitly.
+# A GUI program touches the display and reads the clock; one that loads
+# fonts or images also reads files and calls the native modules below.
+# Every library function that reaches one of those builtins declares
+# @requires; nothing is granted here implicitly.
 [capabilities]
 grant = []
 
 [dependencies.resid]
 path = "../resid"
 version = "0.1.0"
+
+# The native modules (spec §47), rebuilt by native/build.sh, which prints
+# these hashes. A build refuses an artifact whose hash differs.
+[native.font]
+path = "native/font/font.ll"
+sha256 = "d8a590e1e018ef24d83ac127315489ed6242aa6f79ecbc2341ace5b3c3660bab"
+
+[native.image]
+path = "native/image/image.ll"
+sha256 = "f67dd649dbed221d868d58c24740ffb980875692dcdeab722f7c69501757c4ae"

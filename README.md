@@ -49,13 +49,16 @@ tests/run.sh     # every test file under src/ and tests/, then every example
 ```
 
 It includes a fake X server and a fake Wayland compositor that drive the
-real backends over socket pairs, and golden images compared by SHA-256.
+real backends over socket pairs, golden images compared by SHA-256, and
+real calls into both native modules.
+
+Text is the built-in 8x16 bitmap font, or any TrueType font through the
+optional native font module; images (PNG, JPEG, BMP, GIF, TGA) decode
+through the native image module. Both run sandboxed, once, at start-up
+(docs/reference_native.md).
 
 Open items:
 
-- **Native font and image modules** (`native/font`, `native/image`): the C
-  sources exist but are not wired to `@link` yet, so text is the built-in
-  8x16 bitmap font and images are `Bitmap` pixels the program supplies.
 - **Keyboard layouts.** Keys are typed through a built-in US layout. A
   Wayland compositor sends its keymap as a file descriptor, and Resid has no
   builtin that reads a received descriptor, so the keymap is closed unread;
@@ -83,7 +86,7 @@ Open items:
 | `src/x11/` | X11: wire codec, setup, requests, events, MIT-SHM |
 | `src/gfx/` | canvas, display lists, the rasterizer, the bitmap font, PNG |
 | `src/ui/` | layout, painting, hit testing, focus, damage, timers |
-| `native/` | `stb_truetype` and `stb_image` modules (not wired yet) |
+| `native/` | the optional `font` (stb_truetype) and `image` (stb_image) modules |
 
 ## Both backends are spoken on the wire
 
@@ -101,6 +104,17 @@ never writing one the compositor still holds.
 manager reads (title, class, `WM_DELETE_WINDOW`, size hints), and presents
 through two MIT-SHM segments attached with `ShmAttachFd`, each busy until
 its `ShmCompletion`. Without MIT-SHM it falls back to `PutImage`.
+
+## Native code only for assets
+
+`stb_truetype` and `stb_image` are compiled freestanding: they reference
+nothing but their own symbols, LLVM intrinsics and `mem*`, so the maths
+and memory they need are defined in the modules themselves. Each call is a
+fresh, seccomp-confined process (about 2 ms) that can only compute and
+answer; the answer is checked in Resid (every glyph box inside the atlas,
+every image size within what arrived) before a pixel is drawn. They run
+once per font scale or image, never per frame or per glyph, and a program
+that does not import them needs neither them nor their capabilities.
 
 ## Rendering
 
@@ -124,7 +138,10 @@ is pure, so:
 
 - Every function that reaches a display builtin or the clock declares
   `@requires`. A GUI program needs `display` and `clock(readonly)`, nothing
-  more.
+  more; one that loads fonts or images adds `filesystem(readonly)` and
+  `native_font` or `native_image`.
+- Font and image bytes are untrusted input to native code. The process
+  boundary contains a crash, and the Resid side validates the answer.
 - Everything the server sends is untrusted input. Every decoder
   bounds-checks; a reply longer than 1 MB, a Wayland message over 4096
   bytes or a string that overruns its message is refused, and a corrupt
@@ -143,9 +160,9 @@ src/x11/         X11
 src/gfx/         pixels: canvas, rasterizer, font, images, PNG
 src/ui/          layout, painting, input, damage, timers
 tests/           fake X server, fake compositor, golden images
-examples/        counter, todo, gallery, image viewer, connect probe
+examples/        counter, todo, gallery, fonts, image viewer, connect probe
 docs/            a Learn chapter and a reference page per layer
-native/          the stb_truetype and stb_image modules
+native/          the font and image modules: C, their .ll artifacts, Resid bindings
 ```
 
 ## Building
@@ -157,8 +174,16 @@ The Resid toolchain lives in the sibling checkout:
 ~/.resid/bin/residc examples/todo.resid -o todo && ./todo
 ```
 
+The examples that use a native module say so on their first line:
+
+```sh
+~/.resid/bin/residc examples/fonts.resid -native font=native/font/font.ll -o fonts
+./fonts /usr/share/fonts/noto/NotoSans-Regular.ttf
+```
+
 `@link` is refused in Resid's own `lib/`, so this repository is where the
-native modules live. Runtime and compiler additions go into the Resid
+native modules live; `native/build.sh` rebuilds them and `resid.toml` pins
+their hashes. Runtime and compiler additions go into the Resid
 repository; this one only ever adds to them.
 
 ## License

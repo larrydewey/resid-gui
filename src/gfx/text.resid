@@ -20,6 +20,45 @@ pub Canvas render_text_scaled(Canvas c, Int x0, Int y0, Str s, Color col, Rect c
     return text_chars(c, x0, y0, s, n, col, box, 0, k);
 }
 
+/// Draw `s` in font `f` with its top-left at device (`x0`, `y0`), for a
+/// canvas at `scale` device pixels per logical pixel, clipped to `clip`.
+/// The built-in font draws each of its pixels as a `scale`-sized block; an
+/// atlas made for this scale draws 1:1, and one made for a smaller scale
+/// that divides it repeats its pixels.
+pub Canvas render_text_font(Canvas c, Int x0, Int y0, Str s, Color col, Rect clip, Int scale, Font f) {
+    if (font_is_builtin(f)) { return render_text_scaled(c, x0, y0, s, col, clip, scale); }
+    Int k = if (scale >= f.scale && scale % f.scale == 0) { scale / f.scale } else { 1 };
+    Rect box = rect_intersect(clip, Rect { .x = x0, .y = y0, .w = text_width_device(f, s) * k + 4 * k, .h = f.line * k });
+    if (rect_is_empty(box)) { return c; }
+    return atlas_chars(c, x0, y0, s, str_len(s), col, box, k, f, 0);
+}
+
+Canvas atlas_chars(Canvas c, Int pen, Int y0, Str s, Int n, Color col, Rect clip, Int k, Font f, Int i) {
+    if (i >= n) { return c; }
+    Int ch = str_char_at(s, i);
+    Int gx = pen + glyph_field(f, ch, 1) * k;
+    Int gy = y0 + glyph_field(f, ch, 2) * k;
+    Int gw = glyph_field(f, ch, 3);
+    Int gh = glyph_field(f, ch, 4);
+    Bool visible = !rect_is_empty(rect_intersect(clip, Rect { .x = gx, .y = gy, .w = gw * k, .h = gh * k }));
+    Canvas next = if (visible) { atlas_glyph(c, gx, gy, glyph_field(f, ch, 5), glyph_field(f, ch, 6), gw, gh, col, clip, k, f, 0, 0) } else { c };
+    Int adv = glyph_field(f, ch, 0) + if (i + 1 < n) { kern_of(f, ch, str_char_at(s, i + 1)) } else { 0 };
+    return atlas_chars(next, pen + adv * k, y0, s, n, col, clip, k, f, i + 1);
+}
+
+Canvas atlas_glyph(Canvas c, Int gx, Int gy, Int ax, Int ay, Int gw, Int gh, Color col, Rect clip, Int k, Font f, Int x, Int y) {
+    if (y >= gh) { return c; }
+    if (x >= gw) { return atlas_glyph(c, gx, gy, ax, ay, gw, gh, col, clip, k, f, 0, y + 1); }
+    Int a = f.atlas[(ay + y) * f.aw + ax + x];
+    Canvas next = if (a == 0) { c } else { if (k == 1) { blend_pixel_clip(c, gx + x, gy + y, col, a, clip) } else { blend_block(c, gx + x * k, gy + y * k, k, col, a, clip, 0) } };
+    return atlas_glyph(next, gx, gy, ax, ay, gw, gh, col, clip, k, f, x + 1, y);
+}
+
+Canvas blend_block(Canvas c, Int x, Int y, Int k, Color col, Int a, Rect clip, Int i) {
+    if (i >= k * k) { return c; }
+    return blend_block(blend_pixel_clip(c, x + i % k, y + i / k, col, a, clip), x, y, k, col, a, clip, i + 1);
+}
+
 /// Draw `s` clipped to the canvas alone.
 pub Canvas render_text(Canvas c, Int x0, Int y0, Str s, Color col) {
     return render_text_clip(c, x0, y0, s, col, canvas_bounds(c));
@@ -44,6 +83,22 @@ Canvas glyph_bits(Canvas c, Int x, Int y, Int bits, Color col, Rect clip, Int bi
     Bool on = (bits & (1 << (7 - bit))) != 0;
     Canvas next = if (!on) { c } else { if (k == 1) { set_pixel_clip(c, x + bit, y, col, clip) } else { fill_rect_clip(c, Rect { .x = x + bit * k, .y = y, .w = k, .h = k }, col, clip) } };
     return glyph_bits(next, x, y, bits, col, clip, bit + 1, k);
+}
+
+test "atlas text blends each glyph's coverage" {
+    Font f = font_parse(test_atlas_answer(), 1) else { font_builtin() };
+    Canvas c = fill_rect(canvas_new(20, 10), Rect { .x = 0, .y = 0, .w = 20, .h = 10 }, rgb(255, 255, 255));
+    Canvas d = render_text_font(c, 0, 0, "AB", rgb(0, 0, 0), canvas_bounds(c), 1, f);
+    // each glyph is a fully covered 2x3 block, 2 down; "A" then "B" 5 on
+    expect(pixel_at(d, 0, 2).r).toEqual(0);
+    expect(pixel_at(d, 1, 4).r).toEqual(0);
+    expect(pixel_at(d, 2, 2).r).toEqual(255);
+    expect(pixel_at(d, 5, 2).r).toEqual(0);
+    expect(pixel_at(d, 0, 1).r).toEqual(255);
+    // at twice the atlas's scale every pixel is a 2x2 block
+    Canvas e = render_text_font(fill_rect(canvas_new(20, 12), Rect { .x = 0, .y = 0, .w = 20, .h = 12 }, rgb(255, 255, 255)), 0, 0, "A", rgb(0, 0, 0), Rect { .x = 0, .y = 0, .w = 20, .h = 12 }, 2, f);
+    expect(pixel_at(e, 3, 9).r).toEqual(0);
+    expect(pixel_at(e, 4, 4).r).toEqual(255);
 }
 
 test "text sets glyph pixels and respects the clip" {

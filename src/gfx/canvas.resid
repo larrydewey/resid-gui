@@ -64,6 +64,21 @@ pub Canvas set_pixel_clip(Canvas c, Int x, Int y, Color col, Rect clip) {
     return Canvas { .w = ww, .h = hh, .px = c.px.with(i, col.b & 255).with(i + 1, col.g & 255).with(i + 2, col.r & 255).with(i + 3, col.a & 255) };
 }
 
+/// `col` laid over one pixel with coverage `a` (0 to 255), when the pixel
+/// lies inside `clip` and the canvas. The result is opaque.
+pub Canvas blend_pixel_clip(Canvas c, Int x, Int y, Color col, Int a, Rect clip) {
+    if (a <= 0 || x < 0 || y < 0 || x >= c.w || y >= c.h || !rect_contains(clip, x, y)) { return c; }
+    if (a >= 255) { return set_pixel_clip(c, x, y, col, clip); }
+    Int i = (y * c.w + x) * 4;
+    Int na = 255 - a;
+    Int b = (col.b * a + c.px[i] * na) / 255;
+    Int g = (col.g * a + c.px[i + 1] * na) / 255;
+    Int r = (col.r * a + c.px[i + 2] * na) / 255;
+    Int ww = c.w;
+    Int hh = c.h;
+    return Canvas { .w = ww, .h = hh, .px = c.px.with(i, b).with(i + 1, g).with(i + 2, r).with(i + 3, 255) };
+}
+
 /// The colour of one pixel; transparent black outside the canvas.
 pub Color pixel_at(Canvas c, Int x, Int y) {
     if (x < 0 || y < 0 || x >= c.w || y >= c.h) { return Color { .b = 0, .g = 0, .r = 0, .a = 0 }; }
@@ -110,6 +125,13 @@ test "fill_rect clips to the canvas and to the clip" {
     expect(pixel_at(c2, 1, 1).r).toEqual(9);
     expect(pixel_at(c2, 0, 0).r).toEqual(0);
     expect(pixel_at(c2, 2, 2).r).toEqual(0);
+}
+
+test "blending mixes by coverage" {
+    Canvas c = fill_rect(canvas_new(1, 1), Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, rgb(0, 0, 0));
+    Canvas d = blend_pixel_clip(c, 0, 0, rgb(255, 255, 255), 51, canvas_bounds(c));
+    expect(pixel_at(d, 0, 0).r).toEqual(51);
+    expect(pixel_at(d, 0, 0).a).toEqual(255);
 }
 
 test "rows are bands of the frame" {

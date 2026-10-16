@@ -12,6 +12,8 @@
 import "../src/app.resid";
 import "../src/gfx/color.resid";
 import "../src/gfx/draw.resid";
+import "../src/gfx/font.resid";
+import "../src/gfx/raster.resid";
 import "../src/x11/wire.resid";
 import "../src/x11/setup.resid";
 import "../src/x11/requests.resid";
@@ -92,7 +94,7 @@ Int client(Int fd) {
     if (x.shm != fake_shm() || x.shm_event != fake_shm_event()) { return 3; }
     if (x.w != 64 || x.h != 48 || x.wid != 0x00400001) { return 4; }
     List(DrawOp) ops = [OpFill(Rect { .x = 8, .y = 8, .w = 16, .h = 16 }, rgb(255, 0, 0))];
-    X11 y = x11_present(x, ops, 1, [Rect { .x = 0, .y = 0, .w = 64, .h = 48 }]);
+    X11 y = x11_present(x, Frame { .ops = ops, .scale = 1, .font = font_builtin() }, [Rect { .x = 0, .y = 0, .w = 64, .h = 48 }]);
     return if (y.s0.busy) { 0 } else { 5 };
 }
 

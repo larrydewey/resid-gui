@@ -40,17 +40,29 @@ pub Int gui_run(WindowOptions opts)
 @requires(display, clock(readonly))
 pub Int gui_run_x11(WindowOptions opts)
 
+@needs(App(M))
+@requires(display, clock(readonly))
+pub Int gui_run_with(WindowOptions opts, List(Font) fonts)
+
+@needs(App(M))
+@requires(display, clock(readonly))
+pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
+
 @needs(App(M), Backend(B))
 @requires(display, clock(readonly))
-pub Int gui_run_on(B b)
+pub Int gui_run_on(B b, M m0, List(Font) fonts)
+
+pub Font pick_font(List(Font) fs, Int scale)
 ```
 
 `gui_run` opens a Wayland toplevel when a compositor is reachable and an
 X11 window otherwise, runs the program until the window closes, and
 returns 0 (1 when no display could be opened, with the reason on
 stderr). `gui_run_x11` skips Wayland, which is how the X11 backend is
-tried on a Wayland desktop (Xwayland). `gui_run_on` runs the loop over a
-backend the caller opened.
+tried on a Wayland desktop (Xwayland). `gui_run_with` draws text in
+TrueType atlases (one per scale, from native/font); `gui_run_model` starts
+from a model the program built instead of `init()`; `gui_run_on` runs the
+loop over a backend the caller opened.
 
 `width` and `height` are logical pixels; the window's device size is
 `scale` times larger, where the scale is the compositor's preferred buffer
@@ -88,11 +100,12 @@ behavior Backend(B) {
     Int be_height(B b);
     Int be_scale(B b);
     Bool be_ready(B b);
-    B be_present(B b, List(DrawOp) ops, Int scale, List(Rect) damage);
+    B be_present(B b, Frame fr, List(Rect) damage);
     Bool be_close(B b);
 }
 ```
 
+`Frame` (gfx/raster.resid) is `{ List(DrawOp) ops; Int scale; Font font; }`.
 Sizes and pointer coordinates are device pixels here; the loop converts.
 `X11` (src/x11/x11.resid) and `Wl` (src/wayland/wayland.resid) are the two
 instances.
@@ -106,7 +119,7 @@ pub Slot slot_sent(Slot s)
 pub Slot slot_released(Slot s)
 pub Slot slot_dirty(Slot s, List(Rect) rs)
 pub List(Rect) slot_need(Slot s, List(Rect) damage, Rect bounds)
-@requires(display) pub Bool slot_paint(Slot s, Int stride, List(DrawOp) ops, Int scale, List(Rect) rs)
+@requires(display) pub Bool slot_paint(Slot s, Int stride, Frame fr, List(Rect) rs)
 ```
 
 A buffer the server is reading is `busy` until it says otherwise (X11

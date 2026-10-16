@@ -8,45 +8,49 @@
 
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
+import "../gfx/font.resid";
 
 /// The area an op can affect, for diffing: a clip's rectangle counts.
-Rect diff_bounds(DrawOp op) {
+Rect diff_bounds(DrawOp op, Font f) {
     return match (op) {
         OpClipPush(r) => r,
-        _ => op_bounds(op)
+        _ => op_bounds_in(op, f)
     };
 }
 
 /// The rectangle covering everything that differs between `old` and
 /// `now`; empty when they are equal.
-pub Rect damage(List(DrawOp) old, List(DrawOp) now) { return damage_at(old, now, 0, rect_none()); }
+pub Rect damage(List(DrawOp) old, List(DrawOp) now) { return damage_at(old, now, 0, rect_none(), font_builtin()); }
 
-Rect damage_at(List(DrawOp) old, List(DrawOp) now, Int i, Rect acc) {
+Rect damage_at(List(DrawOp) old, List(DrawOp) now, Int i, Rect acc, Font f) {
     Bool in_old = i < old.len();
     Bool in_now = i < now.len();
     if (!in_old && !in_now) { return acc; }
     if (in_old && in_now) {
-        if (draw_op_eq(old[i], now[i])) { return damage_at(old, now, i + 1, acc); }
-        return damage_at(old, now, i + 1, rect_union(acc, rect_union(diff_bounds(old[i]), diff_bounds(now[i]))));
+        if (draw_op_eq(old[i], now[i])) { return damage_at(old, now, i + 1, acc, f); }
+        return damage_at(old, now, i + 1, rect_union(acc, rect_union(diff_bounds(old[i], f), diff_bounds(now[i], f))), f);
     }
-    Rect extra = if (in_old) { diff_bounds(old[i]) } else { diff_bounds(now[i]) };
-    return damage_at(old, now, i + 1, rect_union(acc, extra));
+    Rect extra = if (in_old) { diff_bounds(old[i], f) } else { diff_bounds(now[i], f) };
+    return damage_at(old, now, i + 1, rect_union(acc, extra), f);
 }
 
 /// The damage as separate rectangles: ops that changed far apart (a
 /// checkbox at the top, a counter at the bottom) stay apart, so a frame
 /// redraws them and not everything between.
-pub List(Rect) damage_rects(List(DrawOp) old, List(DrawOp) now) { return damage_rects_at(old, now, 0, []); }
+pub List(Rect) damage_rects(List(DrawOp) old, List(DrawOp) now) { return damage_rects_in(old, now, font_builtin()); }
 
-List(Rect) damage_rects_at(List(DrawOp) old, List(DrawOp) now, Int i, List(Rect) acc) {
+/// `damage_rects` with text in font `f`.
+pub List(Rect) damage_rects_in(List(DrawOp) old, List(DrawOp) now, Font f) { return damage_rects_at(old, now, 0, [], f); }
+
+List(Rect) damage_rects_at(List(DrawOp) old, List(DrawOp) now, Int i, List(Rect) acc, Font f) {
     Bool in_old = i < old.len();
     Bool in_now = i < now.len();
     if (!in_old && !in_now) { return acc; }
     if (in_old && in_now) {
-        if (draw_op_eq(old[i], now[i])) { return damage_rects_at(old, now, i + 1, acc); }
-        return damage_rects_at(old, now, i + 1, rects_add(rects_add(acc, diff_bounds(old[i])), diff_bounds(now[i])));
+        if (draw_op_eq(old[i], now[i])) { return damage_rects_at(old, now, i + 1, acc, f); }
+        return damage_rects_at(old, now, i + 1, rects_add(rects_add(acc, diff_bounds(old[i], f)), diff_bounds(now[i], f)), f);
     }
-    return damage_rects_at(old, now, i + 1, rects_add(acc, if (in_old) { diff_bounds(old[i]) } else { diff_bounds(now[i]) }));
+    return damage_rects_at(old, now, i + 1, rects_add(acc, if (in_old) { diff_bounds(old[i], f) } else { diff_bounds(now[i], f) }), f);
 }
 
 /// Whether two display lists are the same frame.

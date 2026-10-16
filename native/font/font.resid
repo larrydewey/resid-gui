@@ -1,0 +1,54 @@
+// font.resid — the resid-gui-font native module's Resid side.
+//
+// Build a program that imports this with the artifact beside it:
+//
+//   residc prog.resid -native font=native/font/font.ll
+//
+// and grant `native_font` (plus `filesystem(readonly)` to read the font
+// file). A call is a fresh, confined process that costs a few
+// milliseconds, so atlases are made once at start-up, one per device
+// scale, and handed to `gui_run_with`.
+
+import "../../src/gfx/font.resid";
+
+/// stb_truetype in a sandbox: a TrueType file (its first `len` bytes) to a
+/// glyph atlas at `px` pixels a line. The layout is in font.c.
+@link("font") Bytes(1048576) font_atlas(Bytes(16777216) font, Int len, Int px) {}
+
+/// The most font file the module takes.
+pub Int font_max_bytes() { return 16777216; }
+
+Bytes(16777216) font_bytes(List(Int) xs) {
+    BytesBuf(16777216) b = BytesBuf();
+    return font_fill(xs, 0, b).finish();
+}
+
+BytesBuf(16777216) font_fill(List(Int) xs, Int i, BytesBuf(16777216) b) {
+    if (i >= xs.len()) { return b; }
+    return font_fill(xs, i + 1, b.push(xs[i] & 255));
+}
+
+List(Int) answer_list(Bytes(1048576) a) { return answer_at(a, 0, ListBuf()); }
+
+List(Int) answer_at(Bytes(1048576) a, Int i, ListBuf(Int) b) {
+    if (i >= 1048576) { return b.finish(); }
+    return answer_at(a, i + 1, b.push(a[i]));
+}
+
+/// A font from the bytes of a TrueType file, at `px` logical pixels a
+/// line, rasterized for device `scale`.
+@requires(native_font)
+pub Result(Font, Str) font_from_ttf(List(Int) ttf, Int px, Int scale) {
+    if (ttf.len() == 0 || ttf.len() > font_max_bytes()) { return Err("font: the file is empty or larger than 16 MB"); }
+    Int s = if (scale < 1) { 1 } else { scale };
+    return font_parse(answer_list(font_atlas(font_bytes(ttf), ttf.len(), px * s)), s);
+}
+
+/// Atlases at scales 1 and 2, what `gui_run_with` wants for a desktop with
+/// ordinary and HiDPI screens. Empty when the file is not a font.
+@requires(native_font)
+pub List(Font) fonts_from_ttf(List(Int) ttf, Int px) {
+    List(Font) one = match (font_from_ttf(ttf, px, 1)) { Ok(f) => [f], Err(e) => [] };
+    if (one.len() == 0) { return []; }
+    return match (font_from_ttf(ttf, px, 2)) { Ok(f) => one.concat([f]), Err(e) => one };
+}

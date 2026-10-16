@@ -21,6 +21,7 @@ import "../backend/keymap.resid";
 import "../gfx/canvas.resid";
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
+import "../gfx/raster.resid";
 import "wire.resid";
 import "protocol.resid";
 
@@ -518,14 +519,14 @@ pub Bool wl_ready(Wl w) {
 /// Draw the damaged rectangles of the frame `ops` describes into a free
 /// buffer and commit it, asking for a frame callback.
 @requires(display)
-pub Wl wl_present(Wl w, List(DrawOp) ops, Int scale, List(Rect) damage) {
+pub Wl wl_present(Wl w, Frame fr, List(Rect) damage) {
     if (!wl_ready(w)) { return w; }
     WlBufs b = w.bufs;
     Bool first = !b.s0.busy;
     Slot s = if (first) { b.s0 } else { b.s1 };
     List(Rect) rs = slot_need(s, damage, Rect { .x = 0, .y = 0, .w = w.win.dw, .h = w.win.dh });
     if (rs.len() == 0) { return w; }
-    _ = slot_paint(s, w.win.dw, ops, scale, rs);
+    _ = slot_paint(s, w.win.dw, fr, rs);
     Int cb = w.next_id;
     Int buffer = if (first) { b.buf0 } else { b.buf1 };
     Wl w2 = send(with_ids(w, 1), [wl_surface_attach(w.o.surface, buffer)].concat(damage_msgs(w.o.surface, rs, 0, []))

@@ -1,0 +1,68 @@
+// residc-args: -native font=native/font/font.ll -native image=native/image/image.ll
+// native.resid — the two native modules, called for real.
+//
+// The image module decodes a PNG this library encoded; the font module is
+// fed bytes that are not a font (which it must refuse) and, when one of a
+// few common system fonts is installed, a real TrueType file.
+//
+// A native call carries 16 MB fixed-size values inline, which needs the
+// main thread's stack (PLAN-gui.md §0), so this is a program and not a
+// test file: tests/run.sh builds it, runs it, and fails on a nonzero exit.
+
+import "../src/gfx/canvas.resid";
+import "../src/gfx/color.resid";
+import "../src/gfx/font.resid";
+import "../src/gfx/image.resid";
+import "../src/gfx/png.resid";
+import "../native/font/font.resid";
+import "../native/image/image.resid";
+
+@requires(native_image)
+Int check_png() {
+    Canvas c = fill_rect(fill_rect(canvas_new(3, 2), Rect { .x = 0, .y = 0, .w = 3, .h = 2 }, rgb(10, 20, 30)), Rect { .x = 2, .y = 1, .w = 1, .h = 1 }, rgb(200, 100, 50));
+    Image im = image_from_bytes(canvas_to_png(c).bytes) else { image_new(0, 0) };
+    return ok("PNG decodes to its pixels", im.w == 3 && im.h == 2 && f"{im.px}" == f"{c.px}");
+}
+
+@requires(native_image)
+Int check_not_image() {
+    Bool refused = match (image_from_bytes([1, 2, 3, 4, 5])) { Ok(i) => false, Err(e) => true };
+    return ok("the image module refuses what is not an image", refused);
+}
+
+@requires(native_font)
+Int check_not_font() {
+    Bool refused = match (font_from_ttf([0, 1, 0, 0, 9, 9, 9, 9], 16, 1)) { Ok(f) => false, Err(e) => e == "font: not a TrueType font" };
+    return ok("the font module refuses what is not a font", refused);
+}
+
+/// The first of a few common fonts that is installed, or "".
+@requires(filesystem(readonly))
+Str some_font(List(Str) xs, Int i) {
+    if (i >= xs.len()) { return ""; }
+    return if (filesystem.exists(xs[i])) { xs[i] } else { some_font(xs, i + 1) };
+}
+
+@requires(native_font, filesystem(readonly))
+Int check_font() {
+    Str path = some_font(["/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf"], 0);
+    if (str_len(path) == 0) {
+        println("skip: no common TrueType font installed");
+        return 0;
+    }
+    Font f = font_from_ttf(filesystem.read_bytes(path), 16, 2) else { font_builtin() };
+    return ok(f"{path} rasterizes", !font_is_builtin(f) && f.scale == 2 && text_width_in(f, "iii") < text_width_in(f, "WWW") && text_height_in(f) >= 16);
+}
+
+/// Print a check's outcome; 1 when it failed.
+Int ok(Str what, Bool good) {
+    println(if (good) { f"ok: {what}" } else { f"FAILED: {what}" });
+    return if (good) { 0 } else { 1 };
+}
+
+@requires(native_font, native_image, filesystem(readonly))
+Int main() {
+    Int failed = check_png() + check_not_image() + check_not_font() + check_font();
+    return if (failed == 0) { 0 } else { 1 };
+}

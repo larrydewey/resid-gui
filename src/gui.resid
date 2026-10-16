@@ -27,6 +27,7 @@ import "x11/x11.resid";
 import "wayland/wayland.resid";
 import "gfx/color.resid";
 import "gfx/canvas.resid";
+import "gfx/font.resid";
 import "gfx/draw.resid";
 import "gfx/raster.resid";
 import "ui/layout.resid";
@@ -46,7 +47,24 @@ type Loop(M) = {
     M model; UiState ui; Widget view;
     List(DrawOp) ops; Int w; Int h; Int scale;
     List(Rect) pending; Timer blink; Bool done;
+    List(Font) fonts; Font font;
 };
+
+/// The font to draw at `scale`: the atlas made for that scale, else one
+/// made for a scale that divides it (its pixels are repeated), else the
+/// first atlas, else the built-in font.
+pub Font pick_font(List(Font) fs, Int scale) {
+    if (fs.len() == 0) { return font_builtin(); }
+    return pick_at(fs, scale, 0, fs[0]);
+}
+
+Font pick_at(List(Font) fs, Int scale, Int i, Font best) {
+    if (i >= fs.len()) { return best; }
+    Font f = fs[i];
+    if (f.scale == scale) { return f; }
+    Bool better = scale % f.scale == 0 && (scale % best.scale != 0 || f.scale > best.scale);
+    return pick_at(fs, scale, i + 1, if (better) { f } else { best });
+}
 
 /// Milliseconds on the monotonic clock.
 @requires(clock(readonly))
@@ -57,12 +75,28 @@ Int now_ms() { return clock.monotonic_ns() / 1000000; }
 /// when no display could be opened.
 @needs(App(M))
 @requires(display, clock(readonly))
-pub Int gui_run(WindowOptions opts) {
+pub Int gui_run(WindowOptions opts) { return gui_run_with(opts, []); }
+
+/// `gui_run` with text in TrueType fonts: glyph atlases the program made
+/// with the native font module (native/font/font.resid), one per device
+/// scale it wants sharp. An empty list means the built-in bitmap font.
+@needs(App(M))
+@requires(display, clock(readonly))
+pub Int gui_run_with(WindowOptions opts, List(Font) fonts) {
+    M m0 = init();
+    return gui_run_model(opts, m0, fonts);
+}
+
+/// `gui_run_with` starting from `m0` instead of `init()`: for a program
+/// whose first model depends on what `main` read (a file, the arguments).
+@needs(App(M))
+@requires(display, clock(readonly))
+pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts) {
     Wl w = wl_start(opts);
-    if (w.alive) { return gui_run_on(w); }
+    if (w.alive) { return gui_run_on(w, m0, fonts); }
     Bool wl_tried = str_len(w.err) > 0;
     X11 x = x11_start(opts);
-    if (x.alive) { return gui_run_on(x); }
+    if (x.alive) { return gui_run_on(x, m0, fonts); }
     if (wl_tried) { eprintln(w.err); }
     eprintln(if (str_len(x.err) > 0) { x.err } else { "resid-gui: no display" });
     return 1;
@@ -74,20 +108,22 @@ pub Int gui_run(WindowOptions opts) {
 @requires(display, clock(readonly))
 pub Int gui_run_x11(WindowOptions opts) {
     X11 x = x11_start(opts);
-    if (x.alive) { return gui_run_on(x); }
+    M m0 = init();
+    if (x.alive) { return gui_run_on(x, m0, []); }
     eprintln(x.err);
     return 1;
 }
 
-/// Run the program on an opened backend.
+/// Run the program from model `m0` on an opened backend, with text in
+/// `fonts` (see `gui_run_with`).
 @needs(App(M), Backend(B))
 @requires(display, clock(readonly))
-pub Int gui_run_on(B b) {
-    M m0 = init();
+pub Int gui_run_on(B b, M m0, List(Font) fonts) {
     Widget v0 = view(m0);
     Loop(M) st = Loop {
         .model = m0, .ui = ui_new(), .view = v0, .ops = [], .w = 0, .h = 0, .scale = 0,
-        .pending = [], .blink = timer_start(0, blink_ms(), now_ms()), .done = false
+        .pending = [], .blink = timer_start(0, blink_ms(), now_ms()), .done = false,
+        .fonts = fonts, .font = pick_font(fonts, be_scale(b))
     };
     return gui_loop(b, st);
 }
@@ -101,7 +137,7 @@ Int gui_loop(B b, Loop(M) st0) {
     }
     Loop(M) st = render(b, st0);
     Bool show = st.pending.len() > 0 && be_ready(b);
-    B b2 = if (show) { be_present(b, st.ops, st.scale, st.pending) } else { b };
+    B b2 = if (show) { be_present(b, Frame { .ops = st.ops, .scale = st.scale, .font = st.font }, st.pending) } else { b };
     Loop(M) st2 = if (show) { with_pending(st, []) } else { st };
     Int wait = timer_wait(st2.blink, now_ms());
     Pumped(B) p = be_pump(b2, if (wait < 0) { 1000 } else { wait });
@@ -117,13 +153,15 @@ Loop(M) render(B b, Loop(M) st) {
     Int w = be_width(b);
     Int h = be_height(b);
     Int s = be_scale(b);
-    List(DrawOp) ops = paint(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui);
+    Font f = if (s == st.scale) { st.font } else { pick_font(st.fonts, s) };
+    List(DrawOp) ops = paint_in(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui, f);
     Bool fresh = st.w != w || st.h != h || st.scale != s;
     Rect all = Rect { .x = 0, .y = 0, .w = w, .h = h };
-    List(Rect) dmg = if (fresh) { [all] } else { scale_all(damage_rects(st.ops, ops), s, 0, []) };
+    List(Rect) dmg = if (fresh) { [all] } else { scale_all(damage_rects_in(st.ops, ops, f), s, 0, []) };
     return Loop {
         .model = st.model, .ui = st.ui, .view = st.view, .ops = ops, .w = w, .h = h, .scale = s,
-        .pending = rects_clip(if (fresh) { dmg } else { rects_merge(st.pending, dmg) }, all), .blink = st.blink, .done = st.done
+        .pending = rects_clip(if (fresh) { dmg } else { rects_merge(st.pending, dmg) }, all), .blink = st.blink, .done = st.done,
+        .fonts = st.fonts, .font = f
     };
 }
 
@@ -135,7 +173,7 @@ List(Rect) scale_all(List(Rect) rs, Int s, Int i, List(Rect) acc) {
 @needs(App(M))
 Loop(M) with_pending(Loop(M) st, List(Rect) p) {
     return Loop { .model = st.model, .ui = st.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-                  .pending = p, .blink = st.blink, .done = st.done };
+                  .pending = p, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font };
 }
 
 /// A device-pixel event in the program's logical pixels.
@@ -155,10 +193,10 @@ pub Event to_logical(Event e, Int s) {
 Loop(M) fold_events(List(Event) es, Int i, Loop(M) st, Int s, Int w, Int h) {
     if (i >= es.len() || st.done) { return st; }
     Rect area = Rect { .x = 0, .y = 0, .w = w / s, .h = h / s };
-    UiStep u = ui_event(st.ui, st.view, area, to_logical(es[i], s));
+    UiStep u = ui_event_in(st.ui, st.view, area, to_logical(es[i], s), st.font);
     Loop(M) next = apply(u.out, 0, Loop {
         .model = st.model, .ui = u.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-        .pending = st.pending, .blink = st.blink, .done = st.done
+        .pending = st.pending, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font
     });
     return fold_events(es, i + 1, next, s, w, h);
 }
@@ -173,7 +211,7 @@ Loop(M) apply(List(Event) es, Int i, Loop(M) st) {
     Bool closed = match (es[i]) { Closed => true, _ => false };
     return apply(es, i + 1, Loop {
         .model = m, .ui = st.ui, .view = view(m), .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-        .pending = st.pending, .blink = st.blink, .done = st.done || closed
+        .pending = st.pending, .blink = st.blink, .done = st.done || closed, .fonts = st.fonts, .font = st.font
     });
 }
 
@@ -184,8 +222,19 @@ Loop(M) tick(Loop(M) st, Int now) {
     M m = update(st.model, FrameTick);
     return Loop {
         .model = m, .ui = ui_with_caret(st.ui, !st.ui.caret_on), .view = view(m), .ops = st.ops, .w = st.w, .h = st.h,
-        .scale = st.scale, .pending = st.pending, .blink = timer_reset(st.blink, now), .done = st.done
+        .scale = st.scale, .pending = st.pending, .blink = timer_reset(st.blink, now), .done = st.done,
+        .fonts = st.fonts, .font = st.font
     };
+}
+
+test "the font for a scale is the one made for it, or one that divides it" {
+    Font one = font_parse(test_atlas_answer(), 1) else { font_builtin() };
+    Font two = font_parse(test_atlas_answer(), 2) else { font_builtin() };
+    expect(pick_font([one, two], 2).scale).toEqual(2);
+    expect(pick_font([one, two], 1).scale).toEqual(1);
+    expect(pick_font([one, two], 4).scale).toEqual(2);
+    expect(pick_font([two], 3).scale).toEqual(2);
+    expect(font_is_builtin(pick_font([], 2))).toEqual(true);
 }
 
 test "device events become logical" {

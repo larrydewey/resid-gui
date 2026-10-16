@@ -128,15 +128,41 @@ text input's caret and a scroll offset. The library keeps only what
 belongs to the widgets themselves: which input has focus, which control is
 held down, and the caret's blink phase.
 
+## Starting from loaded data
+
+`init()` takes nothing. A program whose first model depends on what `main`
+read (a file, the arguments) builds that model itself and passes it:
+
+```resid
+@needs(App(M))
+@requires(display, clock(readonly))
+pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
+```
+
+## Fonts and images
+
+Text uses a built-in 8x16 bitmap font unless the program brings a TrueType
+font, and `Bitmap` shows pixels the program has. Both can come from files
+through the optional native modules (docs/reference_native.md):
+
+```resid
+List(Font) fonts = fonts_from_ttf(filesystem.read_bytes(path), 16);   // native_font
+Result(Image, Str) img = image_from_bytes(filesystem.read_bytes(png)); // native_image
+return gui_run_with(opts, fonts);
+```
+
+`examples/fonts.resid` and `examples/image_viewer.resid` do exactly this.
+
 ## Capabilities
 
 `gui_run` needs `display`, to reach the window server, and
 `clock(readonly)`, to time the caret and `FrameTick`. Nothing else:
 there is no filesystem, network or environment access, and the program
-links no native code.
+links no native code unless it imports a native module.
 
 ## Next steps
 
 - `examples/todo.resid`: a list with a text input, checkboxes and scrolling
 - `examples/gallery.resid`: every widget once
-- `examples/image_viewer.resid`: a `Bitmap` zoomed with the wheel
+- `examples/fonts.resid`: every widget in a TrueType font
+- `examples/image_viewer.resid`: an image file, zoomed with the wheel

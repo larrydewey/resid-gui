@@ -1,15 +1,23 @@
+// residc-args: -native image=native/image/image.ll
 import "../src/gui.resid";
+import "../src/gfx/image.resid";
+import "../native/image/image.resid";
 
-// An image in a window: a generated gradient, shown at its own size and
-// centred. Wheel up and down zooms between 1x and 4x by repeating pixels.
+// An image in a window: the PNG, JPEG, BMP, GIF or TGA file named on the
+// command line, decoded by the sandboxed native image module, or a
+// generated gradient without one. Centred; the wheel zooms from 1x to 4x
+// by repeating pixels.
+//
+//   residc examples/image_viewer.resid -native image=native/image/image.ll -o viewer
+//   ./viewer photo.png
 
-type Viewer = { Int zoom; };
+type Viewer = { Int zoom; Image img; Str name; };
 
-Viewer viewer_init() { return Viewer { .zoom = 2 }; }
+Viewer viewer_init() { return Viewer { .zoom = 1, .img = image_new(0, 0), .name = "" }; }
 
 Viewer viewer_update(Viewer v, Event e) {
     return match (e) {
-        Wheel(dx, dy) => Viewer { .zoom = if (dy < 0 && v.zoom < 4) { v.zoom + 1 } else { if (dy > 0 && v.zoom > 1) { v.zoom - 1 } else { v.zoom } } },
+        Wheel(dx, dy) => Viewer { .zoom = if (dy < 0 && v.zoom < 4) { v.zoom + 1 } else { if (dy > 0 && v.zoom > 1) { v.zoom - 1 } else { v.zoom } }, .img = v.img, .name = v.name },
         _ => v
     };
 }
@@ -34,18 +42,35 @@ List(Int) zoom_at(List(Int) px, Int w, Int k, Int x, Int y, Int zw, Int zh, List
     return zoom_at(px, w, k, x + 1, y, zw, zh, b.push(px[s]).push(px[s + 1]).push(px[s + 2]).push(px[s + 3]));
 }
 
+/// The image a view shows: the file's when one loaded, else the gradient.
+Image shown(Viewer v) {
+    return if (v.img.w > 0) { v.img } else { Image { .w = 64, .h = 48, .px = gradient(64, 48) } };
+}
+
 Widget viewer_view(Viewer v) {
-    Int w = 64;
-    Int h = 48;
+    Image im = shown(v);
+    Str name = if (str_len(v.name) > 0) { v.name } else { "gradient" };
     return Column([
-        Text(f"gradient {w}x{h} at {v.zoom}x (wheel zooms)"),
-        Align(50, 50, Bitmap(w * v.zoom, h * v.zoom, zoomed(gradient(w, h), w, h, v.zoom)))
+        Text(f"{name} {im.w}x{im.h} at {v.zoom}x (wheel zooms)"),
+        Align(50, 50, Bitmap(im.w * v.zoom, im.h * v.zoom, if (v.zoom == 1) { im.px } else { zoomed(im.px, im.w, im.h, v.zoom) }))
     ]);
 }
 
 App(Viewer) = { .init = viewer_init, .update = viewer_update, .view = viewer_view };
 
-@requires(display, clock(readonly))
+@requires(display, clock(readonly), args, filesystem(readonly), native_image)
 Int main() {
-    return gui_run(WindowOptions { .title = "Image Viewer", .width = 320, .height = 260, .resizable = true });
+    Str path = args.get(1);
+    if (str_len(path) == 0) {
+        return gui_run(WindowOptions { .title = "Image Viewer", .width = 320, .height = 260, .resizable = true });
+    }
+    Result(Image, Str) r = image_from_bytes(filesystem.read_bytes(path));
+    Image none = image_new(0, 0);
+    Image im = r else { none };
+    if (im.w == 0) {
+        eprintln(match (r) { Ok(i) => "", Err(e) => e });
+        return 1;
+    }
+    WindowOptions opts = WindowOptions { .title = path, .width = 320, .height = 260, .resizable = true };
+    return gui_run_model(opts, Viewer { .zoom = 1, .img = im, .name = path }, []);
 }

@@ -1,124 +1,101 @@
-/* image.c - native module for image operations using stb_image
+/* image.c - the resid-gui-image native module: PNG, JPEG, BMP, GIF and TGA
+ * bytes to pixels, with stb_image (public domain), compiled freestanding.
  *
- * This provides image decoding (PNG, JPEG, BMP, etc.) as a native module.
- * Uses stb_image.h (public domain) compiled freestanding.
+ * Resid binding (spec §47):
+ *
+ *   @link("image") Bytes(16777216) image_decode(Bytes(16777216) data, Int len) {}
+ *
+ * which is, in C, image_decode(data, cap, len, out, ocap). Like the font
+ * module it references only its own symbols, LLVM intrinsics and mem*;
+ * memory is a bump allocator over a static arena, since a call is a fresh
+ * process and nothing outlives it.
+ *
+ * The answer, integers 32-bit little-endian:
+ *
+ *   0    magic "RGI1"
+ *   4    status: 0 ok, 1 not an image stb_image can read, 2 too large
+ *   8    width, 12 height
+ *   16   width * height pixels, four bytes each: blue, green, red, alpha
+ *        (straight, not premultiplied)
  */
 
-#define STB_IMAGE_IMPLEMENTATION
+#include <stdint.h>
+#include <stddef.h>
+
+#define HEADER  16
+#define ARENA   (96 * 1024 * 1024)
+
+void *memcpy(void *d, const void *s, size_t n);
+void *memset(void *d, int c, size_t n);
+void *memmove(void *d, const void *s, size_t n);
+
+static unsigned char arena[ARENA];
+static size_t arena_used;
+
+/* Every block remembers its size just before it, so a reallocation knows
+ * how much to copy. */
+static void *bump(size_t n) {
+    size_t need = ((n + 15) & ~(size_t)15) + 16;
+    if (need > ARENA - arena_used) return 0;
+    unsigned char *p = &arena[arena_used];
+    arena_used += need;
+    *(size_t *)p = n;
+    return p + 16;
+}
+
+static void *rebump(void *old, size_t n) {
+    void *p = bump(n);
+    if (p && old) {
+        size_t had = *(size_t *)((unsigned char *)old - 16);
+        memcpy(p, old, had < n ? had : n);
+    }
+    return p;
+}
+
+static int iabs(int x) { return x < 0 ? -x : x; }
+
 #define STBI_NO_STDIO
 #define STBI_NO_SIMD
-#define STBI_MALLOC(sz)    stbi_malloc(sz)
-#define STBI_REALLOC(ptr, newsz)  stbi_realloc(ptr, newsz)
-#define STBI_FREE(ptr)     stbi_free(ptr)
-#define STBI_ASSERT(x)     (void)0
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#define STBI_NO_PSD
+#define STBI_NO_PIC
+#define STBI_NO_PNM
+#define STBI_NO_THREAD_LOCALS
+#define STBI_NO_FAILURE_STRINGS
+#define STBI_ASSERT(x)              ((void)0)
+#define STBI_MALLOC(n)              bump(n)
+#define STBI_REALLOC(p, n)          rebump(p, n)
+#define STBI_FREE(p)                ((void)(p))
+#define STBI_MAX_DIMENSIONS         4096
+#define abs(x)                      iabs(x)
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#include "../../vendor/stb_image.h"
 
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-
-// Bump allocator for stb_image - MUST be defined before stb_image.h
-static unsigned char alloc_buffer[2048 * 2048 * 4 + 1024];
-static size_t alloc_offset = 0;
-
-void* stbi_malloc(size_t sz) {
-    if (alloc_offset + sz > sizeof(alloc_buffer)) return 0;
-    void* ptr = &alloc_buffer[alloc_offset];
-    alloc_offset += sz;
-    return ptr;
+static void put32(uint8_t *out, int64_t at, int32_t v) {
+    out[at] = (uint8_t)v; out[at + 1] = (uint8_t)(v >> 8);
+    out[at + 2] = (uint8_t)(v >> 16); out[at + 3] = (uint8_t)(v >> 24);
 }
 
-void stbi_free(void* ptr) {
-    (void)ptr;
-}
-
-void* stbi_realloc(void* ptr, size_t newsz) {
-    if (alloc_offset + newsz > sizeof(alloc_buffer)) return 0;
-    void* newptr = &alloc_buffer[alloc_offset];
-    (void)ptr;
-    alloc_offset += newsz;
-    return newptr;
-}
-
-#include "stb_image.h"
-
-// Result structure for decoded image
-struct ImageResult {
-    int w;
-    int h;
-    int channels; // 4 for RGBA
-    unsigned char pixels[2048 * 2048 * 4];
-};
-
-// image_decode - Decode image from bytes
-// Input: data (bytes of image), len
-// Output: packed ImageResult as bytes [w][h][channels][pixels...]
-struct ImageResult image_decode_impl(const unsigned char* data, int len) {
-    struct ImageResult result = {0};
-    
-    int w, h, channels;
-    unsigned char* pixels = stbi_load_from_memory(data, len, &w, &h, &channels, 4); // Force 4 channels (RGBA)
-    
-    if (!pixels) {
-        return result; // Return empty on failure
+void image_decode(const uint8_t *data, int64_t cap, int64_t len, uint8_t *out, int64_t ocap) {
+    if (ocap < HEADER) return;
+    put32(out, 0, 0x31494752);
+    put32(out, 4, 1);
+    if (len <= 0 || len > cap || len > 0x7fffffff) return;
+    int w, h, n;
+    if (!stbi_info_from_memory(data, (int)len, &w, &h, &n)) return;
+    if (w <= 0 || h <= 0 || (int64_t)w * h * 4 > ocap - HEADER) { put32(out, 4, 2); return; }
+    unsigned char *px = stbi_load_from_memory(data, (int)len, &w, &h, &n, 4);
+    if (!px) return;
+    if ((int64_t)w * h * 4 > ocap - HEADER) { put32(out, 4, 2); return; }
+    for (int64_t i = 0; i < (int64_t)w * h; i++) {
+        out[HEADER + i * 4] = px[i * 4 + 2];
+        out[HEADER + i * 4 + 1] = px[i * 4 + 1];
+        out[HEADER + i * 4 + 2] = px[i * 4];
+        out[HEADER + i * 4 + 3] = px[i * 4 + 3];
     }
-    
-    result.w = w;
-    result.h = h;
-    result.channels = 4;
-    
-    // Convert to premultiplied BGRA (matching Canvas format)
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int src_idx = (y * w + x) * 4;
-            int dst_idx = (y * w + x) * 4;
-            unsigned char r = pixels[src_idx + 0];
-            unsigned char g = pixels[src_idx + 1];
-            unsigned char b = pixels[src_idx + 2];
-            unsigned char a = pixels[src_idx + 3];
-            
-            // Premultiply alpha and convert to BGRA
-            result.pixels[dst_idx + 0] = (b * a) / 255;  // B
-            result.pixels[dst_idx + 1] = (g * a) / 255;  // G
-            result.pixels[dst_idx + 2] = (r * a) / 255;  // R
-            result.pixels[dst_idx + 3] = a;               // A
-        }
-    }
-    
-    // stb_image allocated with our bump allocator, no free needed
-    
-    return result;
-}
-
-// Entry point for native module
-// Takes image data as bytes, length
-// Returns packed ImageResult as bytes
-unsigned char* image_decode(const unsigned char* data, int len,
-                            unsigned char* out_data, int* out_len) {
-    static struct ImageResult result;
-    result = image_decode_impl(data, len);
-    
-    // Pack result into flat byte array
-    // [w][h][channels][pixels...]
-    int offset = 0;
-    out_data[offset++] = result.w & 0xFF;
-    out_data[offset++] = (result.w >> 8) & 0xFF;
-    out_data[offset++] = (result.w >> 16) & 0xFF;
-    out_data[offset++] = (result.w >> 24) & 0xFF;
-    out_data[offset++] = result.h & 0xFF;
-    out_data[offset++] = (result.h >> 8) & 0xFF;
-    out_data[offset++] = (result.h >> 16) & 0xFF;
-    out_data[offset++] = (result.h >> 24) & 0xFF;
-    out_data[offset++] = result.channels & 0xFF;
-    out_data[offset++] = (result.channels >> 8) & 0xFF;
-    out_data[offset++] = (result.channels >> 16) & 0xFF;
-    out_data[offset++] = (result.channels >> 24) & 0xFF;
-    
-    // Copy pixel data
-    int pixel_count = result.w * result.h * result.channels;
-    for (int i = 0; i < pixel_count; i++) {
-        out_data[offset++] = result.pixels[i];
-    }
-    
-    *out_len = offset;
-    return out_data;
+    put32(out, 4, 0);
+    put32(out, 8, w);
+    put32(out, 12, h);
 }

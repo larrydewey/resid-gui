@@ -21,11 +21,17 @@ pub type DrawOp =
 /// A frame's display list.
 pub type DrawList = List(DrawOp);
 
-/// The pixels an op can change; empty for the clip ops, which change none.
-pub Rect op_bounds(DrawOp op) {
+/// The pixels an op can change in the built-in font.
+pub Rect op_bounds(DrawOp op) { return op_bounds_in(op, font_builtin()); }
+
+/// The pixels an op can change when text is in font `f`; empty for the
+/// clip ops, which change none. Text gets two pixels of slack each side
+/// for glyphs that overhang their advance.
+pub Rect op_bounds_in(DrawOp op, Font f) {
     return match (op) {
         OpFill(r, c) => r,
-        OpText(x, y, s, c) => Rect { .x = x, .y = y, .w = text_width(s), .h = text_height() },
+        OpText(x, y, s, c) => if (font_is_builtin(f)) { Rect { .x = x, .y = y, .w = text_width(s), .h = text_height() } }
+                              else { Rect { .x = x - 2, .y = y, .w = text_width_in(f, s) + 4, .h = text_height_in(f) } },
         OpImage(x, y, w, h, px) => Rect { .x = x, .y = y, .w = w, .h = h },
         OpClipPush(r) => rect_none(),
         OpClipPop => rect_none()

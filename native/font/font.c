@@ -1,233 +1,196 @@
-/* font.c - native module for font operations using stb_truetype
+/* font.c - the resid-gui-font native module: a TrueType font to a glyph
+ * atlas, with stb_truetype (public domain), compiled freestanding.
  *
- * This provides font atlas generation and glyph metrics as a native module.
- * Uses stb_truetype.h (public domain) compiled freestanding.
+ * Resid binding (spec §47):
+ *
+ *   @link("font") Bytes(1048576) font_atlas(Bytes(16777216) font, Int len, Int px) {}
+ *
+ * which is, in C, font_atlas(font, cap, len, px, out, ocap). The module
+ * references nothing but its own symbols, LLVM intrinsics and mem*: no C
+ * library, so the maths stb_truetype asks for is defined here, and memory
+ * comes from a bump allocator over a static arena (a call is a fresh
+ * process, so nothing is ever freed).
+ *
+ * The answer, all integers 32-bit little-endian:
+ *
+ *   0    magic "RGF1"
+ *   4    status: 0 ok, 1 not a font, 2 px out of range, 3 atlas too big
+ *   8    ascent, in pixels, from the top of a line to the baseline
+ *   12   line height in pixels (ascent - descent + line gap)
+ *   16   atlas width, 20 atlas height
+ *   24   glyph count (95: the printable ASCII characters 32 to 126)
+ *   28   kerning pair count (at most KERN_MAX)
+ *   32   95 glyph records of 7 words: advance, x offset and y offset of the
+ *        bitmap from the pen (y from the top of the line), bitmap width
+ *        and height, and its x and y in the atlas
+ *   ...  KERN_MAX kerning records of 4 bytes: first and second character,
+ *        then the adjustment as a signed 16-bit value
+ *   ...  the atlas, one coverage byte (0 to 255) per pixel, row by row
  */
 
-#define STB_TRUETYPE_IMPLEMENTATION
-#define STBTT_malloc(x, u)   0
-#define STBTT_free(x, u)     0
-#define STBTT_assert(x)      (void)0
-#define STBTT_ifloor(x)      ((int)floorf(x))
-#define STBTT_iceil(x)       ((int)ceilf(x))
-#define STBTT_sqrt(x)        sqrtf(x)
-#define STBTT_pow(x, y)      powf(x, y)
-#define STBTT_fmod(x, y)     fmodf(x, y)
-#define STBTT_cos(x)         cosf(x)
-#define STBTT_acos(x)        acosf(x)
-#define STBTT_strlen(x)      strlen(x)
-#define STBTT_memcpy         memcpy
-#define STBTT_memset         memset
-
 #include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-#include <math.h>
-#include "stb_truetype.h"
+#include <stddef.h>
 
-// Maximum atlas size
-#define MAX_ATLAS_W 2048
-#define MAX_ATLAS_H 2048
-#define MAX_GLYPHS 256
+#define OUT_CAP     1048576
+#define GLYPHS      95
+#define KERN_MAX    1024
+#define HEADER      32
+#define RECORD      28
+#define ATLAS_AT    (HEADER + GLYPHS * RECORD + KERN_MAX * 4)
+#define ATLAS_W     512
+#define ARENA       (8 * 1024 * 1024)
 
-// Result structure for the font atlas
-// Packed as: [w][h][atlas_data...][glyph_count][glyph0_adv][glyph0_lsb][glyph0_x0][glyph0_y0][glyph0_x1][glyph0_y1]...[kerning_count][kerning0_g1][kerning0_g2][kerning0_adv]...
-struct FontResult {
-    int w;
-    int h;
-    int glyph_count;
-    int glyph_adv[MAX_GLYPHS];
-    int glyph_lsb[MAX_GLYPHS];
-    int glyph_x0[MAX_GLYPHS];
-    int glyph_y0[MAX_GLYPHS];
-    int glyph_x1[MAX_GLYPHS];
-    int glyph_y1[MAX_GLYPHS];
-    int kerning_count;
-    int kerning_g1[128];
-    int kerning_g2[128];
-    int kerning_adv[128];
-    unsigned char atlas[MAX_ATLAS_W * MAX_ATLAS_H];
-};
+void *memcpy(void *d, const void *s, size_t n);
+void *memset(void *d, int c, size_t n);
 
-// Bump allocator for stb_truetype
-static unsigned char alloc_buffer[1024 * 1024];
-static size_t alloc_offset = 0;
+/* ---- freestanding helpers stb_truetype needs ------------------------ */
 
-void* stbtt_malloc(void* userdata, size_t size) {
-    (void)userdata;
-    if (alloc_offset + size > sizeof(alloc_buffer)) return 0;
-    void* ptr = &alloc_buffer[alloc_offset];
-    alloc_offset += size;
-    return ptr;
+static unsigned char arena[ARENA];
+static size_t arena_used;
+
+static void *bump(size_t n) {
+    n = (n + 15) & ~(size_t)15;
+    if (n > ARENA - arena_used) return 0;
+    void *p = &arena[arena_used];
+    arena_used += n;
+    return p;
 }
 
-void stbtt_free(void* userdata, void* ptr) {
-    (void)userdata;
-    (void)ptr;
+static double ffloor(double x) { double t = (double)(int64_t)x; return t > x ? t - 1 : t; }
+static double fceil(double x) { double t = (double)(int64_t)x; return t < x ? t + 1 : t; }
+static double ffabs(double x) { return x < 0 ? -x : x; }
+static double fsqrt(double x) { return __builtin_sqrt(x); }
+static double ffmod(double x, double y) { return x - (double)(int64_t)(x / y) * y; }
+
+/* exp and log by range reduction and series: used only by the cubic
+ * solver of signed-distance fields, which this module never asks for, but
+ * stb_truetype must still link. */
+static double fexp(double x) {
+    int k = (int)(x / 0.6931471805599453);
+    double r = x - k * 0.6931471805599453, term = 1, sum = 1;
+    for (int i = 1; i < 20; i++) { term *= r / i; sum += term; }
+    while (k > 0) { sum *= 2; k--; }
+    while (k < 0) { sum /= 2; k++; }
+    return sum;
+}
+static double flog(double x) {
+    if (x <= 0) return -1e300;
+    int k = 0;
+    while (x > 2) { x /= 2; k++; }
+    while (x < 0.5) { x *= 2; k--; }
+    double y = (x - 1) / (x + 1), y2 = y * y, term = y, sum = 0;
+    for (int i = 1; i < 40; i += 2) { sum += term / i; term *= y2; }
+    return 2 * sum + k * 0.6931471805599453;
+}
+static double fpow(double x, double y) { return x <= 0 ? 0 : fexp(y * flog(x)); }
+static double fcos(double x) {
+    x = ffmod(x, 6.283185307179586);
+    double term = 1, sum = 1, x2 = x * x;
+    for (int i = 1; i < 20; i++) { term *= -x2 / ((2 * i - 1) * (2 * i)); sum += term; }
+    return sum;
+}
+static double facos(double x) {
+    /* Newton's method on cos(t) = x from the middle of [0, pi]. */
+    if (x >= 1) return 0;
+    if (x <= -1) return 3.141592653589793;
+    double t = 1.5707963267948966;
+    for (int i = 0; i < 30; i++) {
+        double s = fsqrt(1 - fcos(t) * fcos(t));
+        if (s < 1e-12) break;
+        t += (fcos(t) - x) / s;
+    }
+    return t;
+}
+static size_t fstrlen(const char *s) { size_t n = 0; while (s[n]) n++; return n; }
+
+#define STBTT_ifloor(x)     ((int)ffloor(x))
+#define STBTT_iceil(x)      ((int)fceil(x))
+#define STBTT_sqrt(x)       fsqrt(x)
+#define STBTT_pow(x, y)     fpow(x, y)
+#define STBTT_fmod(x, y)    ffmod(x, y)
+#define STBTT_cos(x)        fcos(x)
+#define STBTT_acos(x)       facos(x)
+#define STBTT_fabs(x)       ffabs(x)
+#define STBTT_malloc(x, u)  ((void)(u), bump(x))
+#define STBTT_free(x, u)    ((void)(u), (void)(x))
+#define STBTT_assert(x)     ((void)0)
+#define STBTT_strlen(x)     fstrlen(x)
+#define STBTT_memcpy        memcpy
+#define STBTT_memset        memset
+#define STBTT_STATIC
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "../../vendor/stb_truetype.h"
+
+/* ---- the module ---------------------------------------------------- */
+
+static void put32(uint8_t *out, int64_t at, int32_t v) {
+    out[at] = (uint8_t)v; out[at + 1] = (uint8_t)(v >> 8);
+    out[at + 2] = (uint8_t)(v >> 16); out[at + 3] = (uint8_t)(v >> 24);
 }
 
-// font_atlas - Generate a font atlas from TTF data
-// Input: font_data (bytes of TTF), font_len, chars (string of characters to include), px_size
-// Output: packed FontResult structure as bytes
-struct FontResult font_atlas_impl(const unsigned char* font_data, int font_len, const char* chars, int px_size) {
-    struct FontResult result = {0};
-    result.w = MAX_ATLAS_W;
-    result.h = MAX_ATLAS_H;
-    
-    stbtt_fontinfo font;
-    if (!stbtt_InitFont(&font, font_data, stbtt_GetFontOffsetForIndex(font_data, 0))) {
-        return result; // Return empty on failure
-    }
-    
-    float scale = stbtt_ScaleForPixelHeight(&font, px_size);
-    int ascent, descent, line_gap;
-    stbtt_GetFontVMetrics(&font, &ascent, &descent, &line_gap);
-    ascent = (int)(ascent * scale);
-    descent = (int)(descent * scale);
-    
-    // Pack glyphs into atlas
-    int x = 0, y = 0, row_h = 0;
-    int chars_len = strlen(chars);
-    int glyph_map[128] = {0}; // map from codepoint to glyph index + 1
-    
-    // First pass: measure all glyphs
-    struct {
-        int w, h;
-        int adv, lsb;
-        int x0, y0, x1, y1;
-        int codepoint;
-    } glyphs[256];
-    int glyph_count = 0;
-    
-    for (int i = 0; i < chars_len && glyph_count < 256; i++) {
-        unsigned char c = chars[i];
-        if (c < 32 || c > 126) continue;
-        if (glyph_map[c]) continue; // Already processed
-        
-        int adv, lsb;
-        stbtt_GetCodepointHMetrics(&font, c, &adv, &lsb);
-        int x0, y0, x1, y1;
-        stbtt_GetCodepointBitmapBox(&font, c, scale, scale, &x0, &y0, &x1, &y1);
-        int gw = x1 - x0;
-        int gh = y1 - y0;
-        
-        if (gw > 0 && gh > 0) {
-            glyphs[glyph_count].codepoint = c;
-            glyphs[glyph_count].adv = (int)(adv * scale);
-            glyphs[glyph_count].lsb = (int)(lsb * scale);
-            glyphs[glyph_count].x0 = x0;
-            glyphs[glyph_count].y0 = y0;
-            glyphs[glyph_count].x1 = x1;
-            glyphs[glyph_count].y1 = y1;
-            glyphs[glyph_count].w = gw;
-            glyphs[glyph_count].h = gh;
-            glyph_map[c] = glyph_count + 1;
-            glyph_count++;
-        }
-    }
-    
-    // Second pass: pack into atlas and rasterize
-    for (int i = 0; i < glyph_count; i++) {
-        if (x + glyphs[i].w >= MAX_ATLAS_W) {
-            x = 0;
-            y += row_h;
-            row_h = 0;
-        }
-        if (y + glyphs[i].h >= MAX_ATLAS_H) {
-            break; // Atlas full
-        }
-        
-        // Rasterize glyph
-        unsigned char* dst = &result.atlas[y * MAX_ATLAS_W + x];
-        stbtt_MakeCodepointBitmap(&font, dst, glyphs[i].w, glyphs[i].h, MAX_ATLAS_W, scale, scale, glyphs[i].codepoint);
-        
-        // Store glyph metrics (atlas coordinates)
-        result.glyph_adv[i] = glyphs[i].adv;
-        result.glyph_lsb[i] = glyphs[i].lsb;
-        result.glyph_x0[i] = x;
-        result.glyph_y0[i] = y;
-        result.glyph_x1[i] = x + glyphs[i].w;
-        result.glyph_y1[i] = y + glyphs[i].h;
-        
-        x += glyphs[i].w + 1;
-        if (glyphs[i].h > row_h) row_h = glyphs[i].h;
-    }
-    
-    result.glyph_count = glyph_count;
-    
-    // Third pass: collect kerning pairs
-    int kern_count = 0;
-    for (int i = 0; i < glyph_count && kern_count < 128; i++) {
-        for (int j = 0; j < glyph_count && kern_count < 128; j++) {
-            int kern = stbtt_GetCodepointKernAdvance(&font, glyphs[i].codepoint, glyphs[j].codepoint);
-            if (kern != 0) {
-                result.kerning_g1[kern_count] = glyphs[i].codepoint;
-                result.kerning_g2[kern_count] = glyphs[j].codepoint;
-                result.kerning_adv[kern_count] = (int)(kern * scale);
-                kern_count++;
-            }
-        }
-    }
-    result.kerning_count = kern_count;
-    
-    return result;
+static void fail(uint8_t *out, int32_t status) {
+    put32(out, 0, 0x31464752);
+    put32(out, 4, status);
 }
 
-// Entry point for native module
-// Takes font data as bytes, length, character string, pixel size
-// Returns packed FontResult as bytes
-unsigned char* font_atlas(const unsigned char* font_data, int font_len, const char* chars, int px_size,
-                          unsigned char* out_data, int* out_len) {
-    static struct FontResult result;
-    result = font_atlas_impl(font_data, font_len, chars, px_size);
-    
-    // Pack result into flat byte array
-    // [w][h][glyph_count][adv0][lsb0][x00][y00][x10][y10]...[kern_count][g1][g2][adv]...[atlas...]
-    int offset = 0;
-    out_data[offset++] = result.w & 0xFF;
-    out_data[offset++] = (result.w >> 8) & 0xFF;
-    out_data[offset++] = (result.w >> 16) & 0xFF;
-    out_data[offset++] = (result.w >> 24) & 0xFF;
-    out_data[offset++] = result.h & 0xFF;
-    out_data[offset++] = (result.h >> 8) & 0xFF;
-    out_data[offset++] = (result.h >> 16) & 0xFF;
-    out_data[offset++] = (result.h >> 24) & 0xFF;
-    out_data[offset++] = result.glyph_count & 0xFF;
-    out_data[offset++] = (result.glyph_count >> 8) & 0xFF;
-    out_data[offset++] = (result.glyph_count >> 16) & 0xFF;
-    out_data[offset++] = (result.glyph_count >> 24) & 0xFF;
-    
-    for (int i = 0; i < result.glyph_count; i++) {
-        int vals[5] = {result.glyph_adv[i], result.glyph_lsb[i], result.glyph_x0[i], result.glyph_y0[i], result.glyph_x1[i]};
-        for (int v = 0; v < 5; v++) {
-            out_data[offset++] = vals[v] & 0xFF;
-            out_data[offset++] = (vals[v] >> 8) & 0xFF;
-            out_data[offset++] = (vals[v] >> 16) & 0xFF;
-            out_data[offset++] = (vals[v] >> 24) & 0xFF;
+void font_atlas(const uint8_t *font, int64_t cap, int64_t len, int64_t px, uint8_t *out, int64_t ocap) {
+    if (ocap < ATLAS_AT) return;
+    if (px < 4 || px > 256) { fail(out, 2); return; }
+    if (len <= 0 || len > cap) { fail(out, 1); return; }
+    stbtt_fontinfo info;
+    int off = stbtt_GetFontOffsetForIndex(font, 0);
+    if (off < 0 || off >= len || !stbtt_InitFont(&info, font, off)) { fail(out, 1); return; }
+    float scale = stbtt_ScaleForPixelHeight(&info, (float)px);
+    int ascent, descent, gap;
+    stbtt_GetFontVMetrics(&info, &ascent, &descent, &gap);
+    int asc = (int)fceil(ascent * scale);
+    int line = asc + (int)fceil(-descent * scale) + (int)(gap * scale);
+
+    /* Pack the glyphs left to right in rows ATLAS_W wide. */
+    int64_t room = (ocap < OUT_CAP ? ocap : OUT_CAP) - ATLAS_AT;
+    int x = 0, y = 0, row = 0;
+    for (int i = 0; i < GLYPHS; i++) {
+        int c = 32 + i, adv, lsb, x0, y0, x1, y1;
+        stbtt_GetCodepointHMetrics(&info, c, &adv, &lsb);
+        stbtt_GetCodepointBitmapBox(&info, c, scale, scale, &x0, &y0, &x1, &y1);
+        int w = x1 - x0, h = y1 - y0;
+        if (w < 0) w = 0;
+        if (h < 0) h = 0;
+        if (w > ATLAS_W) { fail(out, 3); return; }
+        if (x + w > ATLAS_W) { x = 0; y += row + 1; row = 0; }
+        if ((int64_t)(y + h) * ATLAS_W > room) { fail(out, 3); return; }
+        int64_t r = HEADER + (int64_t)i * RECORD;
+        put32(out, r, (int32_t)fceil(adv * scale));
+        put32(out, r + 4, x0);
+        put32(out, r + 8, asc + y0);
+        put32(out, r + 12, w);
+        put32(out, r + 16, h);
+        put32(out, r + 20, x);
+        put32(out, r + 24, y);
+        if (w > 0 && h > 0)
+            stbtt_MakeCodepointBitmap(&info, out + ATLAS_AT + (int64_t)y * ATLAS_W + x, w, h, ATLAS_W, scale, scale, c);
+        x += w + 1;
+        if (h > row) row = h;
+    }
+    int atlas_h = y + row + 1;
+
+    int kerns = 0;
+    for (int a = 32; a <= 126; a++)
+        for (int b = 32; b <= 126 && kerns < KERN_MAX; b++) {
+            int k = (int)(stbtt_GetCodepointKernAdvance(&info, a, b) * scale);
+            if (k == 0) continue;
+            int64_t at = HEADER + GLYPHS * RECORD + (int64_t)kerns * 4;
+            out[at] = (uint8_t)a; out[at + 1] = (uint8_t)b;
+            out[at + 2] = (uint8_t)k; out[at + 3] = (uint8_t)(k >> 8);
+            kerns++;
         }
-    }
-    
-    out_data[offset++] = result.kerning_count & 0xFF;
-    out_data[offset++] = (result.kerning_count >> 8) & 0xFF;
-    out_data[offset++] = (result.kerning_count >> 16) & 0xFF;
-    out_data[offset++] = (result.kerning_count >> 24) & 0xFF;
-    
-    for (int i = 0; i < result.kerning_count; i++) {
-        int vals[3] = {result.kerning_g1[i], result.kerning_g2[i], result.kerning_adv[i]};
-        for (int v = 0; v < 3; v++) {
-            out_data[offset++] = vals[v] & 0xFF;
-            out_data[offset++] = (vals[v] >> 8) & 0xFF;
-            out_data[offset++] = (vals[v] >> 16) & 0xFF;
-            out_data[offset++] = (vals[v] >> 24) & 0xFF;
-        }
-    }
-    
-    // Copy atlas data
-    int atlas_size = result.w * result.h;
-    for (int i = 0; i < atlas_size; i++) {
-        out_data[offset++] = result.atlas[i];
-    }
-    
-    *out_len = offset;
-    return out_data;
+
+    put32(out, 0, 0x31464752);
+    put32(out, 4, 0);
+    put32(out, 8, asc);
+    put32(out, 12, line);
+    put32(out, 16, ATLAS_W);
+    put32(out, 20, atlas_h);
+    put32(out, 24, GLYPHS);
+    put32(out, 28, kerns);
 }

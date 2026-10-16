@@ -12,6 +12,8 @@
 import "../src/app.resid";
 import "../src/gfx/color.resid";
 import "../src/gfx/draw.resid";
+import "../src/gfx/font.resid";
+import "../src/gfx/raster.resid";
 import "../src/x11/wire.resid";
 import "../src/wayland/wire.resid";
 import "../src/wayland/protocol.resid";
@@ -168,7 +170,7 @@ Got client(Int fd) {
     Wl w = wl_start_on(fd, WindowOptions { .title = "fake", .width = 64, .height = 48, .resizable = true });
     if (!w.alive) { return Got { .downs = -1, .ups = 0, .keys = 0, .text = w.err, .x = -1, .closed = false }; }
     if (wl_width(w) != 200 || wl_height(w) != 100) { return Got { .downs = -2, .ups = 0, .keys = 0, .text = "", .x = wl_width(w), .closed = false }; }
-    Wl p = wl_present(w, [OpFill(Rect { .x = 0, .y = 0, .w = 10, .h = 10 }, rgb(255, 0, 0))], 1, [Rect { .x = 0, .y = 0, .w = 200, .h = 100 }]);
+    Wl p = wl_present(w, Frame { .ops = [OpFill(Rect { .x = 0, .y = 0, .w = 10, .h = 10 }, rgb(255, 0, 0))], .scale = 1, .font = font_builtin() }, [Rect { .x = 0, .y = 0, .w = 200, .h = 100 }]);
     Got g = pump_all(p, none, 10);
     _ = resid_disp_close(fd);
     return g;

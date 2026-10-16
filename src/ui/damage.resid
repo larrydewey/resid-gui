@@ -1,60 +1,87 @@
-import "../gui.resid";
-import "../gfx/draw.resid";
-import "../gfx/color.resid";
+// damage.resid — which pixels changed between two frames.
+//
+// A frame is a display list, so damage is value comparison: walk both
+// lists side by side and collect the bounds of every op that differs, plus
+// every op that only one list has. A clip op that changed damages both its
+// old and new rectangles, since what it clips draws differently. The
+// result is one rectangle, in logical pixels, that covers all of it.
 
-pub Bool draw_op_equal(DrawOp a, DrawOp b) {
-    return match (a) {
-        OpFill(ra, ca) => match (b) { OpFill(rb, cb) => rect_equal(ra, rb) && color_equal(ca, cb), _ => false },
-        OpText(xa, ya, sa, ca) => match (b) { OpText(xb, yb, sb, cb) => xa == xb && ya == yb && sa == sb && color_equal(ca, cb), _ => false },
-        OpClipPush(ra) => match (b) { OpClipPush(rb) => rect_equal(ra, rb), _ => false },
-        OpClipPop => match (b) { OpClipPop => true, _ => false }
+import "../gfx/color.resid";
+import "../gfx/draw.resid";
+
+/// The area an op can affect, for diffing: a clip's rectangle counts.
+Rect diff_bounds(DrawOp op) {
+    return match (op) {
+        OpClipPush(r) => r,
+        _ => op_bounds(op)
     };
 }
 
-pub Bool rect_equal(Rect a, Rect b) {
-    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+/// The rectangle covering everything that differs between `old` and
+/// `now`; empty when they are equal.
+pub Rect damage(List(DrawOp) old, List(DrawOp) now) { return damage_at(old, now, 0, rect_none()); }
+
+Rect damage_at(List(DrawOp) old, List(DrawOp) now, Int i, Rect acc) {
+    Bool in_old = i < old.len();
+    Bool in_now = i < now.len();
+    if (!in_old && !in_now) { return acc; }
+    if (in_old && in_now) {
+        if (draw_op_eq(old[i], now[i])) { return damage_at(old, now, i + 1, acc); }
+        return damage_at(old, now, i + 1, rect_union(acc, rect_union(diff_bounds(old[i]), diff_bounds(now[i]))));
+    }
+    Rect extra = if (in_old) { diff_bounds(old[i]) } else { diff_bounds(now[i]) };
+    return damage_at(old, now, i + 1, rect_union(acc, extra));
 }
 
-pub Bool color_equal(Color a, Color b) {
-    return a.b == b.b && a.g == b.g && a.r == b.r && a.a == b.a;
+/// The damage as separate rectangles: ops that changed far apart (a
+/// checkbox at the top, a counter at the bottom) stay apart, so a frame
+/// redraws them and not everything between.
+pub List(Rect) damage_rects(List(DrawOp) old, List(DrawOp) now) { return damage_rects_at(old, now, 0, []); }
+
+List(Rect) damage_rects_at(List(DrawOp) old, List(DrawOp) now, Int i, List(Rect) acc) {
+    Bool in_old = i < old.len();
+    Bool in_now = i < now.len();
+    if (!in_old && !in_now) { return acc; }
+    if (in_old && in_now) {
+        if (draw_op_eq(old[i], now[i])) { return damage_rects_at(old, now, i + 1, acc); }
+        return damage_rects_at(old, now, i + 1, rects_add(rects_add(acc, diff_bounds(old[i])), diff_bounds(now[i])));
+    }
+    return damage_rects_at(old, now, i + 1, rects_add(acc, if (in_old) { diff_bounds(old[i]) } else { diff_bounds(now[i]) }));
 }
 
+/// Whether two display lists are the same frame.
 pub Bool draw_lists_equal(List(DrawOp) a, List(DrawOp) b) {
-    return draw_lists_equal_at(a, b, 0);
+    return rect_is_empty(damage(a, b)) && a.len() == b.len();
 }
 
-pub Bool draw_lists_equal_at(List(DrawOp) a, List(DrawOp) b, Int i) {
-    if (a.len() != b.len()) { return false; }
-    if (i >= a.len()) { return true; }
-    return draw_op_equal(a[i], b[i]) && draw_lists_equal_at(a, b, i + 1);
-}
-
-pub Int first_changed_op(List(DrawOp) old, List(DrawOp) now, Int i) {
-    if (i >= old.len() || i >= now.len()) { return -1; }
-    if (!draw_op_equal(old[i], now[i])) { return i; }
-    return first_changed_op(old, now, i + 1);
-}
-
-pub List(Int) changed_ops(List(DrawOp) old, List(DrawOp) now) {
-    List(Int) out = [];
-    Int i = 0;
-    return changed_ops_at(old, now, i, out);
-}
-
-List(Int) changed_ops_at(List(DrawOp) old, List(DrawOp) now, Int i, List(Int) acc) {
-    if (i >= old.len() || i >= now.len()) { return acc; }
-    List(Int) next = if (draw_op_equal(old[i], now[i])) { acc } else { acc.concat([i]) };
-    return changed_ops_at(old, now, i + 1, next);
-}
-
-test "damage sees change" {
-    List(DrawOp) a = [OpFill(Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, Color { .b = 1, .g = 2, .r = 3, .a = 4 })];
-    List(DrawOp) b = [OpFill(Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, Color { .b = 2, .g = 2, .r = 3, .a = 4 })];
-    expect(draw_lists_equal(a, b)).toEqual(false);
-    expect(first_changed_op(a, b, 0)).toEqual(0);
-}
-
-test "equal lists" {
-    List(DrawOp) a = [OpClipPop];
+test "equal frames have no damage" {
+    List(DrawOp) a = [OpFill(Rect { .x = 0, .y = 0, .w = 4, .h = 4 }, rgb(1, 2, 3)), OpClipPop];
+    expect(rect_is_empty(damage(a, a))).toEqual(true);
     expect(draw_lists_equal(a, a)).toEqual(true);
+}
+
+test "a changed op damages its old and new boxes" {
+    List(DrawOp) a = [OpFill(Rect { .x = 0, .y = 0, .w = 2, .h = 2 }, rgb(1, 1, 1))];
+    List(DrawOp) b = [OpFill(Rect { .x = 10, .y = 10, .w = 2, .h = 2 }, rgb(1, 1, 1))];
+    Rect d = damage(a, b);
+    expect(d.x).toEqual(0);
+    expect(d.w).toEqual(12);
+    expect(d.h).toEqual(12);
+}
+
+test "far-apart changes stay separate rectangles" {
+    List(DrawOp) a = [OpText(0, 0, "a", rgb(0, 0, 0)), OpText(0, 500, "b", rgb(0, 0, 0))];
+    List(DrawOp) b = [OpText(0, 0, "x", rgb(0, 0, 0)), OpText(0, 500, "y", rgb(0, 0, 0))];
+    expect(damage_rects(a, b).len()).toEqual(2);
+    expect(damage_rects(a, a).len()).toEqual(0);
+}
+
+test "ops only one frame has are damage, and so are changed clips" {
+    List(DrawOp) a = [OpText(0, 0, "a", rgb(0, 0, 0))];
+    List(DrawOp) b = [OpText(0, 0, "a", rgb(0, 0, 0)), OpText(0, 20, "b", rgb(0, 0, 0))];
+    Rect d = damage(a, b);
+    expect(d.y).toEqual(20);
+    expect(d.h).toEqual(16);
+    Rect c = damage([OpClipPush(Rect { .x = 0, .y = 0, .w = 5, .h = 5 })], [OpClipPush(Rect { .x = 0, .y = 0, .w = 9, .h = 5 })]);
+    expect(c.w).toEqual(9);
 }

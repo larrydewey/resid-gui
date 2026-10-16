@@ -1,21 +1,81 @@
 import "../src/gui.resid";
 
-type TodoModel = { Int count; };
+// A todo list: a text input with an Add button, then one checkbox per item
+// with a remove button, in a scrolling column.
 
-TodoModel todo_init() { return TodoModel { .count = 0 }; }
-TodoModel todo_update_msg(TodoModel m, Msg msg) {
-    return match (msg) { Clicked => TodoModel { .count = m.count + 1 }, _ => m };
-}
-TodoModel todo_update(TodoModel m, Event e) {
-    return match (e) { AppMsg(msg) => todo_update_msg(m, msg), _ => m };
-}
-Widget todo_view(TodoModel m) {
-    return Column([Text("items"), Button("add", Clicked)]);
+type Item = { Str text; Bool done; };
+type Todo = { List(Item) items; Str draft; Int caret; Int scroll; };
+
+// Message numbers: 1 adds the draft, 2 edits it; 1000 + i toggles item
+// i, 2000 + i removes it.
+Msg add() { return Custom(1); }
+Msg draft() { return Custom(2); }
+
+Todo todo_init() {
+    return Todo { .items = [Item { .text = "try resid-gui", .done = true }, Item { .text = "write a program", .done = false }],
+                  .draft = "", .caret = 0, .scroll = 0 };
 }
 
-App(TodoModel) = { .init = todo_init, .update = todo_update, .view = todo_view };
+Todo with_items(Todo t, List(Item) xs) { return Todo { .items = xs, .draft = t.draft, .caret = t.caret, .scroll = t.scroll }; }
 
-@requires(display)
+Todo add_draft(Todo t) {
+    if (str_len(str_trim(t.draft)) == 0) { return t; }
+    return Todo { .items = t.items.concat([Item { .text = str_trim(t.draft), .done = false }]), .draft = "", .caret = 0, .scroll = t.scroll };
+}
+
+List(Item) toggled(List(Item) xs, Int k, Int i, List(Item) acc) {
+    if (i >= xs.len()) { return acc; }
+    Item it = if (i == k) { Item { .text = xs[i].text, .done = !xs[i].done } } else { xs[i] };
+    return toggled(xs, k, i + 1, acc.concat([it]));
+}
+
+List(Item) removed(List(Item) xs, Int k, Int i, List(Item) acc) {
+    if (i >= xs.len()) { return acc; }
+    return removed(xs, k, i + 1, if (i == k) { acc } else { acc.concat([xs[i]]) });
+}
+
+Todo on_msg(Todo t, Msg m) {
+    return match (m) {
+        Custom(n) => if (n == 1) { add_draft(t) } else { if (n >= 2000) { with_items(t, removed(t.items, n - 2000, 0, [])) } else { if (n >= 1000) { with_items(t, toggled(t.items, n - 1000, 0, [])) } else { t } } },
+        _ => t
+    };
+}
+
+Int clamp_scroll(Todo t, Int v) {
+    Int most = t.items.len() * 32;
+    return if (v < 0) { 0 } else { if (v > most) { most } else { v } };
+}
+
+Todo todo_update(Todo t, Event e) {
+    return match (e) {
+        AppMsg(m) => on_msg(t, m),
+        TextEdited(m, s, k) => Todo { .items = t.items, .draft = s, .caret = k, .scroll = t.scroll },
+        Wheel(dx, dy) => Todo { .items = t.items, .draft = t.draft, .caret = t.caret, .scroll = clamp_scroll(t, t.scroll + dy * 32) },
+        _ => t
+    };
+}
+
+List(Widget) rows(List(Item) xs, Int i, List(Widget) acc) {
+    if (i >= xs.len()) { return acc; }
+    Widget row = Row([Checkbox(xs[i].text, xs[i].done, Custom(1000 + i)), Spacer, Button("remove", Custom(2000 + i))]);
+    return rows(xs, i + 1, acc.concat([row]));
+}
+
+Int left(List(Item) xs, Int i, Int acc) {
+    return if (i >= xs.len()) { acc } else { left(xs, i + 1, if (xs[i].done) { acc } else { acc + 1 }) };
+}
+
+Widget todo_view(Todo t) {
+    return Padding(8, Column([
+        Row([TextInput(t.draft, t.caret, add()), Button("Add", add())]),
+        Scroll(t.scroll, Column(rows(t.items, 0, []))),
+        Text(f"{left(t.items, 0, 0)} of {t.items.len()} left")
+    ]));
+}
+
+App(Todo) = { .init = todo_init, .update = todo_update, .view = todo_view };
+
+@requires(display, clock(readonly))
 Int main() {
-    return gui_run(WindowOptions { .title = "Todo", .width = 200, .height = 160, .resizable = true });
+    return gui_run(WindowOptions { .title = "Todo", .width = 360, .height = 300, .resizable = true });
 }

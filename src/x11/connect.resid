@@ -1,118 +1,98 @@
-// connect.resid — opening the connection to the server.
+// connect.resid — opening the connection and talking to the server in
+// round trips.
 //
 // This is the first thing that touches the outside world, so it is the
 // first thing that needs the `display` capability (PLAN-gui.md §3.1). The
-// sequence is fixed: connect to the socket DISPLAY names, send the setup
-// request carrying the authorization cookie, read the reply whole, and
-// parse it. Every step can fail, and every failure is a value.
+// handshake is fixed: send the setup request, read the reply whole (its
+// own length field says how long it is) and parse it. After that, a round
+// trip sends one request and reads until its reply or error arrives;
+// events that come first are dropped, which only happens before the
+// window exists. Every failure is a value.
 
 import "wire.resid";
 import "setup.resid";
-import "stream.resid";
-import "conn.resid";
+import "events.resid";
 
-// The authorization from `~/.Xauthority`: a family, an address, a display
-// number and 16 bytes of cookie. Empty name means the server wants none,
-// which is what a server started without `-auth` accepts.
-type Auth = { Str name; List(Int) data; };
+/// An opened connection: the socket, what the server said about itself,
+/// bytes received but not yet framed, and why it failed, if it did.
+type Session = { Int fd; Setup setup; List(Int) buf; Str err; };
 
-/// No authorization.
-pub Auth auth_none() { return Auth { .name = "", .data = [] }; }
+Session session_failed(Int fd, Str why) { return Session { .fd = fd, .setup = setup_empty(), .buf = [], .err = why }; }
 
-/// The cookie as an `Auth`.
-pub Auth auth_cookie(Str name, List(Int) data) { return Auth { .name = name, .data = data }; }
-
-/// An opened connection: the socket and what the server said about itself.
-type Session = { Int fd; Setup setup; };
-
-/// Connect to the display named in the environment and complete the
-/// handshake. `-1` is returned as the fd when there is no server; the
-/// setup is empty when the reply was not understood.
+/// Connect to the display the environment names and complete the
+/// handshake without authorization, which is what a local server started
+/// without `-auth` (Xwayland, Xephyr, Xnest, a test server) accepts.
 @requires(display)
-pub Session x11_open(Auth auth) {
+pub Session x11_open() {
     Int fd = resid_disp_connect();
-    if (fd < 0) { return Session { .fd = -1, .setup = setup_empty() }; }
-    List(Int) req = setup_request(auth.name, auth.data);
-    if (!resid_disp_send(fd, req, -1)) {
-        _ = resid_disp_close(fd);
-        return Session { .fd = -1, .setup = setup_empty() };
-    }
-    return x11_read_setup(fd);
+    if (fd < 0) { return session_failed(-1, "x11: no display to connect to"); }
+    return x11_handshake(fd);
 }
 
-/// Read the setup reply whole — its own length field says how much of it
-/// there is — and parse it.
+/// The handshake over an already connected socket.
 @requires(display)
-pub Session x11_read_setup(Int fd) {
-    Result(List(Int), Str) first = x11_recv(fd, []);
-    if (!x11_got(first)) { return Session { .fd = fd, .setup = setup_empty() }; }
-    List(Int) head = x11_value(first);
-    if (head.len() < 8) { return Session { .fd = fd, .setup = setup_empty() }; }
-    Int need = 8 + ((half_at(head, 6) & 65535) * 4);
-    Result(List(Int), Str) rest = x11_recv_exact(fd, need, head);
-    if (!x11_got(rest)) { return Session { .fd = fd, .setup = setup_empty() }; }
-    Setup s = setup_parse(x11_value(rest)) else { setup_empty() };
-    return Session { .fd = fd, .setup = s };
+pub Session x11_handshake(Int fd) {
+    if (!resid_disp_send(fd, setup_request("", []), -1)) { return session_failed(fd, "x11: could not send the setup request"); }
+    List(Int) head = recv_until(fd, 8, []);
+    if (head.len() < 8) { return session_failed(fd, "x11: the server closed the connection during setup"); }
+    Int need = 8 + (half_at(head, 6) & 65535) * 4;
+    List(Int) all = recv_until(fd, need, head);
+    if (all.len() < need) { return session_failed(fd, "x11: setup reply cut short"); }
+    return match (setup_parse(all[0..need])) {
+        Ok(s) => Session { .fd = fd, .setup = s, .buf = all[need..all.len()], .err = "" },
+        Err(e) => session_failed(fd, e)
+    };
 }
 
-/// One receive, whatever arrives.
+/// Receive until `buf` holds at least `want` bytes, or the peer closes.
 @requires(display)
-Result(List(Int), Str) x11_recv(Int fd, List(Int) buf) {
+pub List(Int) recv_until(Int fd, Int want, List(Int) buf) {
+    if (buf.len() >= want) { return buf; }
     List(Int) got = resid_disp_recv(fd, 65536);
-    if (got.len() == 0) { return Err("x11: server closed the connection"); }
-    return Ok(buf.concat(got));
+    if (got.len() == 0) { return buf; }
+    return recv_until(fd, want, buf.concat(got));
 }
 
-/// Read until the buffer holds `want` bytes.
+/// What a round trip produced: the reply (empty on failure), the bytes
+/// left in the buffer after it, and the error text when there was one.
+type Reply = { List(Int) msg; List(Int) buf; Str err; };
+
+/// Send `r` and read until its reply or error.
 @requires(display)
-pub Result(List(Int), Str) x11_recv_exact(Int fd, Int want, List(Int) buf) {
-    if (buf.len() >= want) { return Ok(buf); }
-    Result(List(Int), Str) r = x11_recv(fd, buf);
-    if (!x11_got(r)) { return r; }
-    return x11_recv_exact(fd, want, x11_value(r));
+pub Reply x11_call(Int fd, List(Int) r, List(Int) buf) {
+    if (!resid_disp_send(fd, r, -1)) { return Reply { .msg = [], .buf = buf, .err = "x11: send failed" }; }
+    return x11_await(fd, buf);
 }
 
-/// Whether a receive succeeded.
-Bool x11_got(Result(List(Int), Str) r) {
-    return match (r) { Ok(v) => true, Err(e) => false };
-}
-
-/// The bytes of a receive, or an empty list when it failed.
-List(Int) x11_value(Result(List(Int), Str) r) {
-    return match (r) { Ok(v) => v, Err(e) => [] };
-}
-
-/// Close the session. The descriptor is the only thing to release.
+/// Read until a reply or an error arrives.
 @requires(display)
-pub Bool x11_close(Session s) {
-    if (s.fd < 0) { return false; }
-    return resid_disp_close(s.fd);
+pub Reply x11_await(Int fd, List(Int) buf) {
+    XIn m = x_take(buf);
+    if (m.kind == 1) { return Reply { .msg = m.msg, .buf = m.rest, .err = "" }; }
+    if (m.kind == 2) { return Reply { .msg = [], .buf = m.rest, .err = x_error_text(m.msg) }; }
+    if (m.kind == 3) { return x11_await(fd, m.rest); }
+    if (m.kind < 0) { return Reply { .msg = [], .buf = [], .err = "x11: corrupt reply" }; }
+    List(Int) got = resid_disp_recv(fd, 65536);
+    if (got.len() == 0) { return Reply { .msg = [], .buf = buf, .err = "x11: the server closed the connection" }; }
+    return x11_await(fd, buf.concat(got));
+}
+
+/// The 32-bit word at `at` of a reply, or 0.
+pub Int reply_word(Reply r, Int at) { return word_at(r.msg, at) else { 0 }; }
+
+/// The byte at `at` of a reply, or 0.
+pub Int reply_byte(Reply r, Int at) { return if (at >= 0 && at < r.msg.len()) { r.msg[at] } else { 0 }; }
+
+/// Close the session's socket.
+@requires(display)
+pub Bool x11_close_fd(Int fd) {
+    if (fd < 0) { return false; }
+    return resid_disp_close(fd);
 }
 
 test "a session that never connected carries no fd" {
-    Session s = Session { .fd = -1, .setup = setup_empty() };
+    Session s = session_failed(-1, "none");
     expect(s.fd < 0).toEqual(true);
     expect(s.setup.vendor).toEqual("");
-    expect(auth_none().name).toEqual("");
-    expect(auth_none().data.len()).toEqual(0);
-    expect(auth_cookie("MIT-MAGIC-COOKIE-1", [1, 2]).data.len()).toEqual(2);
-}
-
-test "the reply is read whole before it is parsed" {
-    // A reply of the shape a real server sends: eight header bytes whose
-    // length field matches the body, then the body.
-    ListBuf(Int) b = enc_words(enc_new(), [16777216, 16777216, 8388607, 65536]);
-    ListBuf(Int) c = enc_words16(b, [0, 65535]);                     // vendor len, max request
-    ListBuf(Int) d = enc_bytes_list(c, [1, 1, 0, 0, 32, 0, 8, 255], 0);  // screens..max keycode, one byte each
-    ListBuf(Int) u = enc_bytes(d, 4, 0);                            // four unused bytes
-    List(Int) body = pad_to(enc_finish(u), 4);
-    ListBuf(Int) e = enc_words16(enc_byte(enc_byte(enc_new(), 1), 0), [11, 0, (body.len() + 3) / 4]);
-    List(Int) whole = enc_finish(e).concat(body);
-    Setup a = setup_parse(whole) else { setup_empty() };
-    expect(a.id_base).toEqual(16777216);
-    expect(a.id_mask).toEqual(8388607);
-    expect(a.motion_buf).toEqual(65536);
-    expect(a.max_request_len).toEqual(65535);
-    expect(a.screens).toEqual(1);
-    expect(a.formats).toEqual(1);
+    expect(s.err).toEqual("none");
 }

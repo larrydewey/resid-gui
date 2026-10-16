@@ -1,0 +1,582 @@
+// wayland.resid — the Wayland backend: one xdg-shell toplevel, frames
+// through wl_shm.
+//
+// `wl_start` connects, lists the compositor's globals, binds the ones a
+// window needs, creates the surface and toplevel and waits for the first
+// configure. Frames go into two shared-memory buffers: a buffer the
+// compositor holds is busy until its `release`, and a frame callback paces
+// the client to the compositor's refresh, so `wl_ready` is false while
+// either says wait. Input comes from the seat's pointer and keyboard;
+// keys are evdev codes, typed through the US keymap (the compositor's XKB
+// keymap is closed unread).
+//
+// `resid_disp_connect` prefers a Wayland socket and falls back to X11, and
+// does not say which it gave. The first exchange tells them apart: an X
+// server closes a connection whose first byte is not a byte-order mark,
+// and a Wayland compositor answers `get_registry`.
+
+import "../app.resid";
+import "../backend/backend.resid";
+import "../backend/keymap.resid";
+import "../gfx/canvas.resid";
+import "../gfx/color.resid";
+import "../gfx/draw.resid";
+import "wire.resid";
+import "protocol.resid";
+
+/// A global the registry announced.
+type Global = { Int name; Str iface; Int version; };
+
+/// The client's objects, 0 until created.
+type WlObjs = {
+    Int registry; Int compositor; Int shm; Int wm_base; Int seat; Int cursor_mgr;
+    Int surface; Int xdg_surface; Int toplevel; Int pointer; Int keyboard; Int cursor_dev;
+};
+
+/// The two buffers and the frame callback in flight (0 when none).
+type WlBufs = { Int pool0; Int pool1; Int buf0; Int buf1; Slot s0; Slot s1; Int frame_cb; };
+
+/// The window's size: what the compositor last suggested (`cfg_w`,
+/// `cfg_h`, logical, 0 for "choose"), the logical size in use, the buffer
+/// scale, and the device size the buffers have.
+type WlWin = { Bool configured; Int cfg_w; Int cfg_h; Int lw; Int lh; Int scale; Bool resizable; Int dw; Int dh; };
+
+/// Key repeat: the held key, its text, when it next repeats (monotonic
+/// ms, 0 when nothing is held) and the compositor's rate and delay.
+type WlRepeat = { Int key; Str text; Int next; Int rate; Int delay; };
+
+/// The whole connection.
+type Wl = {
+    Int fd; Bool alive; Str err; Int next_id; Int sync_cb; Bool synced;
+    List(Global) globals; WlObjs o; WlBufs bufs; WlWin win; WlRepeat rep;
+    Mods mods; Int px; Int py; List(Int) buf;
+};
+
+WlObjs objs_none() {
+    return WlObjs { .registry = 0, .compositor = 0, .shm = 0, .wm_base = 0, .seat = 0, .cursor_mgr = 0,
+                    .surface = 0, .xdg_surface = 0, .toplevel = 0, .pointer = 0, .keyboard = 0, .cursor_dev = 0 };
+}
+
+WlBufs bufs_none() {
+    return WlBufs { .pool0 = 0, .pool1 = 0, .buf0 = 0, .buf1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0), .frame_cb = 0 };
+}
+
+/// A connection that is not (or no longer) usable. An empty `err` means
+/// there was no Wayland compositor at all, which is not worth reporting.
+pub Wl wl_failed(Str why) {
+    return Wl { .fd = -1, .alive = false, .err = why, .next_id = 2, .sync_cb = 0, .synced = false, .globals = [],
+                .o = objs_none(), .bufs = bufs_none(),
+                .win = WlWin { .configured = false, .cfg_w = 0, .cfg_h = 0, .lw = 1, .lh = 1, .scale = 1, .resizable = true, .dw = 1, .dh = 1 },
+                .rep = WlRepeat { .key = 0, .text = "", .next = 0, .rate = 25, .delay = 600 },
+                .mods = mods_none(), .px = 0, .py = 0, .buf = [] };
+}
+
+// ─── Field updates ──────────────────────────────────────────────────
+
+Wl with_o(Wl w, WlObjs o) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+}
+
+Wl with_bufs(Wl w, WlBufs b) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = b, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+}
+
+Wl with_win(Wl w, WlWin v) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = v, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+}
+
+Wl with_rep(Wl w, WlRepeat r) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = r, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+}
+
+Wl with_input(Wl w, Mods m, Int px, Int py) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = m, .px = px, .py = py, .buf = w.buf };
+}
+
+Wl with_buf(Wl w, List(Int) buf) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = buf };
+}
+
+/// `n` fresh object ids taken.
+Wl with_ids(Wl w, Int n) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id + n, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+}
+
+Wl with_sync(Wl w, Int cb, Bool synced) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = cb, .synced = synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+}
+
+Wl with_globals(Wl w, List(Global) gs) {
+    return Wl { .fd = w.fd, .alive = w.alive, .err = w.err, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = gs, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = w.buf };
+}
+
+Wl dead(Wl w, Str why) {
+    return Wl { .fd = w.fd, .alive = false, .err = why, .next_id = w.next_id, .sync_cb = w.sync_cb, .synced = w.synced,
+                .globals = w.globals, .o = w.o, .bufs = w.bufs, .win = w.win, .rep = w.rep, .mods = w.mods, .px = w.px, .py = w.py, .buf = [] };
+}
+
+// ─── Sending ────────────────────────────────────────────────────────
+
+/// Send each message in order; the connection dies with the first failure.
+@requires(display)
+Wl send(Wl w, List(List(Int)) ms) { return send_at(w, ms, 0); }
+
+@requires(display)
+Wl send_at(Wl w, List(List(Int)) ms, Int i) {
+    if (i >= ms.len() || !w.alive) { return w; }
+    if (!resid_disp_send(w.fd, ms[i], -1)) { return dead(w, "wayland: send failed"); }
+    return send_at(w, ms, i + 1);
+}
+
+// ─── Starting ───────────────────────────────────────────────────────
+
+/// The newest version of `iface` the client speaks, given what the
+/// compositor offers.
+Int want_version(Str iface, Int offered) {
+    Int ours = if (iface == "wl_compositor") { 6 } else { if (iface == "wl_seat") { 5 } else { 1 } };
+    return if (offered < ours) { offered } else { ours };
+}
+
+/// The announced global named `iface`, or one with name 0.
+Global global_of(List(Global) gs, Str iface, Int i) {
+    if (i >= gs.len()) { return Global { .name = 0, .iface = iface, .version = 0 }; }
+    if (gs[i].iface == iface) { return gs[i]; }
+    return global_of(gs, iface, i + 1);
+}
+
+/// Open a toplevel window on the Wayland compositor the environment
+/// names. Not alive, with an empty `err`, when there is none.
+@requires(display, clock(readonly))
+pub Wl wl_start(WindowOptions opts) {
+    Int fd = resid_disp_connect();
+    if (fd < 0) { return wl_failed(""); }
+    return wl_start_on(fd, opts);
+}
+
+/// `wl_start` over a connected socket.
+@requires(display, clock(readonly))
+pub Wl wl_start_on(Int fd, WindowOptions opts) {
+    Wl w0 = wl_failed("");
+    Wl w1 = Wl { .fd = fd, .alive = true, .err = "", .next_id = 4, .sync_cb = 3, .synced = false, .globals = [],
+                 .o = WlObjs { .registry = 2, .compositor = 0, .shm = 0, .wm_base = 0, .seat = 0, .cursor_mgr = 0,
+                               .surface = 0, .xdg_surface = 0, .toplevel = 0, .pointer = 0, .keyboard = 0, .cursor_dev = 0 },
+                 .bufs = w0.bufs,
+                 .win = WlWin { .configured = false, .cfg_w = 0, .cfg_h = 0, .lw = max1(opts.width), .lh = max1(opts.height), .scale = 1,
+                                .resizable = opts.resizable, .dw = 0, .dh = 0 },
+                 .rep = w0.rep, .mods = mods_none(), .px = 0, .py = 0, .buf = [] };
+    Wl w2 = send(w1, [wl_display_get_registry(2), wl_display_sync(3)]);
+    Wl w3 = wait_until(w2, 0);
+    if (!w3.alive) {
+        // A peer that hung up without a word was an X server.
+        _ = resid_disp_close(fd);
+        return wl_failed(if (w3.globals.len() == 0) { "" } else { w3.err });
+    }
+    Global comp = global_of(w3.globals, "wl_compositor", 0);
+    Global shm = global_of(w3.globals, "wl_shm", 0);
+    Global base = global_of(w3.globals, "xdg_wm_base", 0);
+    Global seat = global_of(w3.globals, "wl_seat", 0);
+    Global curs = global_of(w3.globals, "wp_cursor_shape_manager_v1", 0);
+    if (comp.name == 0 || shm.name == 0 || base.name == 0) {
+        _ = resid_disp_close(fd);
+        return wl_failed("wayland: the compositor lacks wl_compositor, wl_shm or xdg_wm_base");
+    }
+    Int id = w3.next_id;
+    // ids: compositor, shm, wm_base, seat, cursor manager, surface,
+    // xdg_surface, toplevel, sync callback
+    List(List(Int)) binds = [
+        wl_registry_bind(2, comp.name, "wl_compositor", want_version("wl_compositor", comp.version), id),
+        wl_registry_bind(2, shm.name, "wl_shm", 1, id + 1),
+        wl_registry_bind(2, base.name, "xdg_wm_base", 1, id + 2)
+    ];
+    List(List(Int)) seat_bind = if (seat.name == 0) { [] } else { [wl_registry_bind(2, seat.name, "wl_seat", want_version("wl_seat", seat.version), id + 3)] };
+    List(List(Int)) curs_bind = if (curs.name == 0) { [] } else { [wl_registry_bind(2, curs.name, "wp_cursor_shape_manager_v1", 1, id + 4)] };
+    Int lw = w3.win.lw;
+    Int lh = w3.win.lh;
+    List(List(Int)) fixed = if (opts.resizable) { [] } else { [xdg_toplevel_set_min_size(id + 7, lw, lh), xdg_toplevel_set_max_size(id + 7, lw, lh)] };
+    List(List(Int)) window = [
+        wl_compositor_create_surface(id, id + 5),
+        xdg_wm_base_get_xdg_surface(id + 2, id + 6, id + 5),
+        xdg_surface_get_toplevel(id + 6, id + 7),
+        xdg_toplevel_set_title(id + 7, opts.title),
+        xdg_toplevel_set_app_id(id + 7, "resid-gui")
+    ];
+    List(List(Int)) finish = [wl_surface_commit(id + 5), wl_display_sync(id + 8)];
+    Wl w4 = with_o(w3, WlObjs { .registry = 2, .compositor = id, .shm = id + 1, .wm_base = id + 2,
+                                .seat = if (seat.name == 0) { 0 } else { id + 3 }, .cursor_mgr = if (curs.name == 0) { 0 } else { id + 4 },
+                                .surface = id + 5, .xdg_surface = id + 6, .toplevel = id + 7, .pointer = 0, .keyboard = 0, .cursor_dev = 0 });
+    Wl w5 = with_sync(with_ids(w4, 9), id + 8, false);
+    Wl w6 = wait_until(send(w5, binds.concat(seat_bind).concat(curs_bind).concat(window).concat(fixed).concat(finish)), 1);
+    if (!w6.alive) {
+        _ = resid_disp_close(fd);
+        return wl_failed(if (str_len(w6.err) > 0) { w6.err } else { "wayland: the compositor did not configure the window" });
+    }
+    return w6;
+}
+
+Int max1(Int v) { return if (v < 1) { 1 } else { v }; }
+
+/// Read and dispatch until the sync callback fires (`what` 0) or the
+/// window is configured with buffers (`what` 1). Five seconds of silence
+/// is a dead compositor.
+@requires(display, clock(readonly))
+Wl wait_until(Wl w, Int what) {
+    if (!w.alive) { return w; }
+    if (what == 0 && w.synced) { return w; }
+    if (what == 1 && w.win.configured && w.win.dw > 0) { return w; }
+    List(Int) ready = resid_disp_poll([w.fd], [1], 5000);
+    Int bits = if (ready.len() > 0) { ready[0] } else { 0 };
+    if ((bits & 1) == 0) { return dead(w, "wayland: the compositor stopped answering"); }
+    List(Int) got = resid_disp_recv(w.fd, 65536);
+    if (got.len() == 0) { return dead(w, "wayland: the compositor closed the connection"); }
+    WlStep s = drain(with_buf(w, w.buf.concat(got)), [], clock_ms());
+    return wait_until(s.w, what);
+}
+
+@requires(clock(readonly))
+Int clock_ms() { return clock.monotonic_ns() / 1000000; }
+
+// ─── Buffers ────────────────────────────────────────────────────────
+
+/// Two buffers of the window's device size, each in its own pool.
+@requires(display)
+Wl alloc_buffers(Wl w) {
+    Int dw = w.win.lw * w.win.scale;
+    Int dh = w.win.lh * w.win.scale;
+    Int bytes = dw * dh * 4;
+    Int h0 = resid_disp_shm_new(bytes);
+    Int h1 = resid_disp_shm_new(bytes);
+    if (h0 == 0 || h1 == 0) {
+        _ = resid_disp_shm_free(h0);
+        _ = resid_disp_shm_free(h1);
+        return dead(w, f"wayland: no shared memory for a {dw}x{dh} window");
+    }
+    Int id = w.next_id;
+    Bool ok = resid_disp_send(w.fd, wl_shm_create_pool(w.o.shm, id, bytes), resid_disp_shm_fd(h0))
+           && resid_disp_send(w.fd, wl_shm_create_pool(w.o.shm, id + 1, bytes), resid_disp_shm_fd(h1));
+    if (!ok) { return dead(w, "wayland: could not share the window's memory"); }
+    Wl w2 = send(with_ids(w, 4), [wl_pool_create_buffer(id, id + 2, 0, dw, dh), wl_pool_create_buffer(id + 1, id + 3, 0, dw, dh)]);
+    WlBufs b = WlBufs { .pool0 = id, .pool1 = id + 1, .buf0 = id + 2, .buf1 = id + 3,
+                        .s0 = slot_new(h0, dw, dh), .s1 = slot_new(h1, dw, dh), .frame_cb = w.bufs.frame_cb };
+    WlWin v = w.win;
+    return with_win(with_bufs(w2, b), WlWin { .configured = v.configured, .cfg_w = v.cfg_w, .cfg_h = v.cfg_h, .lw = v.lw, .lh = v.lh,
+                                              .scale = v.scale, .resizable = v.resizable, .dw = dw, .dh = dh });
+}
+
+/// Destroy both buffers and pools and free their memory.
+@requires(display)
+Wl free_buffers(Wl w) {
+    if (w.bufs.pool0 == 0) { return w; }
+    Wl w2 = send(w, [wl_buffer_destroy(w.bufs.buf0), wl_buffer_destroy(w.bufs.buf1), wl_pool_destroy(w.bufs.pool0), wl_pool_destroy(w.bufs.pool1)]);
+    _ = resid_disp_shm_free(w.bufs.s0.handle);
+    _ = resid_disp_shm_free(w.bufs.s1.handle);
+    return with_bufs(w2, WlBufs { .pool0 = 0, .pool1 = 0, .buf0 = 0, .buf1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0), .frame_cb = w.bufs.frame_cb });
+}
+
+/// The window at logical size `lw` x `lh` and buffer scale `scale`, with
+/// buffers to match.
+@requires(display)
+Wl resize(Wl w, Int lw, Int lh, Int scale) {
+    if (w.bufs.pool0 != 0 && lw == w.win.lw && lh == w.win.lh && scale == w.win.scale) { return w; }
+    Wl w2 = free_buffers(w);
+    WlWin v = w2.win;
+    Wl w3 = with_win(w2, WlWin { .configured = v.configured, .cfg_w = v.cfg_w, .cfg_h = v.cfg_h, .lw = lw, .lh = lh,
+                                 .scale = scale, .resizable = v.resizable, .dw = v.dw, .dh = v.dh });
+    Wl w4 = if (scale != v.scale) { send(w3, [wl_surface_set_buffer_scale(w3.o.surface, scale)]) } else { w3 };
+    return alloc_buffers(w4);
+}
+
+// ─── Receiving ──────────────────────────────────────────────────────
+
+/// What decoding produced.
+type WlStep = { Wl w; List(Event) events; };
+
+/// Wait up to `ms` for the compositor, decode every whole message, and
+/// repeat a held key when its time has come.
+@requires(display, clock(readonly))
+pub Pumped(Wl) wl_pump(Wl w, Int ms0) {
+    if (!w.alive) { return Pumped { .b = w, .events = [] }; }
+    Int now0 = clock_ms();
+    Int until_rep = if (w.rep.key > 0) { if (w.rep.next <= now0) { 0 } else { w.rep.next - now0 } } else { ms0 };
+    Int ms = if (until_rep < ms0) { until_rep } else { ms0 };
+    List(Int) ready = resid_disp_poll([w.fd], [1], ms);
+    Int bits = if (ready.len() > 0) { ready[0] } else { 0 };
+    if ((bits & 8) != 0) { return Pumped { .b = dead(w, "wayland: the connection failed"), .events = [Closed] }; }
+    WlStep s = if ((bits & 1) == 0) { WlStep { .w = w, .events = [] } } else { receive(w) };
+    WlStep r = repeat(s.w, clock_ms(), s.events);
+    return Pumped { .b = r.w, .events = r.events };
+}
+
+@requires(display, clock(readonly))
+WlStep receive(Wl w) {
+    List(Int) got = resid_disp_recv(w.fd, 65536);
+    if (got.len() == 0) { return WlStep { .w = dead(w, "wayland: the compositor closed the connection"), .events = [Closed] }; }
+    return drain(with_buf(w, w.buf.concat(got)), [], clock_ms());
+}
+
+/// The held key again, when its repeat is due.
+WlStep repeat(Wl w, Int now, List(Event) acc) {
+    if (w.rep.key <= 0 || w.rep.rate <= 0 || now < w.rep.next) { return WlStep { .w = w, .events = acc }; }
+    WlRepeat r = w.rep;
+    return WlStep { .w = with_rep(w, WlRepeat { .key = r.key, .text = r.text, .next = now + 1000 / r.rate, .rate = r.rate, .delay = r.delay }),
+                    .events = acc.concat([KeyDown(r.key, r.text)]) };
+}
+
+@requires(display)
+WlStep drain(Wl w, List(Event) acc, Int now) {
+    if (!w.alive) { return WlStep { .w = w, .events = acc }; }
+    WlIn m = wl_take(w.buf);
+    if (m.bad) { return WlStep { .w = dead(w, "wayland: corrupt message from the compositor"), .events = acc.concat([Closed]) }; }
+    if (!m.ok) { return WlStep { .w = w, .events = acc }; }
+    WlStep s = dispatch(with_buf(w, m.rest), m.obj, m.opcode, m.msg, now);
+    return drain(s.w, acc.concat(s.events), now);
+}
+
+WlStep quiet(Wl w) { return WlStep { .w = w, .events = [] }; }
+
+/// One event from the compositor.
+@requires(display)
+WlStep dispatch(Wl w, Int obj, Int op, List(Int) m, Int now) {
+    if (obj == wl_display_id()) {
+        if (op == 0) {
+            WlStr s = wl_str(m, 16);
+            return WlStep { .w = dead(w, f"wayland: protocol error {wl_u32(m, 12)} on object {wl_u32(m, 8)}: {s.s}"), .events = [Closed] };
+        }
+        return quiet(w);
+    }
+    if (obj == w.o.registry) { return quiet(if (op == 0) { on_global(w, m) } else { w }); }
+    if (obj == w.sync_cb && obj != 0) { return quiet(with_sync(w, 0, true)); }
+    if (obj == w.bufs.frame_cb && obj != 0) {
+        WlBufs b = w.bufs;
+        return quiet(with_bufs(w, WlBufs { .pool0 = b.pool0, .pool1 = b.pool1, .buf0 = b.buf0, .buf1 = b.buf1, .s0 = b.s0, .s1 = b.s1, .frame_cb = 0 }));
+    }
+    if (obj == w.o.wm_base && obj != 0) { return quiet(if (op == 0) { send(w, [xdg_wm_base_pong(obj, wl_u32(m, 8))]) } else { w }); }
+    if (obj == w.o.xdg_surface && obj != 0) { return if (op == 0) { on_configure(w, wl_u32(m, 8)) } else { quiet(w) }; }
+    if (obj == w.o.toplevel && obj != 0) {
+        if (op == 0) {
+            WlWin v = w.win;
+            return quiet(with_win(w, WlWin { .configured = v.configured, .cfg_w = wl_i32(m, 8), .cfg_h = wl_i32(m, 12), .lw = v.lw, .lh = v.lh,
+                                              .scale = v.scale, .resizable = v.resizable, .dw = v.dw, .dh = v.dh }));
+        }
+        return WlStep { .w = w, .events = if (op == 1) { [Closed] } else { [] } };
+    }
+    if ((obj == w.bufs.buf0 || obj == w.bufs.buf1) && obj != 0) {
+        WlBufs b = w.bufs;
+        Slot a = if (obj == b.buf0) { slot_released(b.s0) } else { b.s0 };
+        Slot c = if (obj == b.buf1) { slot_released(b.s1) } else { b.s1 };
+        return quiet(with_bufs(w, WlBufs { .pool0 = b.pool0, .pool1 = b.pool1, .buf0 = b.buf0, .buf1 = b.buf1, .s0 = a, .s1 = c, .frame_cb = b.frame_cb }));
+    }
+    if (obj == w.o.seat && obj != 0) { return quiet(if (op == 0) { on_caps(w, wl_u32(m, 8)) } else { w }); }
+    if (obj == w.o.pointer && obj != 0) { return on_pointer(w, op, m); }
+    if (obj == w.o.keyboard && obj != 0) { return on_keyboard(w, op, m, now); }
+    if (obj == w.o.surface && obj != 0 && op == 2) {
+        Int f = wl_i32(m, 8);
+        Int s = if (f < 1) { 1 } else { if (f > 4) { 4 } else { f } };
+        return quiet(if (w.win.configured) { resize(w, w.win.lw, w.win.lh, s) } else { with_scale(w, s) });
+    }
+    return quiet(w);
+}
+
+Wl with_scale(Wl w, Int s) {
+    WlWin v = w.win;
+    return with_win(w, WlWin { .configured = v.configured, .cfg_w = v.cfg_w, .cfg_h = v.cfg_h, .lw = v.lw, .lh = v.lh,
+                               .scale = s, .resizable = v.resizable, .dw = v.dw, .dh = v.dh });
+}
+
+Wl on_global(Wl w, List(Int) m) {
+    WlStr s = wl_str(m, 12);
+    if (s.next < 0) { return w; }
+    return with_globals(w, w.globals.concat([Global { .name = wl_u32(m, 8), .iface = s.s, .version = wl_u32(m, s.next) }]));
+}
+
+/// Acknowledge a configure and adopt the size it suggested: a resizable
+/// window takes any size the compositor names, a fixed one keeps its own.
+@requires(display)
+WlStep on_configure(Wl w, Int serial) {
+    Wl a = send(w, [xdg_surface_ack_configure(w.o.xdg_surface, serial)]);
+    WlWin v = a.win;
+    Int lw = if (v.resizable && v.cfg_w > 0) { v.cfg_w } else { v.lw };
+    Int lh = if (v.resizable && v.cfg_h > 0) { v.cfg_h } else { v.lh };
+    Bool changed = v.configured && (lw != v.lw || lh != v.lh);
+    Wl b = with_win(a, WlWin { .configured = true, .cfg_w = v.cfg_w, .cfg_h = v.cfg_h, .lw = v.lw, .lh = v.lh,
+                               .scale = v.scale, .resizable = v.resizable, .dw = v.dw, .dh = v.dh });
+    Wl c = resize(b, lw, lh, v.scale);
+    return WlStep { .w = c, .events = if (changed) { [Resized(lw * v.scale, lh * v.scale)] } else { [] } };
+}
+
+/// The seat announced its devices: take a pointer and a keyboard.
+@requires(display)
+Wl on_caps(Wl w, Int caps) {
+    Bool want_p = (caps & 1) != 0 && w.o.pointer == 0;
+    Bool want_k = (caps & 2) != 0 && w.o.keyboard == 0;
+    Int id = w.next_id;
+    Int pid = if (want_p) { id } else { w.o.pointer };
+    Int kid = if (want_k) { id + 1 } else { w.o.keyboard };
+    Int cid = if (want_p && w.o.cursor_mgr != 0) { id + 2 } else { w.o.cursor_dev };
+    List(List(Int)) ms = (if (want_p) { [wl_seat_get_pointer(w.o.seat, pid)] } else { [] })
+        .concat(if (want_k) { [wl_seat_get_keyboard(w.o.seat, kid)] } else { [] })
+        .concat(if (want_p && w.o.cursor_mgr != 0) { [cursor_shape_get_pointer(w.o.cursor_mgr, cid, pid)] } else { [] });
+    WlObjs o = w.o;
+    Wl w2 = with_o(with_ids(w, 3), WlObjs { .registry = o.registry, .compositor = o.compositor, .shm = o.shm, .wm_base = o.wm_base,
+                                             .seat = o.seat, .cursor_mgr = o.cursor_mgr, .surface = o.surface, .xdg_surface = o.xdg_surface,
+                                             .toplevel = o.toplevel, .pointer = pid, .keyboard = kid, .cursor_dev = cid });
+    return send(w2, ms);
+}
+
+/// Linux button codes to X11-style numbers: left 1, middle 2, right 3.
+pub Int button_number(Int code) {
+    if (code == 272) { return 1; }
+    if (code == 274) { return 2; }
+    if (code == 273) { return 3; }
+    return code - 264;
+}
+
+@requires(display)
+WlStep on_pointer(Wl w, Int op, List(Int) m) {
+    Int s = w.win.scale;
+    if (op == 0) {
+        Int x = (wl_i32(m, 16) * s) / 256;
+        Int y = (wl_i32(m, 20) * s) / 256;
+        Wl w2 = with_input(w, w.mods, x, y);
+        Wl w3 = if (w.o.cursor_dev != 0) { send(w2, [cursor_shape_set_shape(w.o.cursor_dev, wl_u32(m, 8), wl_cursor_default())]) } else { w2 };
+        return WlStep { .w = w3, .events = [PointerMoved(x, y)] };
+    }
+    if (op == 2) {
+        Int x = (wl_i32(m, 12) * s) / 256;
+        Int y = (wl_i32(m, 16) * s) / 256;
+        return WlStep { .w = with_input(w, w.mods, x, y), .events = [PointerMoved(x, y)] };
+    }
+    if (op == 3) {
+        Int b = button_number(wl_u32(m, 16));
+        return WlStep { .w = w, .events = [if (wl_u32(m, 20) == 1) { PointerDown(w.px, w.py, b) } else { PointerUp(w.px, w.py, b) }] };
+    }
+    if (op == 4) {
+        Int v = wl_i32(m, 16);
+        Int notch = if (v > 0) { 1 } else { if (v < 0) { -1 } else { 0 } };
+        if (notch == 0) { return quiet(w); }
+        return WlStep { .w = w, .events = [if (wl_u32(m, 12) == 0) { Wheel(0, notch) } else { Wheel(notch, 0) }] };
+    }
+    return quiet(w);
+}
+
+@requires(display)
+WlStep on_keyboard(Wl w, Int op, List(Int) m, Int now) {
+    if (op == 0) {
+        // The keymap's descriptor: v1 keeps the US layout and closes it.
+        Int fd = resid_disp_recv_fd();
+        _ = if (fd >= 0) { resid_disp_close(fd) } else { false };
+        return quiet(w);
+    }
+    if (op == 1) { return WlStep { .w = w, .events = [Focused] }; }
+    if (op == 2) { return WlStep { .w = with_rep(w, stop_repeat(w.rep)), .events = [Blurred] }; }
+    if (op == 3) {
+        Int key = wl_u32(m, 16);
+        Bool down = wl_u32(m, 20) == 1;
+        Str text = key_text(key, w.mods);
+        WlRepeat r = w.rep;
+        WlRepeat r2 = if (down) { WlRepeat { .key = if (repeats(key)) { key } else { 0 }, .text = text, .next = now + r.delay, .rate = r.rate, .delay = r.delay } }
+                      else { if (key == r.key) { stop_repeat(r) } else { r } };
+        return WlStep { .w = with_rep(w, r2), .events = [if (down) { KeyDown(key, text) } else { KeyUp(key) }] };
+    }
+    if (op == 4) {
+        Int held = wl_u32(m, 12) | wl_u32(m, 16);
+        Int locked = wl_u32(m, 20);
+        Mods mods = Mods { .shift = (held & 1) != 0, .caps = (locked & 2) != 0, .ctrl = (held & 4) != 0, .alt = (held & 8) != 0 };
+        return quiet(with_input(w, mods, w.px, w.py));
+    }
+    if (op == 5) {
+        WlRepeat r = w.rep;
+        return quiet(with_rep(w, WlRepeat { .key = r.key, .text = r.text, .next = r.next, .rate = wl_i32(m, 8), .delay = wl_i32(m, 12) }));
+    }
+    return quiet(w);
+}
+
+WlRepeat stop_repeat(WlRepeat r) { return WlRepeat { .key = 0, .text = "", .next = 0, .rate = r.rate, .delay = r.delay }; }
+
+/// Whether holding a key repeats it: not for the modifiers.
+Bool repeats(Int key) {
+    return key != key_left_shift() && key != key_right_shift() && key != key_left_ctrl() && key != key_right_ctrl()
+        && key != key_left_alt() && key != key_caps_lock() && key != 100 && key != 125 && key != 126;
+}
+
+// ─── Presenting ─────────────────────────────────────────────────────
+
+/// Whether a frame can go out: configured, not waiting on a frame
+/// callback, and a buffer free.
+pub Bool wl_ready(Wl w) {
+    return w.alive && w.win.configured && w.bufs.pool0 != 0 && w.bufs.frame_cb == 0 && (!w.bufs.s0.busy || !w.bufs.s1.busy);
+}
+
+/// Draw the damaged rectangles of the frame `ops` describes into a free
+/// buffer and commit it, asking for a frame callback.
+@requires(display)
+pub Wl wl_present(Wl w, List(DrawOp) ops, Int scale, List(Rect) damage) {
+    if (!wl_ready(w)) { return w; }
+    WlBufs b = w.bufs;
+    Bool first = !b.s0.busy;
+    Slot s = if (first) { b.s0 } else { b.s1 };
+    List(Rect) rs = slot_need(s, damage, Rect { .x = 0, .y = 0, .w = w.win.dw, .h = w.win.dh });
+    if (rs.len() == 0) { return w; }
+    _ = slot_paint(s, w.win.dw, ops, scale, rs);
+    Int cb = w.next_id;
+    Int buffer = if (first) { b.buf0 } else { b.buf1 };
+    Wl w2 = send(with_ids(w, 1), [wl_surface_attach(w.o.surface, buffer)].concat(damage_msgs(w.o.surface, rs, 0, []))
+        .concat([wl_surface_frame(w.o.surface, cb), wl_surface_commit(w.o.surface)]));
+    Slot sent = slot_sent(s);
+    return with_bufs(w2, WlBufs { .pool0 = b.pool0, .pool1 = b.pool1, .buf0 = b.buf0, .buf1 = b.buf1,
+                                  .s0 = if (first) { sent } else { slot_dirty(b.s0, rs) },
+                                  .s1 = if (first) { slot_dirty(b.s1, rs) } else { sent }, .frame_cb = cb });
+}
+
+List(List(Int)) damage_msgs(Int surface, List(Rect) rs, Int i, List(List(Int)) acc) {
+    if (i >= rs.len()) { return acc; }
+    return damage_msgs(surface, rs, i + 1, acc.concat([wl_surface_damage_buffer(surface, rs[i].x, rs[i].y, rs[i].w, rs[i].h)]));
+}
+
+/// Destroy the window and close the connection.
+@requires(display)
+pub Bool wl_close(Wl w) {
+    if (w.fd < 0) { return false; }
+    Wl w2 = free_buffers(w);
+    Wl w3 = if (w2.o.toplevel != 0) { send(w2, [xdg_toplevel_destroy(w2.o.toplevel), xdg_surface_destroy(w2.o.xdg_surface), wl_surface_destroy(w2.o.surface)]) } else { w2 };
+    return resid_disp_close(w3.fd);
+}
+
+pub Bool wl_alive(Wl w) { return w.alive; }
+pub Int wl_width(Wl w) { return w.win.dw; }
+pub Int wl_height(Wl w) { return w.win.dh; }
+pub Int wl_scale(Wl w) { return w.win.scale; }
+
+Backend(Wl) = {
+    .be_pump = wl_pump, .be_alive = wl_alive, .be_width = wl_width, .be_height = wl_height,
+    .be_scale = wl_scale, .be_ready = wl_ready, .be_present = wl_present, .be_close = wl_close
+};
+
+test "pointer buttons and versions map as the protocol says" {
+    expect(button_number(272)).toEqual(1);
+    expect(button_number(273)).toEqual(3);
+    expect(button_number(274)).toEqual(2);
+    expect(want_version("wl_compositor", 4)).toEqual(4);
+    expect(want_version("wl_compositor", 9)).toEqual(6);
+    expect(want_version("xdg_wm_base", 7)).toEqual(1);
+    expect(repeats(30)).toEqual(true);
+    expect(repeats(42)).toEqual(false);
+}
+
+test "a registry event becomes a global" {
+    List(Int) m = wl_msg(2, 0, wl_words([5]).concat(wl_string([119, 108, 95, 115, 104, 109])).concat(wl_words([2])));
+    Wl w = on_global(wl_failed(""), m);
+    expect(w.globals.len()).toEqual(1);
+    expect(w.globals[0].iface).toEqual("wl_shm");
+    expect(w.globals[0].version).toEqual(2);
+    expect(global_of(w.globals, "wl_shm", 0).name).toEqual(5);
+    expect(global_of(w.globals, "wl_seat", 0).name).toEqual(0);
+}

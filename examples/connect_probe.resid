@@ -1,20 +1,24 @@
-// connect_probe.resid — connect to the server DISPLAY names and print
+// connect_probe.resid — connect to the X server DISPLAY names and print
 // what it said about itself. The smallest end-to-end check there is:
-// everything after this is the same socket.
+// everything after this is the same socket. On a Wayland desktop, run it
+// with WAYLAND_DISPLAY= so the connection goes to Xwayland.
 import "../src/x11/connect.resid";
 
 @requires(display)
 Int main() {
-    Session s = x11_open(auth_none());
-    if (s.fd < 0) {
-        eprintln("no server on DISPLAY");
+    Session s = x11_open();
+    if (s.fd < 0 || str_len(s.err) > 0) {
+        eprintln(if (str_len(s.err) > 0) { s.err } else { "no server on DISPLAY" });
+        _ = x11_close_fd(s.fd);
         return 1;
     }
     println(f"release {s.setup.release}");
     println(f"id base {s.setup.id_base} mask {s.setup.id_mask}");
     println(f"max request {s.setup.max_request_len}");
     println(f"screens {s.setup.screens} formats {s.setup.formats}");
+    println(f"root {s.setup.root} visual {s.setup.root_visual} depth {s.setup.root_depth}");
+    println(f"screen {s.setup.width_px}x{s.setup.height_px} px, {s.setup.width_mm}x{s.setup.height_mm} mm");
     println(f"vendor {s.setup.vendor}");
-    _ = x11_close(s);
+    _ = x11_close_fd(s.fd);
     return 0;
 }

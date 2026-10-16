@@ -1,14 +1,101 @@
-import "../gui.resid";
+// backend.resid — what every display backend provides.
+//
+// The loop in gui.resid is written once against this behavior, and each
+// protocol (X11 in src/x11/, Wayland in src/wayland/) is one instance. A
+// backend value is the whole connection state; every operation takes it
+// and returns the next one. Sizes and coordinates here are device pixels;
+// the loop divides by `be_scale` for the program.
 
-// A backend value carries its protocol connection and surface handles. The
-// shared App loop in gui.resid stands in for the behavior today; this module
-// records the contract that every future backend (Wayland) must implement.
+import "../app.resid";
+import "../gfx/canvas.resid";
+import "../gfx/color.resid";
+import "../gfx/draw.resid";
+import "../gfx/raster.resid";
+
+/// What one wait on the display produced: the backend's next state and
+/// the events decoded, in order.
+type Pumped(B) = { B b; List(Event) events; };
+
+/// A display connection with one window.
 behavior Backend(B) {
-    B connect(WindowOptions opts);
-    Bool present(B b, Int width, Int height);
-    Event next_event(B b, Int fd);
+    /// Wait up to `ms` milliseconds for input, then decode everything that
+    /// arrived. Pointer coordinates and `Resized` are device pixels.
+    Pumped(B) be_pump(B b, Int ms);
+    /// Whether the connection and window still exist.
+    Bool be_alive(B b);
+    /// The window's size in device pixels.
+    Int be_width(B b);
+    Int be_height(B b);
+    /// Device pixels per logical pixel, at least 1.
+    Int be_scale(B b);
+    /// Whether a frame can be presented now: a buffer is free and the
+    /// server is not pacing the client.
+    Bool be_ready(B b);
+    /// Show the frame `ops` describes (logical pixels, drawn at `scale`),
+    /// of which the device rectangles `damage` changed. The backend draws
+    /// only those rectangles, plus whatever the buffer it draws into
+    /// missed while the other buffer was on screen.
+    B be_present(B b, List(DrawOp) ops, Int scale, List(Rect) damage);
+    /// Close the window and the connection.
+    Bool be_close(B b);
 }
 
-test "backend trait is declared" {
-    expect(1).toEqual(1);
+/// Buffers a backend presents from: pixels the server may still be reading
+/// are busy, and each buffer remembers what changed since it was last
+/// written (`stale`), so a present brings it fully up to date.
+pub type Slot = { Int handle; Bool busy; List(Rect) stale; };
+
+/// A free slot over a shared-memory handle, stale everywhere.
+pub Slot slot_new(Int handle, Int w, Int h) {
+    return Slot { .handle = handle, .busy = false, .stale = if (w > 0 && h > 0) { [Rect { .x = 0, .y = 0, .w = w, .h = h }] } else { [] } };
+}
+
+/// The slot after a present wrote it and handed it over.
+pub Slot slot_sent(Slot s) { return Slot { .handle = s.handle, .busy = true, .stale = [] }; }
+
+/// The slot after the server let it go.
+pub Slot slot_released(Slot s) { return Slot { .handle = s.handle, .busy = false, .stale = s.stale }; }
+
+/// The slot after another slot presented `rs`: those pixels are now stale.
+pub Slot slot_dirty(Slot s, List(Rect) rs) { return Slot { .handle = s.handle, .busy = s.busy, .stale = rects_merge(s.stale, rs) }; }
+
+/// What drawing into the slot must cover: the damage and the slot's own
+/// stale pixels, inside `bounds`.
+pub List(Rect) slot_need(Slot s, List(Rect) damage, Rect bounds) { return rects_clip(rects_merge(s.stale, damage), bounds); }
+
+/// Rasterize each rectangle of `rs` from `ops` and copy it into the slot,
+/// whose rows are `stride` pixels wide.
+@requires(display)
+pub Bool slot_paint(Slot s, Int stride, List(DrawOp) ops, Int scale, List(Rect) rs) { return slot_paint_at(s, stride, ops, scale, rs, 0); }
+
+@requires(display)
+Bool slot_paint_at(Slot s, Int stride, List(DrawOp) ops, Int scale, List(Rect) rs, Int i) {
+    if (i >= rs.len()) { return true; }
+    Rect r = rs[i];
+    Canvas c = raster_rect(ops, r, background(), scale);
+    Bool ok = if (r.x == 0 && r.w == stride) {
+        resid_disp_shm_put(s.handle, r.y * stride * 4, c.px, r.w * r.h * 4)
+    } else { put_rows(s.handle, stride, r, c.px, 0) };
+    return ok && slot_paint_at(s, stride, ops, scale, rs, i + 1);
+}
+
+/// Row by row, for a rectangle narrower than the buffer.
+@requires(display)
+Bool put_rows(Int handle, Int stride, Rect r, List(Int) px, Int y) {
+    if (y >= r.h) { return true; }
+    Int n = r.w * 4;
+    if (!resid_disp_shm_put(handle, ((r.y + y) * stride + r.x) * 4, px[(y * n)..((y + 1) * n)], n)) { return false; }
+    return put_rows(handle, stride, r, px, y + 1);
+}
+
+test "a slot goes busy when sent and stale when another is" {
+    Slot s = slot_new(7, 10, 10);
+    expect(s.stale[0].w).toEqual(10);
+    Slot t = slot_sent(s);
+    expect(t.busy).toEqual(true);
+    expect(t.stale.len()).toEqual(0);
+    Slot u = slot_dirty(slot_released(t), [Rect { .x = 1, .y = 1, .w = 2, .h = 2 }]);
+    expect(u.busy).toEqual(false);
+    expect(u.stale[0].w).toEqual(2);
+    expect(slot_need(u, [Rect { .x = 50, .y = 50, .w = 2, .h = 2 }], Rect { .x = 0, .y = 0, .w = 10, .h = 10 }).len()).toEqual(1);
 }

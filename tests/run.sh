@@ -1,9 +1,11 @@
 #!/bin/sh
-# tests/run.sh — every test file in this repository.
+# tests/run.sh — every test file in this repository, then every example.
 #
 # A file with `test` blocks is a test file: `residc test` discovers them at
 # compile time and runs the generated entry point. Files under src/ are
-# libraries, so they are run through their own inline tests here.
+# libraries and run through their own inline tests; tests/ holds the fake
+# X server, the fake Wayland compositor and the golden images. Examples
+# have no tests of their own, so each is type-checked to keep it building.
 
 set -e
 
@@ -18,13 +20,18 @@ fi
 fail=0
 total=0
 
-# src/gui.resid declares the program-facing interface and calls
-# gui_run_x11, which arrives with the X11 backend in G2. It is listed as a
-# skip rather than left to fail: the gap is recorded, not hidden.
 for f in $(find "$ROOT/src" "$ROOT/tests" -name '*.resid' | sort); do
-    rel=${f#"$ROOT"/}
     total=$((total + 1))
     if ! "$RESIDC" test "$f"; then
+        echo "FAILED: ${f#"$ROOT"/}"
+        fail=$((fail + 1))
+    fi
+done
+
+for f in $(find "$ROOT/examples" -name '*.resid' | sort); do
+    total=$((total + 1))
+    if ! "$RESIDC" "$f" --profile check >/dev/null 2>&1; then
+        echo "FAILED to build: ${f#"$ROOT"/}"
         fail=$((fail + 1))
     fi
 done

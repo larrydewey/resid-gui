@@ -1,59 +1,67 @@
-# `src/x11/` — X11 Client
+# `src/x11/` — the X11 backend
 
-Pure Resid implementation of the X11 protocol client. No generated bindings; hand-written encoders/decoders for the minimal request/event set needed for a self-rendering window.
-
-## Modules
+The X Window System protocol spoken directly in Resid: no Xlib, no XCB,
+no generated bindings. Frames go through MIT-SHM when the server offers
+`ShmAttachFd` (MIT-SHM 1.2) and through `PutImage` otherwise.
 
 | Module | Purpose |
-|--------|---------|
-| `connect.resid` | Connection handshake: `x11_open`, `auth_none`, `auth_cookie`, `Setup` parsing |
-| `setup.resid` | `Setup` type and decoder for the server's initial reply |
-| `requests.resid` | Request encoders: `CreateWindow`, `ChangeWindowAttributes`, `MapWindow`, `CreateGC`, `PutImage`, `ShmPutImage`, `InternAtom`, `ChangeProperty`, `QueryExtension` |
-| `events.resid` | Event decoders: `KeyPress`, `KeyRelease`, `ButtonPress`, `ButtonRelease`, `MotionNotify`, `Expose`, `ConfigureNotify`, `ClientMessage` → `Event` |
-| `conn.resid` | `Conn` state: next resource id, atom cache, parsed `Setup` |
-| `wire.resid` | Byte-level encoder (`ListBuf(Int)`) and decoder over `List(Int)` |
-| `stream.resid` | `resid_disp_recv` loop, buffering, event queue |
+|---|---|
+| `wire.resid` | little-endian encoding and bounds-checked decoding; UTF-8 |
+| `setup.resid` | the setup request and reply: ids, screen 0's root, visual, depth and size |
+| `requests.resid` | one encoder per request the client sends |
+| `events.resid` | framing replies, errors and events; decoding events |
+| `stream.resid` | framing requests (what the fake server in tests/ reads) |
+| `connect.resid` | connecting, the handshake, round trips |
+| `x11.resid` | the `X11` state and its `Backend(X11)` instance |
 
-## Types
-
-```resid
-type Setup = { ... }  // parsed server reply
-type Conn  = { Setup setup; Int next_id; Int atom_wm_name; }
-type Session = { Int fd; Setup setup; }
-type Auth = { Str name; List(Int) data; }
-```
-
-## Functions
+## Starting
 
 ```resid
-// connect.resid
-pub Session x11_open(Auth auth)
-pub Auth auth_none()
-pub Auth auth_cookie(Str name, List(Int) data)
-
-// setup.resid
-pub Setup parse_setup(List(Int) bytes)
-pub Int setup_word(List(Int) bs, Int i)
-pub Int setup_word16(List(Int) bs, Int i)
-
-// requests.resid
-pub List(Int) req_create_window(Conn c, Int wid, Int pid, Int x, Int y, Int w, Int h, Int visual, Int mask, List(Int) vals)
-pub List(Int) req_map_window(Int wid)
-pub List(Int) req_create_gc(Conn c, Int gc, Int drawable, Int mask, List(Int) vals)
-pub List(Int) req_put_image(Conn c, Int drawable, Int gc, Int w, Int h, Int x, Int y, Int depth, Int format, List(Int) data)
-pub List(Int) req_shm_put_image(Conn c, Int drawable, Int gc, Int w, Int h, Int x, Int y, Int shmseg, Int offset, Int depth, Int format)
-pub List(Int) req_intern_atom(Conn c, Bool only_if_exists, Str name)
-pub List(Int) req_change_property(Conn c, Int mode, Int window, Int property, Int type, Int format, Int len, List(Int) data)
-
-// events.resid
-pub Event decode_event(List(Int) bytes)  // 32-byte event → Event
-
-// conn.resid
-pub Conn conn_new(Setup s)
-pub Int conn_window_id(Conn c)
-pub Conn conn_advance(Conn c, Int n)
+@requires(display) pub Session x11_open()
+@requires(display) pub Session x11_handshake(Int fd)
+@requires(display) pub X11 x11_start(WindowOptions opts)
+@requires(display) pub X11 x11_start_on(Session s, WindowOptions opts)
 ```
 
-## MIT-SHM
+`x11_start_on` interns `WM_PROTOCOLS`, `WM_DELETE_WINDOW`, `_NET_WM_NAME`
+and `UTF8_STRING`; queries MIT-SHM and its version; creates the window
+(child of the root, the root's depth and visual, no background so exposes
+do not flash) selecting keys, buttons, motion, exposure, structure and
+focus; sets `WM_NAME`, `_NET_WM_NAME`, `WM_CLASS`, `WM_PROTOCOLS` (so the
+close button sends a message instead of killing the connection) and, for
+a fixed-size window, `WM_NORMAL_HINTS`; creates a GC without graphics
+exposures; maps the window; and attaches two segments.
 
-`resid_disp_shm_new(bytes)` creates a shared memory segment. Its fd is passed via `ShmAttachFd` in the `CreateWindow` sequence. Frames are written with `resid_disp_shm_put` and presented with `ShmPutImage` (no socket copy).
+Only depth-24 screens stored at 32 bits per pixel are accepted, which is
+every TrueColor X server in practice.
+
+The connection is made without authorization. Xwayland, Xephyr, Xnest
+and servers started without `-auth` accept that; a server that wants a
+`MIT-MAGIC-COOKIE-1` refuses it, because reading `~/.Xauthority` would
+take filesystem and environment authority a GUI program should not need
+(see the README's open items).
+
+## Requests
+
+`CreateWindow`, `MapWindow`, `DestroyWindow`, `CreateGC`, `FreeGC`,
+`InternAtom`, `ChangeProperty` (8- and 32-bit), `QueryExtension`,
+`PutImage`, `NoOperation`, and MIT-SHM's `QueryVersion`, `AttachFd`,
+`Detach` and `PutImage`. Each test checks the fields at their protocol
+offsets and that the length field matches the bytes.
+
+## Events
+
+`x_take` frames the receive buffer (32 bytes, or 32 plus the reply's
+length; a reply over 1 MB is refused). `x_decode_event` handles
+`KeyPress`/`KeyRelease` (keycode minus 8 is the evdev code),
+`ButtonPress`/`ButtonRelease` (4 to 7 are wheel notches), `MotionNotify`,
+`FocusIn`/`FocusOut`, `Expose` (redrawn on the next present),
+`ConfigureNotify` (new segments at the new size, then `Resized`),
+`ClientMessage` with `WM_DELETE_WINDOW` (`Closed`), `DestroyNotify` and
+`ShmCompletion`. Errors are printed to stderr and the connection goes on.
+
+## Testing
+
+`tests/fake_server.resid` runs `x11_handshake`, `x11_start_on` and
+`x11_present` against a scripted server over a socket pair and checks
+every request it receives.

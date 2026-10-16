@@ -1,0 +1,27 @@
+// state.resid — what the library remembers between frames about the
+// widgets themselves, as opposed to the program's model.
+//
+// Widgets are numbered in pre-order (`node_count` in layout.resid); the
+// numbers name the focused text input and the widget a pointer button went
+// down on. The caret's blink phase lives here too.
+
+/// The library's own widget state.
+pub type UiState = {
+    Int focus;      // the focused TextInput's number, or -1
+    Int pressed;    // the widget the primary button went down on, or -1
+    Bool caret_on;  // the caret's blink phase
+};
+
+/// Nothing focused, nothing pressed, caret visible.
+pub UiState ui_new() { return UiState { .focus = -1, .pressed = -1, .caret_on = true }; }
+
+pub UiState ui_with_focus(UiState u, Int f) { return UiState { .focus = f, .pressed = u.pressed, .caret_on = true }; }
+pub UiState ui_with_pressed(UiState u, Int p) { return UiState { .focus = u.focus, .pressed = p, .caret_on = u.caret_on }; }
+pub UiState ui_with_caret(UiState u, Bool on) { return UiState { .focus = u.focus, .pressed = u.pressed, .caret_on = on }; }
+
+test "state updates one field at a time" {
+    UiState u = ui_with_pressed(ui_with_focus(ui_new(), 3), 5);
+    expect(u.focus).toEqual(3);
+    expect(u.pressed).toEqual(5);
+    expect(ui_with_caret(u, false).caret_on).toEqual(false);
+}

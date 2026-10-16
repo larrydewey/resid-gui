@@ -1,54 +1,111 @@
+// events.resid — what the server sends: replies, errors and events.
+//
+// Every server message is 32 bytes, except a reply, which says at byte 4
+// how many more 4-byte units follow. Framing is therefore pure arithmetic
+// over the receive buffer, and the length is untrusted: a reply claiming
+// more than `max_reply_bytes` ends the connection instead of a read past
+// what arrived or an allocation the server chose.
+
 import "wire.resid";
-import "../gui.resid";
 
-pub Int event_type(List(Int) e) {
-    if (e.len() < 1) { return 0; }
-    return e[0] & 255;
+/// The longest reply the client accepts. Nothing it asks for comes close.
+pub Int max_reply_bytes() { return 1048576; }
+
+/// One message off the front of the buffer. `kind` is 0 when more bytes
+/// are needed, 1 for a reply, 2 for an error, 3 for an event and -1 when
+/// the stream is corrupt.
+type XIn = { Int kind; List(Int) msg; List(Int) rest; };
+
+pub XIn x_take(List(Int) buf) {
+    if (buf.len() < 32) { return XIn { .kind = 0, .msg = [], .rest = buf }; }
+    Int code = buf[0];
+    Int n = if (code == 1) { 32 + 4 * (word_at(buf, 4) else { 0 }) } else { 32 };
+    if (n > max_reply_bytes()) { return XIn { .kind = -1, .msg = [], .rest = buf }; }
+    if (buf.len() < n) { return XIn { .kind = 0, .msg = [], .rest = buf }; }
+    Int kind = if (code == 0) { 2 } else { if (code == 1) { 1 } else { 3 } };
+    return XIn { .kind = kind, .msg = buf[0..n], .rest = buf[n..buf.len()] };
 }
 
-pub Int event_detail(List(Int) e) {
-    if (e.len() < 2) { return 0; }
-    return e[1] & 255;
+/// An event, decoded. Coordinates are window-relative and signed.
+type XEv = XKey(Bool, Int, Int)            // pressed, keycode, modifier state
+         | XButton(Bool, Int, Int, Int)    // pressed, button, x, y
+         | XMotion(Int, Int)
+         | XFocus(Bool)
+         | XExpose(Int, Int, Int, Int)
+         | XConfigure(Int, Int)            // new width, height
+         | XClient(Int, Int)               // message type, first data word
+         | XDestroy
+         | XShmDone(Int)                   // the segment the server finished reading
+         | XOther;
+
+/// A 16-bit field read as a signed coordinate.
+pub Int s16(Int v) { return if (v >= 32768) { v - 65536 } else { v }; }
+
+/// Decode an event; `shm_event` is MIT-SHM's first event code, 0 without
+/// the extension. The top bit of the code marks a `SendEvent` copy, which
+/// decodes the same.
+pub XEv x_decode_event(List(Int) e, Int shm_event) {
+    if (e.len() < 32) { return XOther; }
+    Int t = e[0] & 127;
+    Int x = s16(half_at(e, 24));
+    Int y = s16(half_at(e, 26));
+    if (t == 2 || t == 3) { return XKey(t == 2, e[1], half_at(e, 28)); }
+    if (t == 4 || t == 5) { return XButton(t == 4, e[1], x, y); }
+    if (t == 6) { return XMotion(x, y); }
+    if (t == 9 || t == 10) { return XFocus(t == 9); }
+    if (t == 12) { return XExpose(half_at(e, 8), half_at(e, 10), half_at(e, 12), half_at(e, 14)); }
+    if (t == 17) { return XDestroy; }
+    if (t == 22) { return XConfigure(half_at(e, 20), half_at(e, 22)); }
+    if (t == 33) { return XClient(word_at(e, 8) else { 0 }, word_at(e, 12) else { 0 }); }
+    if (shm_event > 0 && t == shm_event) { return XShmDone(word_at(e, 12) else { 0 }); }
+    return XOther;
 }
 
-pub Int event_u16(List(Int) e, Int off) {
-    if (off < 0 || off + 2 > e.len()) { return 0; }
-    return (e[off] & 255) | ((e[off + 1] & 255) << 8);
+/// An error's code, major and minor opcode, for the diagnostic.
+pub Str x_error_text(List(Int) e) {
+    if (e.len() < 32) { return "x11: short error"; }
+    return f"x11: error {e[1]} on request {e[10]}.{half_at(e, 8)}";
 }
 
-pub Int event_u32(List(Int) e, Int off) {
-    if (off < 0 || off + 4 > e.len()) { return 0; }
-    return (e[off] & 255) | ((e[off + 1] & 255) << 8) | ((e[off + 2] & 255) << 16) | ((e[off + 3] & 255) << 24);
+/// A 32-byte event for tests: `t`, the detail byte, and the 16-bit
+/// fields at the given offsets.
+pub List(Int) event_bytes(Int t, Int detail, List(Int) offsets, List(Int) values) {
+    return event_put(enc_finish(enc_bytes(enc_byte(enc_byte(enc_new(), t), detail), 30, 0)), offsets, values, 0);
 }
 
-pub List(Int) slice_bytes(List(Int) xs, Int start, Int stop, Int i, List(Int) acc) {
-    if (i >= stop || i >= xs.len() || start >= xs.len()) { return acc; }
-    if (start < 0) { return acc; }
-    Int idx = start + i;
-    if (idx >= stop || idx >= xs.len()) { return acc; }
-    return slice_bytes(xs, start, stop, i + 1, acc.concat([xs[idx]]));
+List(Int) event_put(List(Int) e, List(Int) offsets, List(Int) values, Int i) {
+    if (i >= offsets.len()) { return e; }
+    Int o = offsets[i];
+    Int v = values[i];
+    return event_put(e.with(o, v & 255).with(o + 1, (v >> 8) & 255), offsets, values, i + 1);
 }
 
-pub Event decode_event(List(Int) e) {
-    if (e.len() < 32) { return FrameTick; }
-    Int t = event_type(e);
-    Int x = event_u16(e, 24);
-    Int y = event_u16(e, 26);
-    Int sw = event_u16(e, 16);
-    Int sh = event_u16(e, 18);
-    if (t == 2) { return KeyDown(event_detail(e), ""); }
-    if (t == 3) { return KeyUp(event_detail(e)); }
-    if (t == 4) { return PointerDown(x, y, event_detail(e)); }
-    if (t == 5) { return PointerUp(x, y, event_detail(e)); }
-    if (t == 6) { return PointerMoved(x, y); }
-    if (t == 9) { return Focused; }
-    if (t == 10) { return Blurred; }
-    if (t == 22) { return Resized(sw, sh); }
-    if (t == 33) { return Closed; }
-    return FrameTick;
+test "messages are framed by kind and reply length" {
+    List(Int) ev = event_bytes(12, 0, [], []);
+    XIn a = x_take(ev.concat([1, 2]));
+    expect(a.kind).toEqual(3);
+    expect(a.msg.len()).toEqual(32);
+    expect(a.rest.len()).toEqual(2);
+    // A reply with one extra word waits for all 36 bytes.
+    List(Int) rep = event_put(event_bytes(1, 0, [], []), [4], [1], 0);
+    expect(x_take(rep).kind).toEqual(0);
+    expect(x_take(rep.concat([0, 0, 0, 0])).kind).toEqual(1);
+    expect(x_take(rep.concat([0, 0, 0, 0])).msg.len()).toEqual(36);
+    expect(x_take(event_bytes(0, 3, [], [])).kind).toEqual(2);
+    expect(x_take([1, 2, 3]).kind).toEqual(0);
+    // A reply that claims 64 MB is refused.
+    expect(x_take(event_put(event_bytes(1, 0, [], []), [4, 6], [0, 256], 0)).kind).toEqual(-1);
 }
 
-test "event type first byte" {
-    List(Int) e = [33, 0, 0, 0];
-    expect(event_type(e)).toEqual(33);
+test "events decode to their fields" {
+    Bool key = match (x_decode_event(event_bytes(2, 38, [28], [1]), 0)) { XKey(d, k, s) => d && k == 38 && s == 1, _ => false };
+    expect(key).toEqual(true);
+    Bool btn = match (x_decode_event(event_bytes(5, 1, [24, 26], [10, 65535]), 0)) { XButton(d, b, x, y) => !d && b == 1 && x == 10 && y == -1, _ => false };
+    expect(btn).toEqual(true);
+    Bool cfg = match (x_decode_event(event_bytes(22, 0, [20, 22], [300, 200]), 0)) { XConfigure(w, h) => w == 300 && h == 200, _ => false };
+    expect(cfg).toEqual(true);
+    Bool done = match (x_decode_event(event_bytes(77, 0, [12], [5]), 77)) { XShmDone(s) => s == 5, _ => false };
+    expect(done).toEqual(true);
+    Bool sent = match (x_decode_event(event_bytes(128 + 33, 32, [8, 12], [9, 10]), 0)) { XClient(t, d) => t == 9 && d == 10, _ => false };
+    expect(sent).toEqual(true);
 }

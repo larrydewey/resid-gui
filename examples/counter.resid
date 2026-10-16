@@ -1,13 +1,29 @@
 import "../src/gui.resid";
 
+// A model, a pure step and a pure view: the whole program.
 Int counter_init() { return 0; }
-Int counter_update_msg(Int m, Msg msg) { return match (msg) { Clicked => m + 1, _ => m }; }
-Int counter_update(Int m, Event e) { return match (e) { AppMsg(msg) => counter_update_msg(m, msg), _ => m }; }
-Widget counter_view(Int m) { return Column([Text("count: 0"), Button("click me", Clicked)]); }
+
+Int counter_step(Int m, Msg msg) {
+    return match (msg) {
+        Custom(n) => if (n == 1) { m + 1 } else { if (n == 2) { m - 1 } else { 0 } },
+        _ => m
+    };
+}
+
+Int counter_update(Int m, Event e) {
+    return match (e) { AppMsg(msg) => counter_step(m, msg), _ => m };
+}
+
+Widget counter_view(Int m) {
+    return Padding(8, Column([
+        Text(f"count: {m}"),
+        Row([Button("+1", Custom(1)), Button("-1", Custom(2)), Button("reset", Custom(3))])
+    ]));
+}
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display)
+@requires(display, clock(readonly))
 Int main() {
-    return gui_run(WindowOptions { .title = "Counter", .width = 160, .height = 120, .resizable = false });
+    return gui_run(WindowOptions { .title = "Counter", .width = 240, .height = 90, .resizable = true });
 }

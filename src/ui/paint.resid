@@ -1,42 +1,141 @@
-import "../gui.resid";
-import "../gfx/draw.resid";
-import "../gfx/color.resid";
+// paint.resid — a widget tree to a display list.
+//
+// Painting walks the tree in pre-order, asks layout.resid for each child's
+// box, and emits draw ops in logical pixels. The library's `UiState` says
+// which text input has focus (it gets a highlighted border and a caret)
+// and which control is held down.
 
-pub List(DrawOp) paint_widget(Widget w, Rect r) {
+import "../app.resid";
+import "../gfx/color.resid";
+import "../gfx/draw.resid";
+import "layout.resid";
+import "state.resid";
+
+pub Color ink() { return rgb(20, 20, 20); }
+pub Color face() { return rgb(225, 225, 225); }
+pub Color face_down() { return rgb(190, 190, 190); }
+pub Color edge() { return rgb(150, 150, 150); }
+pub Color accent() { return rgb(60, 120, 220); }
+pub Color paper() { return rgb(255, 255, 255); }
+
+/// What painting a subtree produced, and the number of the next widget.
+type Painted = { List(DrawOp) ops; Int next; };
+
+/// The display list for `w` occupying `r`.
+pub List(DrawOp) paint(Widget w, Rect r, UiState ui) { return paint_node(w, r, ui, 0).ops; }
+
+/// `paint` with no focus and nothing pressed.
+pub List(DrawOp) paint_widget(Widget w, Rect r) { return paint(w, r, ui_new()); }
+
+Painted paint_node(Widget w, Rect r, UiState ui, Int id) {
+    List(DrawOp) own = paint_self(w, r, ui, id);
+    List(Widget) kids = children(w);
+    if (kids.len() == 0) { return Painted { .ops = own, .next = id + 1 }; }
+    Painted inner = paint_kids(kids, child_rects(w, r), ui, 0, id + 1, []);
+    List(DrawOp) body = match (w) {
+        Scroll(o, c) => [OpClipPush(r)].concat(inner.ops).concat([OpClipPop]),
+        _ => inner.ops
+    };
+    return Painted { .ops = own.concat(body), .next = inner.next };
+}
+
+Painted paint_kids(List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, List(DrawOp) acc) {
+    if (i >= xs.len() || i >= rs.len()) { return Painted { .ops = acc, .next = id }; }
+    Painted p = paint_node(xs[i], rs[i], ui, id);
+    return paint_kids(xs, rs, ui, i + 1, p.next, acc.concat(p.ops));
+}
+
+/// Text centred vertically in `r`, `dx` pixels in from its left edge.
+DrawOp label(Rect r, Int dx, Str s, Color c) { return OpText(r.x + dx, r.y + (r.h - 16) / 2, s, c); }
+
+/// A one-pixel frame of colour `e` around a fill of colour `f`.
+List(DrawOp) framed(Rect r, Color e, Color f) {
+    return [OpFill(r, e), OpFill(Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 }, f)];
+}
+
+List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id) {
     return match (w) {
-        Text(s) => [OpText(r.x + 4, r.y + 4, s, Color { .b = 0, .g = 0, .r = 0, .a = 255 })],
-        Button(label, _) => [OpFill(r, Color { .b = 210, .g = 210, .r = 210, .a = 255 })].concat([OpText(r.x + 4, r.y + 4, label, Color { .b = 0, .g = 0, .r = 0, .a = 255 })]),
-        Checkbox(label, checked, _) => [OpFill(Rect { .x = r.x, .y = r.y + 2, .w = 12, .h = 12 }, Color { .b = 255, .g = 255, .r = 255, .a = 255 })].concat([OpText(r.x + 20, r.y + 4, label, Color { .b = 0, .g = 0, .r = 0, .a = 255 })]),
-        TextInput(value, _, _) => [OpFill(r, Color { .b = 255, .g = 255, .r = 255, .a = 255 })].concat([OpText(r.x + 4, r.y + 4, value, Color { .b = 0, .g = 0, .r = 0, .a = 255 })]),
-        Row(xs) => paint_row(xs, r, 0),
-        Column(xs) => paint_col(xs, r, 0),
-        Stack(xs) => paint_stack(xs, r, 0),
-        Align(ax, ay, child) => paint_widget(child, Rect { .x = r.x + ax, .y = r.y + ay, .w = r.w, .h = r.h }),
-        Scroll(child) => paint_widget(child, r),
-        Padding(n, child) => paint_widget(child, Rect { .x = r.x + n, .y = r.y + n, .w = r.w - (2 * n), .h = r.h - (2 * n) }),
-        Bitmap(w, h, _) => [OpFill(r, Color { .b = 200, .g = 200, .r = 200, .a = 255 })],
-        Slider(value, _) => [OpFill(Rect { .x = r.x, .y = r.y + (r.h / 2), .w = value, .h = 2 }, Color { .b = 60, .g = 60, .r = 60, .a = 255 })],
-        Spacer => [],
+        Text(s) => [label(r, 4, s, ink())],
+        Button(s, m) => framed(r, edge(), if (ui.pressed == id) { face_down() } else { face() }).concat([label(r, (r.w - str_len(s) * 8) / 2, s, ink())]),
+        Checkbox(s, on, m) => paint_check(r, s, on, ui.pressed == id),
+        TextInput(s, caret, m) => paint_input(r, s, caret, ui.focus == id, ui.caret_on),
+        Slider(v, m) => paint_slider(r, v),
+        Bitmap(bw, bh, px) => [OpImage(r.x, r.y, bw, bh, px)],
         _ => []
     };
 }
 
-List(DrawOp) paint_row(List(Widget) xs, Rect r, Int i) {
-    if (i >= xs.len()) { return []; }
-    Int w = if (xs.len() == 0) { r.w } else { r.w / xs.len() };
-    Rect rr = Rect { .x = r.x + (i * w), .y = r.y, .w = w, .h = r.h };
-    return paint_widget(xs[i], rr).concat(paint_row(xs, r, i + 1));
+List(DrawOp) paint_check(Rect r, Str s, Bool on, Bool down) {
+    Rect b = Rect { .x = r.x + 4, .y = r.y + (r.h - 16) / 2, .w = 16, .h = 16 };
+    List(DrawOp) box = framed(b, if (down) { accent() } else { edge() }, paper());
+    List(DrawOp) mark = if (on) { [OpFill(Rect { .x = b.x + 4, .y = b.y + 4, .w = 8, .h = 8 }, accent())] } else { [] };
+    return box.concat(mark).concat([label(r, 26, s, ink())]);
 }
 
-List(DrawOp) paint_col(List(Widget) xs, Rect r, Int i) {
-    if (i >= xs.len()) { return []; }
-    Int h = if (xs.len() == 0) { r.h } else { r.h / xs.len() };
-    Rect rr = Rect { .x = r.x, .y = r.y + (i * h), .w = r.w, .h = h };
-    return paint_widget(xs[i], rr).concat(paint_col(xs, r, i + 1));
+/// The leftmost character shown when the caret must stay inside `cols`
+/// visible columns.
+pub Int input_scroll(Int caret, Int cols) { return if (caret > cols) { caret - cols } else { 0 }; }
+
+List(DrawOp) paint_input(Rect r, Str s, Int caret0, Bool focused, Bool caret_on) {
+    Int n = str_len(s);
+    Int caret = clamp_int(caret0, 0, n);
+    Rect inner = Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 };
+    Int first = input_scroll(caret, max_int((inner.w - 8) / 8, 0));
+    Int tx = inner.x + 4 - first * 8;
+    Int ty = r.y + (r.h - 16) / 2;
+    List(DrawOp) caret_op = if (focused && caret_on) { [OpFill(Rect { .x = tx + caret * 8, .y = ty, .w = 1, .h = 16 }, ink())] } else { [] };
+    return framed(r, if (focused) { accent() } else { edge() }, paper())
+        .concat([OpClipPush(inner), OpText(tx, ty, s, ink())])
+        .concat(caret_op)
+        .concat([OpClipPop]);
 }
 
+/// The slider value (0 to 100) a pointer at `x` selects in `r`.
+pub Int slider_value_at(Rect r, Int x) {
+    Int track = r.w - 12;
+    if (track <= 0) { return 0; }
+    return clamp_int(((x - r.x - 6) * 100) / track, 0, 100);
+}
 
-List(DrawOp) paint_stack(List(Widget) xs, Rect r, Int i) {
-    if (i >= xs.len()) { return []; }
-    return paint_widget(xs[i], r).concat(paint_stack(xs, r, i + 1));
+List(DrawOp) paint_slider(Rect r, Int v0) {
+    Int v = clamp_int(v0, 0, 100);
+    Int track = max_int(r.w - 12, 0);
+    Int cy = r.y + r.h / 2;
+    Int kx = r.x + (track * v) / 100;
+    return [
+        OpFill(Rect { .x = r.x + 6, .y = cy - 2, .w = track, .h = 4 }, edge()),
+        OpFill(Rect { .x = r.x + 6, .y = cy - 2, .w = (track * v) / 100, .h = 4 }, accent())
+    ].concat(framed(Rect { .x = kx, .y = cy - 8, .w = 12, .h = 16 }, edge(), face()));
+}
+
+test "a button paints a frame and a centred label" {
+    List(DrawOp) ops = paint_widget(Button("ok", Clicked), Rect { .x = 0, .y = 0, .w = 40, .h = 28 });
+    expect(ops.len()).toEqual(3);
+    expect(draw_op_eq(ops[2], OpText(12, 6, "ok", ink()))).toEqual(true);
+}
+
+test "a pressed button and a focused input look different" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 40, .h = 28 };
+    List(DrawOp) up = paint(Button("ok", Clicked), r, ui_new());
+    List(DrawOp) down = paint(Button("ok", Clicked), r, ui_with_pressed(ui_new(), 0));
+    expect(draw_op_eq(up[1], down[1])).toEqual(false);
+    List(DrawOp) blurred = paint(TextInput("hi", 2, Clicked), r, ui_new());
+    List(DrawOp) focused = paint(TextInput("hi", 2, Clicked), r, ui_with_focus(ui_new(), 0));
+    expect(focused.len()).toEqual(blurred.len() + 1);
+}
+
+test "children get their layout boxes and scroll clips" {
+    List(DrawOp) ops = paint_widget(Column([Text("a"), Text("b")]), Rect { .x = 0, .y = 0, .w = 50, .h = 60 });
+    expect(ops.len()).toEqual(2);
+    expect(draw_op_eq(ops[1], OpText(4, 32, "b", ink()))).toEqual(true);
+    List(DrawOp) sc = paint_widget(Scroll(4, Text("a")), Rect { .x = 0, .y = 0, .w = 50, .h = 10 });
+    expect(sc.len()).toEqual(3);
+    expect(draw_op_eq(sc[0], OpClipPush(Rect { .x = 0, .y = 0, .w = 50, .h = 10 }))).toEqual(true);
+}
+
+test "the slider maps pointer to value" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 112, .h = 24 };
+    expect(slider_value_at(r, 0)).toEqual(0);
+    expect(slider_value_at(r, 56)).toEqual(50);
+    expect(slider_value_at(r, 500)).toEqual(100);
 }

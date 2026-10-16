@@ -1,60 +1,86 @@
+// canvas.resid — a frame's pixels and the writes that change them.
+//
+// A canvas is `w * h` pixels of four bytes each in the order a window
+// server reads them: blue, green, red, alpha (ARGB32, little-endian). Every
+// write threads the pixel list through a tail call and replaces elements
+// with `with`, which the compiler does in place because the old list is
+// dead afterwards; nothing here copies the frame per pixel.
+
 import "color.resid";
 
-// A linear pixel builder over ARGB32 bytes, stored BGRA.
+/// A frame: its size and its pixels, four bytes each.
 pub type Canvas = { Int w; Int h; List(Int) px; };
 
+/// A colour as one 32-bit ARGB word.
 pub Int color_pack(Color c) {
-    return (c.a << 24) | (c.r << 16) | (c.g << 8) | c.b;
+    return ((c.a & 255) << 24) | ((c.r & 255) << 16) | ((c.g & 255) << 8) | (c.b & 255);
 }
 
+/// A canvas of the given size, every pixel transparent black.
 pub Canvas canvas_new(Int ww, Int hh) {
-    return Canvas { .w = ww, .h = hh, .px = canvas_fill(0, ww * hh * 4, []) };
+    Int w = if (ww < 0) { 0 } else { ww };
+    Int h = if (hh < 0) { 0 } else { hh };
+    ListBuf(Int) b = ListBuf();
+    return Canvas { .w = w, .h = h, .px = canvas_fill(0, w * h * 4, b) };
 }
 
-pub List(Int) canvas_fill(Int i, Int n, List(Int) acc) {
-    if (i >= n) { return acc; }
-    return canvas_fill(i + 1, n, acc.concat([0]));
+/// `n` zero bytes.
+pub List(Int) canvas_fill(Int i, Int n, ListBuf(Int) acc) {
+    if (i >= n) { return acc.finish(); }
+    return canvas_fill(i + 1, n, acc.push(0));
 }
 
-pub List(Int) set_byte(List(Int) xs, Int i, Int v) {
-    if (i < 0 || i >= xs.len()) { return xs; }
-    return set_byte_at(xs, i, v, 0, []);
-}
+/// The whole canvas as a rectangle.
+pub Rect canvas_bounds(Canvas c) { return Rect { .x = 0, .y = 0, .w = c.w, .h = c.h }; }
 
-pub List(Int) set_byte_at(List(Int) xs, Int i, Int v, Int j, List(Int) acc) {
-    if (j >= xs.len()) { return acc; }
-    Int byte = if (j == i) { v & 255 } else { xs[j] & 255 };
-    return set_byte_at(xs, i, v, j + 1, acc.concat([byte]));
-}
-
+/// Fill a rectangle, clipped to the canvas.
 pub Canvas fill_rect(Canvas c, Rect r, Color col) {
+    return fill_rect_clip(c, r, col, canvas_bounds(c));
+}
+
+/// Fill a rectangle, clipped to `clip` and to the canvas.
+pub Canvas fill_rect_clip(Canvas c, Rect r, Color col, Rect clip) {
+    Rect a = rect_intersect(rect_intersect(r, clip), canvas_bounds(c));
+    if (rect_is_empty(a)) { return c; }
     Int ww = c.w;
     Int hh = c.h;
-    List(Int) px = fill_rect_loop(c, r, col, 0, 0, c.px, ww, hh);
+    List(Int) px = fill_rows(c.px, ww, a, col.b & 255, col.g & 255, col.r & 255, col.a & 255, a.y, a.x);
     return Canvas { .w = ww, .h = hh, .px = px };
 }
 
-List(Int) fill_rect_loop(Canvas c, Rect r, Color col, Int y, Int x, List(Int) px, Int ww, Int hh) {
-    if (y >= r.h) { return px; }
-    if (y < 0) { return fill_rect_loop(c, r, col, y + 1, 0, px, ww, hh); }
-    Int yy = r.y + y;
-    if (yy < 0 || yy >= hh) { return fill_rect_loop(c, r, col, y + 1, 0, px, ww, hh); }
-    return fill_rect_row(c, r, col, yy, x, px, y, ww);
+List(Int) fill_rows(List(Int) px, Int ww, Rect a, Int b, Int g, Int r, Int al, Int y, Int x) {
+    if (y >= a.y + a.h) { return px; }
+    if (x >= a.x + a.w) { return fill_rows(px, ww, a, b, g, r, al, y + 1, a.x); }
+    Int i = (y * ww + x) * 4;
+    return fill_rows(px.with(i, b).with(i + 1, g).with(i + 2, r).with(i + 3, al), ww, a, b, g, r, al, y, x + 1);
 }
 
-List(Int) fill_rect_row(Canvas c, Rect r, Color col, Int yy, Int x, List(Int) px, Int y, Int ww) {
-    if (x >= r.w) { return fill_rect_loop(c, r, col, y + 1, 0, px, ww, c.h); }
-    if (x < 0) { return fill_rect_row(c, r, col, yy, x + 1, px, y, ww); }
-    Int xx = r.x + x;
-    if (xx < 0 || xx >= ww) { return fill_rect_row(c, r, col, yy, x + 1, px, y, ww); }
-    Int base = (yy * ww + xx) * 4;
-    List(Int) p2 = set_byte(px, base + 0, col.b);
-    List(Int) p3 = set_byte(p2, base + 1, col.g);
-    List(Int) p4 = set_byte(p3, base + 2, col.r);
-    List(Int) p5 = set_byte(p4, base + 3, col.a);
-    return fill_rect_row(c, r, col, yy, x + 1, p5, y, ww);
+/// One pixel, when it lies inside `clip` and the canvas.
+pub Canvas set_pixel_clip(Canvas c, Int x, Int y, Color col, Rect clip) {
+    if (x < 0 || y < 0 || x >= c.w || y >= c.h || !rect_contains(clip, x, y)) { return c; }
+    Int i = (y * c.w + x) * 4;
+    Int ww = c.w;
+    Int hh = c.h;
+    return Canvas { .w = ww, .h = hh, .px = c.px.with(i, col.b & 255).with(i + 1, col.g & 255).with(i + 2, col.r & 255).with(i + 3, col.a & 255) };
 }
 
+/// The colour of one pixel; transparent black outside the canvas.
+pub Color pixel_at(Canvas c, Int x, Int y) {
+    if (x < 0 || y < 0 || x >= c.w || y >= c.h) { return Color { .b = 0, .g = 0, .r = 0, .a = 0 }; }
+    Int i = (y * c.w + x) * 4;
+    return Color { .b = c.px[i], .g = c.px[i + 1], .r = c.px[i + 2], .a = c.px[i + 3] };
+}
+
+/// The bytes of rows `y0` up to (not including) `y1`, the band a damaged
+/// rectangle needs uploaded.
+pub List(Int) canvas_rows(Canvas c, Int y0, Int y1) {
+    Int a = if (y0 < 0) { 0 } else { y0 };
+    Int b = if (y1 > c.h) { c.h } else { y1 };
+    if (b <= a) { return []; }
+    return c.px[(a * c.w * 4)..(b * c.w * 4)];
+}
+
+/// The pixel bytes, for presenting or encoding.
 pub List(Int) finish(Canvas c) { return c.px; }
 
 test "canvas allocates" {
@@ -62,7 +88,7 @@ test "canvas allocates" {
     expect(c.px.len()).toEqual(48);
 }
 
-test "fill_rect writes" {
+test "fill_rect writes inside and only inside" {
     Canvas c0 = canvas_new(4, 3);
     Color col = Color { .b = 1, .g = 2, .r = 3, .a = 4 };
     Canvas c1 = fill_rect(c0, Rect { .x = 1, .y = 1, .w = 2, .h = 1 }, col);
@@ -72,6 +98,26 @@ test "fill_rect writes" {
     expect(c1.px[base + 2]).toEqual(3);
     expect(c1.px[base + 3]).toEqual(4);
     expect(c1.px[0]).toEqual(0);
+    expect(c1.px[(1 * 4 + 3) * 4]).toEqual(0);
+}
+
+test "fill_rect clips to the canvas and to the clip" {
+    Canvas c0 = canvas_new(4, 4);
+    Color col = rgb(9, 9, 9);
+    Canvas c1 = fill_rect(c0, Rect { .x = -2, .y = -2, .w = 100, .h = 100 }, col);
+    expect(pixel_at(c1, 3, 3).r).toEqual(9);
+    Canvas c2 = fill_rect_clip(canvas_new(4, 4), Rect { .x = 0, .y = 0, .w = 4, .h = 4 }, col, Rect { .x = 1, .y = 1, .w = 1, .h = 1 });
+    expect(pixel_at(c2, 1, 1).r).toEqual(9);
+    expect(pixel_at(c2, 0, 0).r).toEqual(0);
+    expect(pixel_at(c2, 2, 2).r).toEqual(0);
+}
+
+test "rows are bands of the frame" {
+    Canvas c = fill_rect(canvas_new(2, 3), Rect { .x = 0, .y = 1, .w = 2, .h = 1 }, rgb(5, 6, 7));
+    List(Int) band = canvas_rows(c, 1, 2);
+    expect(band.len()).toEqual(8);
+    expect(band[2]).toEqual(5);
+    expect(canvas_rows(c, 2, 1).len()).toEqual(0);
 }
 
 test "finish" {

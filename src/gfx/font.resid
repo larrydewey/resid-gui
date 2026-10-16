@@ -1,7 +1,5 @@
 import "color.resid";
 
-pub Int color_dummy() { return 0; }
-Int font_dummy() { return 0; }
 
 // ─── Built-in bitmap font (fallback when native font unavailable) ───
 
@@ -17,6 +15,13 @@ List(Int) slice_at(List(Int) xs, Int start, Int n, Int i, List(Int) acc) {
     return slice_at(xs, start, n, i + 1, acc.concat([xs[start + i]]));
 }
 
+/// Row `row` (0-15) of the built-in glyph for `code`: one byte, the
+/// leftmost pixel in the high bit. Codes outside printable ASCII are blank.
+pub Int glyph_row(Int code, Int row) {
+    if (code < 32 || code > 126 || row < 0 || row > 15) { return 0; }
+    return font_data()[(code - 32) * 16 + row];
+}
+
 pub List(Int) glyph_rows(Int code) {
     if (code < 32 || code > 126) { return [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]; }
     Int base = (code - 32) * 16;
@@ -25,9 +30,8 @@ pub List(Int) glyph_rows(Int code) {
 
 pub type Glyph = { List(Int) rows; };
 pub Glyph glyph_for(Int code) { return Glyph { .rows = glyph_rows(code) }; }
-pub Int text_width(Str s) { return s.len() * 8; }
+pub Int text_width(Str s) { return str_len(s) * 8; }
 pub Int text_height() { return 16; }
-Int fdummy() { return 0; }
 
 test "font data len" { List(Int) xs = font_data(); expect(xs.len()).toEqual(1520); }
 test "glyph rows len" { List(Int) rs = glyph_rows(65); expect(rs.len()).toEqual(16); }

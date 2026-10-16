@@ -1,16 +1,66 @@
+// draw.resid — display lists: a frame described as values.
+//
+// `paint` turns a widget tree into a list of these, and the rasterizer
+// replays the list into a canvas. Because a draw op is a plain value, two
+// frames can be compared op by op; that comparison is the damage tracker.
+
 import "color.resid";
+import "font.resid";
 
-
-
+/// One drawing instruction, in logical pixels. `OpImage(x, y, w, h, px)`
+/// copies a `w` x `h` image of blue-green-red-alpha bytes. `OpClipPush` narrows every later op to its
+/// rectangle (intersected with the clip already in force) until the
+/// matching `OpClipPop`.
 pub type DrawOp =
     OpFill(Rect, Color) |
     OpText(Int, Int, Str, Color) |
+    OpImage(Int, Int, Int, Int, List(Int)) |
     OpClipPush(Rect) |
     OpClipPop;
 
+/// A frame's display list.
 pub type DrawList = List(DrawOp);
 
-test "draw rect" {
-    Rect r = Rect { .x = 0, .y = 0, .w = 1, .h = 1 };
-    expect(r.w).toEqual(1);
+/// The pixels an op can change; empty for the clip ops, which change none.
+pub Rect op_bounds(DrawOp op) {
+    return match (op) {
+        OpFill(r, c) => r,
+        OpText(x, y, s, c) => Rect { .x = x, .y = y, .w = text_width(s), .h = text_height() },
+        OpImage(x, y, w, h, px) => Rect { .x = x, .y = y, .w = w, .h = h },
+        OpClipPush(r) => rect_none(),
+        OpClipPop => rect_none()
+    };
+}
+
+/// Op-by-op equality.
+pub Bool draw_op_eq(DrawOp a, DrawOp b) {
+    return match (a) {
+        OpFill(ra, ca) => match (b) { OpFill(rb, cb) => rect_eq(ra, rb) && color_eq(ca, cb), _ => false },
+        OpText(xa, ya, sa, ca) => match (b) { OpText(xb, yb, sb, cb) => xa == xb && ya == yb && sa == sb && color_eq(ca, cb), _ => false },
+        OpImage(xa, ya, wa, ha, pa) => match (b) { OpImage(xb, yb, wb, hb, pb) => xa == xb && ya == yb && wa == wb && ha == hb && bytes_eq(pa, pb), _ => false },
+        OpClipPush(ra) => match (b) { OpClipPush(rb) => rect_eq(ra, rb), _ => false },
+        OpClipPop => match (b) { OpClipPop => true, _ => false }
+    };
+}
+
+/// Element-wise equality of two byte lists.
+pub Bool bytes_eq(List(Int) a, List(Int) b) {
+    if (a.len() != b.len()) { return false; }
+    return bytes_eq_at(a, b, 0);
+}
+
+Bool bytes_eq_at(List(Int) a, List(Int) b, Int i) {
+    if (i >= a.len()) { return true; }
+    if (a[i] != b[i]) { return false; }
+    return bytes_eq_at(a, b, i + 1);
+}
+
+test "an op's bounds are what it can touch" {
+    Rect r = op_bounds(OpText(2, 3, "ab", rgb(0, 0, 0)));
+    expect(r.x).toEqual(2);
+    expect(r.w).toEqual(16);
+    expect(r.h).toEqual(16);
+    expect(rect_is_empty(op_bounds(OpClipPop))).toEqual(true);
+    expect(draw_op_eq(OpClipPop, OpClipPop)).toEqual(true);
+    expect(draw_op_eq(OpFill(r, rgb(1, 1, 1)), OpFill(r, rgb(1, 1, 2)))).toEqual(false);
 }

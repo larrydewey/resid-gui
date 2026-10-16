@@ -1,317 +1,201 @@
-import "../gui.resid";
+// layout.resid — where every widget goes.
+//
+// One function decides geometry, and both painting and hit testing ask it,
+// so what is drawn and what is clicked can never disagree. Layout is
+// natural-size: each widget has a preferred size; a `Row` or `Column`
+// gives each child its preferred extent along its axis, then shares what
+// is left equally among the children that stretch (`Spacer`, `TextInput`,
+// `Slider`, `Scroll`, `Align`, and containers holding one of those). Across the
+// axis, a child gets the whole box.
+
+import "../app.resid";
 import "../gfx/color.resid";
 
+/// A width and a height in logical pixels.
 pub type Size = { Int w; Int h; };
 
-pub type Constraints = { Int minw; Int maxw; Int minh; Int maxh; };
+/// The space between the children of a `Row` or a `Column`.
+pub Int gap() { return 4; }
 
-pub type LayoutNode = {
-    Widget widget;
-    Rect rect;
-    List(LayoutNode) children;
-};
+/// The height of one line of controls: 16-pixel text plus padding.
+pub Int line_h() { return 24; }
 
-pub Constraints constraints_all(Int minw, Int maxw, Int minh, Int maxh) {
-    return Constraints { .minw = minw, .maxw = maxw, .minh = minh, .maxh = maxh };
-}
-
-pub Int clamp_int(Int v, Int lo, Int hi) {
-    if (v < lo) { return lo; }
-    if (v > hi) { return hi; }
-    return v;
-}
-
-pub Int desired_width(Widget w) {
+/// A widget's preferred size.
+pub Size pref_size(Widget w) {
     return match (w) {
-        Text(s) => str_len_proxy(s) * 8 + 8,
-        Button(label, _) => str_len_proxy(label) * 8 + 16,
-        Checkbox(label, _, _) => str_len_proxy(label) * 8 + 28,
-        TextInput(v, _, _) => if (v.len() * 8 + 8 < 40) { 40 } else { v.len() * 8 + 8 },
-        Stack(xs) => max_desired_width(xs),
-        Align(_, _, child) => desired_width(child),
-        Scroll(child) => desired_width(child),
-        Bitmap(w, _, _) => w,
-        Slider(_, _) => 100,
-        Spacer => 0,
-        Padding(n, child) => desired_width(child) + (2 * n),
-        Row(xs) => sum_desired_width(xs, xs.len()) + ((xs.len() - 1) * 2),
-        Column(xs) => max_desired_width(xs),
-        _ => 10
+        Text(s) => Size { .w = str_len(s) * 8 + 8, .h = line_h() },
+        Button(s, m) => Size { .w = str_len(s) * 8 + 20, .h = line_h() + 4 },
+        Checkbox(s, c, m) => Size { .w = str_len(s) * 8 + 30, .h = line_h() },
+        TextInput(s, k, m) => Size { .w = max_int(str_len(s) * 8 + 12, 120), .h = line_h() + 4 },
+        Row(xs) => Size { .w = sum_w(xs, 0, 0) + gaps(xs), .h = max_h(xs, 0, 0) },
+        Column(xs) => Size { .w = max_w(xs, 0, 0), .h = sum_h(xs, 0, 0) + gaps(xs) },
+        Stack(xs) => Size { .w = max_w(xs, 0, 0), .h = max_h(xs, 0, 0) },
+        Padding(n, c) => pad_size(pref_size(c), n),
+        Align(ax, ay, c) => pref_size(c),
+        Scroll(o, c) => pref_size(c),
+        Bitmap(bw, bh, px) => Size { .w = max_int(bw, 0), .h = max_int(bh, 0) },
+        Slider(v, m) => Size { .w = 120, .h = line_h() },
+        Spacer => Size { .w = 0, .h = 0 }
     };
 }
 
-pub Int desired_height(Widget w) {
+Size pad_size(Size s, Int n) { return Size { .w = s.w + 2 * n, .h = s.h + 2 * n }; }
+
+pub Int max_int(Int a, Int b) { return if (a > b) { a } else { b }; }
+pub Int min_int(Int a, Int b) { return if (a < b) { a } else { b }; }
+pub Int clamp_int(Int v, Int lo, Int hi) { return if (v < lo) { lo } else { if (v > hi) { hi } else { v } }; }
+
+Int gaps(List(Widget) xs) { return if (xs.len() > 1) { (xs.len() - 1) * gap() } else { 0 }; }
+Int sum_w(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { sum_w(xs, i + 1, acc + pref_size(xs[i]).w) }; }
+Int sum_h(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { sum_h(xs, i + 1, acc + pref_size(xs[i]).h) }; }
+Int max_w(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { max_w(xs, i + 1, max_int(acc, pref_size(xs[i]).w)) }; }
+Int max_h(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { max_h(xs, i + 1, max_int(acc, pref_size(xs[i]).h)) }; }
+
+/// Whether a widget takes leftover width in a `Row`.
+pub Bool stretches_x(Widget w) {
     return match (w) {
-        Text(_) => 16,
-        Button(_, _) => 24,
-        Checkbox(_, _, _) => 20,
-        TextInput(_, _, _) => 24,
-        Stack(xs) => max_desired_height(xs),
-        Align(_, _, child) => desired_height(child),
-        Scroll(child) => desired_height(child),
-        Bitmap(_, h, _) => h,
-        Slider(_, _) => 16,
-        Spacer => 0,
-        Padding(n, child) => desired_height(child) + (2 * n),
-        Row(xs) => max_desired_height(xs),
-        Column(xs) => sum_desired_height(xs) + ((xs.len() - 1) * 2),
-        _ => 10
+        Spacer => true,
+        TextInput(s, k, m) => true,
+        Slider(v, m) => true,
+        Scroll(o, c) => true,
+        Align(ax, ay, c) => true,
+        Row(xs) => any_x(xs, 0),
+        Column(xs) => any_x_across(xs, 0),
+        Stack(xs) => any_x_across(xs, 0),
+        Padding(n, c) => stretches_x(c),
+        _ => false
     };
 }
 
-Int str_len_proxy(Str s) { return s.len(); }
-
-Int sum_desired_width(List(Widget) xs, Int i) { return sum_desired_width_at(xs, i, 0); }
-Int sum_desired_width_at(List(Widget) xs, Int n, Int i) {
-    if (i >= n) { return 0; }
-    return desired_width(xs[i]) + sum_desired_width_at(xs, n, i + 1);
-}
-Int max_desired_width(List(Widget) xs) { return max_desired_width_at(xs, xs.len(), 0, 0); }
-Int max_desired_width_at(List(Widget) xs, Int n, Int i, Int acc) {
-    if (i >= n) { return acc; }
-    Int d = desired_width(xs[i]);
-    Int next = if (d > acc) { d } else { acc };
-    return max_desired_width_at(xs, n, i + 1, next);
-}
-Int max_desired_height(List(Widget) xs) { return max_desired_height_at(xs, xs.len(), 0, 0); }
-Int max_desired_height_at(List(Widget) xs, Int n, Int i, Int acc) {
-    if (i >= n) { return acc; }
-    Int d = desired_height(xs[i]);
-    Int next = if (d > acc) { d } else { acc };
-    return max_desired_height_at(xs, n, i + 1, next);
-}
-Int sum_desired_height(List(Widget) xs) { return sum_desired_height_at(xs, xs.len(), 0); }
-Int sum_desired_height_at(List(Widget) xs, Int n, Int i) {
-    if (i >= n) { return 0; }
-    return desired_height(xs[i]) + sum_desired_height_at(xs, n, i + 1);
-}
-
-pub LayoutNode layout(Widget w, Constraints c) {
-    if (match (w) { Row(xs) => true, _ => false }) {
-        return layout_row(w, c);
-    }
-    if (match (w) { Column(xs) => true, _ => false }) {
-        return layout_col(w, c);
-    }
-    if (match (w) { Stack(xs) => true, _ => false }) {
-        return layout_stack(w, c);
-    }
-    if (match (w) { Align(ax, ay, child) => true, _ => false }) {
-        return layout_align(w, c);
-    }
-    if (match (w) { Padding(n, child) => true, _ => false }) {
-        return layout_padding(w, c);
-    }
-    if (match (w) { Scroll(child) => true, _ => false }) {
-        Widget ch = child_of(w);
-        LayoutNode n = layout(ch, c);
-        return LayoutNode { .widget = w, .rect = n.rect, .children = n.children };
-    }
-    if (match (w) { Spacer => true, _ => false }) {
-        return layout_spacer(w, c);
-    }
-    Int dw = desired_width(w);
-    Int dh = desired_height(w);
-    Int rw = clamp_int(dw, c.minw, c.maxw);
-    Int rh = clamp_int(dh, c.minh, c.maxh);
-    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [] };
-}
-
-LayoutNode layout_padding(Widget w, Constraints c) {
+/// Whether a widget takes leftover height in a `Column`.
+pub Bool stretches_y(Widget w) {
     return match (w) {
-        Padding(n, child) => layout_padding_child(w, c, n, child),
-        _ => layout_spacer(w, c)
+        Spacer => true,
+        Scroll(o, c) => true,
+        Align(ax, ay, c) => true,
+        Row(xs) => any_y_across(xs, 0),
+        Column(xs) => any_y(xs, 0),
+        Stack(xs) => any_y_across(xs, 0),
+        Padding(n, c) => stretches_y(c),
+        _ => false
     };
 }
 
-LayoutNode layout_padding_child(Widget w, Constraints c, Int n, Widget child) {
-    Int innermaxw = if (c.maxw < (2 * n)) { 0 } else { c.maxw - (2 * n) };
-    Int innermaxh = if (c.maxh < (2 * n)) { 0 } else { c.maxh - (2 * n) };
-    LayoutNode cn = layout(child, constraints_all(0, innermaxw, 0, innermaxh));
-    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = cn.rect.w + (2 * n), .h = cn.rect.h + (2 * n) }, .children = [cn] };
-}
+Bool any_x(List(Widget) xs, Int i) { return if (i >= xs.len()) { false } else { stretches_x(xs[i]) || any_x(xs, i + 1) }; }
+Bool any_y(List(Widget) xs, Int i) { return if (i >= xs.len()) { false } else { stretches_y(xs[i]) || any_y(xs, i + 1) }; }
+// Across a container's axis a Spacer is only a gap, so it does not make
+// the container stretch that way.
+Bool is_spacer(Widget w) { return match (w) { Spacer => true, _ => false }; }
+Bool any_x_across(List(Widget) xs, Int i) { return if (i >= xs.len()) { false } else { (!is_spacer(xs[i]) && stretches_x(xs[i])) || any_x_across(xs, i + 1) }; }
+Bool any_y_across(List(Widget) xs, Int i) { return if (i >= xs.len()) { false } else { (!is_spacer(xs[i]) && stretches_y(xs[i])) || any_y_across(xs, i + 1) }; }
+Int count_x(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { count_x(xs, i + 1, if (stretches_x(xs[i])) { acc + 1 } else { acc }) }; }
+Int count_y(List(Widget) xs, Int i, Int acc) { return if (i >= xs.len()) { acc } else { count_y(xs, i + 1, if (stretches_y(xs[i])) { acc + 1 } else { acc }) }; }
 
-LayoutNode layout_spacer(Widget w, Constraints c) {
-    Int rw = clamp_int(0, c.minw, c.maxw);
-    Int rh = clamp_int(0, c.minh, c.maxh);
-    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [] };
-}
-LayoutNode layout_stack(Widget w, Constraints c) {
-    List(Widget) xs = match (w) { Stack(xs) => xs, _ => [] };
-    return layout_stack_children(w, xs, c);
-}
-LayoutNode layout_stack_children(Widget w, List(Widget) xs, Constraints c) {
-    Int n = xs.len();
-    if (n <= 0) {
-        return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = clamp_int(0, c.minw, c.maxw), .h = clamp_int(0, c.minh, c.maxh) }, .children = [] };
-    }
-    List(LayoutNode) kids = layout_stack_kids(xs, n, 0, c, []);
-    Int maxw = max_rectw(kids, 0, 0);
-    Int maxh = max_recth(kids, 0, 0);
-    Int rw = clamp_int(maxw, c.minw, c.maxw);
-    Int rh = clamp_int(maxh, c.minh, c.maxh);
-    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = kids };
-}
-List(LayoutNode) layout_stack_kids(List(Widget) xs, Int n, Int i, Constraints c, List(LayoutNode) acc) {
-    if (i >= n) { return acc; }
-    LayoutNode child = layout(xs[i], constraints_all(0, c.maxw, 0, c.maxh));
-    return layout_stack_kids(xs, n, i + 1, c, acc.concat([child]));
-}
-LayoutNode layout_align(Widget w, Constraints c) {
+/// The children of a widget, in drawing order.
+pub List(Widget) children(Widget w) {
     return match (w) {
-        Align(ax, ay, child) => layout_align_child(w, c, ax, ay, child),
-        _ => layout_spacer(w, c)
-    };
-}
-LayoutNode layout_align_child(Widget w, Constraints c, Int ax, Int ay, Widget child) {
-    LayoutNode cn = layout(child, c);
-    LayoutNode shifted = shift_node(cn, ax, ay);
-    Int rw = clamp_int(cn.rect.w + ax, c.minw, c.maxw);
-    Int rh = clamp_int(cn.rect.h + ay, c.minh, c.maxh);
-    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [shifted] };
-}
-Widget child_of(Widget w) {
-    return match (w) {
-        Scroll(child) => child,
-        _ => Spacer
+        Row(xs) => xs,
+        Column(xs) => xs,
+        Stack(xs) => xs,
+        Padding(n, c) => [c],
+        Align(ax, ay, c) => [c],
+        Scroll(o, c) => [c],
+        _ => []
     };
 }
 
-
-LayoutNode layout_row(Widget w, Constraints c) {
+/// The box of each child when `w` occupies `r`, in the order `children`
+/// gives them.
+pub List(Rect) child_rects(Widget w, Rect r) {
     return match (w) {
-        Row(xs) => layout_row_children(w, xs, c),
-        _ => layout_spacer(w, c)
+        Row(xs) => row_rects(xs, r, share(r.w - sum_w(xs, 0, 0) - gaps(xs), count_x(xs, 0, 0)), 0, r.x, []),
+        Column(xs) => col_rects(xs, r, share(r.h - sum_h(xs, 0, 0) - gaps(xs), count_y(xs, 0, 0)), 0, r.y, []),
+        Stack(xs) => same_rects(xs.len(), r, 0, []),
+        Padding(n, c) => [Rect { .x = r.x + n, .y = r.y + n, .w = max_int(r.w - 2 * n, 0), .h = max_int(r.h - 2 * n, 0) }],
+        Align(ax, ay, c) => [align_rect(pref_size(c), r, ax, ay)],
+        Scroll(o, c) => [Rect { .x = r.x, .y = r.y - o, .w = r.w, .h = max_int(pref_size(c).h, r.h) }],
+        _ => []
     };
 }
 
-LayoutNode layout_row_children(Widget w, List(Widget) xs, Constraints c) {
-    Int n = xs.len();
-    if (n <= 0) {
-        return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = clamp_int(0, c.minw, c.maxw), .h = clamp_int(0, c.minh, c.maxh) }, .children = [] };
-    }
-    Int availw = if (c.maxw < 0) { desired_width(w) } else { c.maxw };
-    Int each = availw / n;
-    List(LayoutNode) kids = layout_row_kids(xs, n, 0, each, c, []);
-    Int totalw = sum_rectw(kids, 0, 0);
-    Int maxh = max_recth(kids, 0, 0);
-    Int rw = clamp_int(totalw, c.minw, c.maxw);
-    Int rh = clamp_int(maxh, c.minh, c.maxh);
-    LayoutNode node = LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = [] };
-    // offsets
-    List(LayoutNode) kids2 = offset_row(kids, 0, 0);
-    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = kids2 };
-}
+/// Each stretching child's share of `free` pixels; none when nothing is free.
+Int share(Int free, Int n) { return if (n <= 0 || free <= 0) { 0 } else { free / n }; }
 
-List(LayoutNode) layout_row_kids(List(Widget) xs, Int n, Int i, Int each, Constraints c, List(LayoutNode) acc) {
-    if (i >= n) { return acc; }
-    Constraints cc = constraints_all(0, each, c.minh, c.maxh);
-    LayoutNode child = layout(xs[i], cc);
-    return layout_row_kids(xs, n, i + 1, each, c, acc.concat([child]));
-}
-
-LayoutNode layout_col(Widget w, Constraints c) {
-    return match (w) {
-        Column(xs) => layout_col_children(w, xs, c),
-        _ => layout_spacer(w, c)
-    };
-}
-
-LayoutNode layout_col_children(Widget w, List(Widget) xs, Constraints c) {
-    Int n = xs.len();
-    if (n <= 0) {
-        return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = clamp_int(0, c.minw, c.maxw), .h = clamp_int(0, c.minh, c.maxh) }, .children = [] };
-    }
-    Int availh = if (c.maxh < 0) { desired_height(w) } else { c.maxh };
-    Int each = availh / n;
-    List(LayoutNode) kids = layout_col_kids(xs, n, 0, each, c, []);
-    Int maxw = max_rectw(kids, 0, 0);
-    Int totalh = sum_recth(kids, 0, 0);
-    Int rw = clamp_int(maxw, c.minw, c.maxw);
-    Int rh = clamp_int(totalh, c.minh, c.maxh);
-    List(LayoutNode) kids2 = offset_col(kids, 0, 0);
-    return LayoutNode { .widget = w, .rect = Rect { .x = 0, .y = 0, .w = rw, .h = rh }, .children = kids2 };
-}
-
-List(LayoutNode) layout_col_kids(List(Widget) xs, Int n, Int i, Int each, Constraints c, List(LayoutNode) acc) {
-    if (i >= n) { return acc; }
-    Constraints cc = constraints_all(c.minw, c.maxw, 0, each);
-    LayoutNode child = layout(xs[i], cc);
-    return layout_col_kids(xs, n, i + 1, each, c, acc.concat([child]));
-}
-
-Int sum_rectw(List(LayoutNode) xs, Int i, Int acc) {
+List(Rect) row_rects(List(Widget) xs, Rect r, Int extra, Int i, Int x, List(Rect) acc) {
     if (i >= xs.len()) { return acc; }
-    return sum_rectw(xs, i + 1, acc + xs[i].rect.w);
+    Int w = pref_size(xs[i]).w + if (stretches_x(xs[i])) { extra } else { 0 };
+    return row_rects(xs, r, extra, i + 1, x + w + gap(), acc.concat([Rect { .x = x, .y = r.y, .w = w, .h = r.h }]));
 }
-Int sum_recth(List(LayoutNode) xs, Int i, Int acc) {
+
+List(Rect) col_rects(List(Widget) xs, Rect r, Int extra, Int i, Int y, List(Rect) acc) {
     if (i >= xs.len()) { return acc; }
-    return sum_recth(xs, i + 1, acc + xs[i].rect.h);
-}
-Int max_rectw(List(LayoutNode) xs, Int i, Int acc) {
-    if (i >= xs.len()) { return acc; }
-    Int v = if (xs[i].rect.w > acc) { xs[i].rect.w } else { acc };
-    return max_rectw(xs, i + 1, v);
-}
-Int max_recth(List(LayoutNode) xs, Int i, Int acc) {
-    if (i >= xs.len()) { return acc; }
-    Int v = if (xs[i].rect.h > acc) { xs[i].rect.h } else { acc };
-    return max_recth(xs, i + 1, v);
+    Int h = pref_size(xs[i]).h + if (stretches_y(xs[i])) { extra } else { 0 };
+    return col_rects(xs, r, extra, i + 1, y + h + gap(), acc.concat([Rect { .x = r.x, .y = y, .w = r.w, .h = h }]));
 }
 
-List(LayoutNode) offset_row(List(LayoutNode) kids, Int i, Int x) {
-    if (i >= kids.len()) { return []; }
-    LayoutNode k = kids[i];
-    LayoutNode nk = shift_node(k, x, 0);
-    List(LayoutNode) rest = offset_row(kids, i + 1, x + k.rect.w);
-    return [nk].concat(rest);
+List(Rect) same_rects(Int n, Rect r, Int i, List(Rect) acc) {
+    return if (i >= n) { acc } else { same_rects(n, r, i + 1, acc.concat([r])) };
 }
 
-LayoutNode shift_node(LayoutNode k, Int dx, Int dy) {
-    Rect r = Rect { .x = k.rect.x + dx, .y = k.rect.y + dy, .w = k.rect.w, .h = k.rect.h };
-    return LayoutNode { .widget = k.widget, .rect = r, .children = shift_nodes(k.children, dx, dy, 0, []) };
+/// A box of size `s` (at most `r`) placed `ax`/`ay` percent into `r`'s
+/// free space.
+pub Rect align_rect(Size s, Rect r, Int ax, Int ay) {
+    Int w = min_int(s.w, r.w);
+    Int h = min_int(s.h, r.h);
+    Int px = clamp_int(ax, 0, 100);
+    Int py = clamp_int(ay, 0, 100);
+    return Rect { .x = r.x + ((r.w - w) * px) / 100, .y = r.y + ((r.h - h) * py) / 100, .w = w, .h = h };
 }
 
-List(LayoutNode) shift_nodes(List(LayoutNode) ks, Int dx, Int dy, Int i, List(LayoutNode) acc) {
-    if (i >= ks.len()) { return acc; }
-    return shift_nodes(ks, dx, dy, i + 1, acc.concat([shift_node(ks[i], dx, dy)]));
+/// How many widgets the tree rooted at `w` holds, `w` included. Widgets
+/// are numbered in pre-order, so a subtree's numbers are contiguous.
+pub Int node_count(Widget w) { return 1 + node_count_list(children(w), 0, 0); }
+
+Int node_count_list(List(Widget) xs, Int i, Int acc) {
+    return if (i >= xs.len()) { acc } else { node_count_list(xs, i + 1, acc + node_count(xs[i])) };
 }
 
-List(LayoutNode) offset_col(List(LayoutNode) kids, Int i, Int y) {
-    if (i >= kids.len()) { return []; }
-    LayoutNode k = kids[i];
-    LayoutNode nk = shift_node(k, 0, y);
-    List(LayoutNode) rest = offset_col(kids, i + 1, y + k.rect.h);
-    return [nk].concat(rest);
+test "a column stacks natural heights and gives the rest to its spacer" {
+    Widget w = Column([Text("a"), Spacer, Button("b", Clicked)]);
+    List(Rect) rs = child_rects(w, Rect { .x = 0, .y = 0, .w = 100, .h = 100 });
+    expect(rs.len()).toEqual(3);
+    expect(rs[0].y).toEqual(0);
+    expect(rs[0].h).toEqual(24);
+    expect(rs[1].y).toEqual(28);
+    expect(rs[2].h).toEqual(28);
+    expect(rs[2].y + rs[2].h).toEqual(100);
+    expect(rs[2].w).toEqual(100);
 }
 
-List(LayoutNode) offset_col_children(LayoutNode k, Int x, Int y) {
-    return k.children;
+test "a row stretches its inputs" {
+    Widget w = Row([Text("ab"), TextInput("", 0, Clicked)]);
+    List(Rect) rs = child_rects(w, Rect { .x = 10, .y = 0, .w = 300, .h = 30 });
+    expect(rs[0].x).toEqual(10);
+    expect(rs[0].w).toEqual(24);
+    expect(rs[1].x).toEqual(38);
+    expect(rs[1].x + rs[1].w).toEqual(310);
 }
 
-pub Bool contains(Rect r, Int x, Int y) {
-    return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+test "align, padding and scroll place their child" {
+    List(Rect) a = child_rects(Align(50, 100, Text("x")), Rect { .x = 0, .y = 0, .w = 100, .h = 100 });
+    expect(a[0].x).toEqual(42);
+    expect(a[0].y).toEqual(76);
+    List(Rect) p = child_rects(Padding(5, Spacer), Rect { .x = 0, .y = 0, .w = 20, .h = 20 });
+    expect(p[0].x).toEqual(5);
+    expect(p[0].w).toEqual(10);
+    List(Rect) s = child_rects(Scroll(30, Column([Text("a")])), Rect { .x = 0, .y = 0, .w = 50, .h = 10 });
+    expect(s[0].y).toEqual(-30);
+    expect(s[0].h).toEqual(24);
 }
 
-pub List(Widget) widget_order(LayoutNode l) {
-    List(Widget) self = [l.widget];
-    List(Widget) child = collect_order(l.children, 0, []);
-    return self.concat(child);
+test "a spacer in a row does not make the row tall" {
+    expect(stretches_y(Row([Text("a"), Spacer]))).toEqual(false);
+    expect(stretches_x(Row([Text("a"), Spacer]))).toEqual(true);
+    expect(stretches_x(Column([Text("a"), Spacer]))).toEqual(false);
+    expect(stretches_y(Row([Scroll(0, Text("a"))]))).toEqual(true);
 }
 
-List(Widget) collect_order(List(LayoutNode) xs, Int i, List(Widget) acc) {
-    if (i >= xs.len()) { return acc; }
-    return collect_order(xs, i + 1, acc.concat(widget_order(xs[i])));
-}
-
-test "layout clamps direct node" {
-    LayoutNode n = layout(Text("hello"), constraints_all(0, 100, 0, 100));
-    expect(n.rect.w >= 8).toEqual(true);
-    expect(contains(n.rect, 1, 1)).toEqual(true);
-}
-
-test "widget order" {
-    LayoutNode n = layout(Row([Text("a"), Text("b")]), constraints_all(0, 1000, 0, 1000));
-    List(Widget) xs = widget_order(n);
-    expect(xs.len()).toEqual(3);
+test "nodes count in pre-order" {
+    expect(node_count(Column([Text("a"), Row([Spacer, Spacer])]))).toEqual(5);
+    expect(node_count(Text("a"))).toEqual(1);
 }

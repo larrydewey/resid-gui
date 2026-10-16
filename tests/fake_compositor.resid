@@ -1,0 +1,198 @@
+// fake_compositor.resid — the Wayland backend against a fake compositor
+// over a socket pair.
+//
+// The client is the library's own `wl_start_on`, `wl_present` and
+// `wl_pump`, in a spawned region. The compositor here announces four
+// globals, configures the toplevel on its first commit, receives the two
+// pools' descriptors, and once a buffer is committed sends scripted input:
+// the pointer enters, the primary button goes down and up, the A key goes
+// down and up, and the window is asked to close. The client counts the
+// events it decoded; the compositor counts what it received.
+
+import "../src/app.resid";
+import "../src/gfx/color.resid";
+import "../src/gfx/draw.resid";
+import "../src/x11/wire.resid";
+import "../src/wayland/wire.resid";
+import "../src/wayland/protocol.resid";
+import "../src/wayland/wayland.resid";
+import "../src/backend/backend.resid";
+
+/// The compositor's view of the client's objects.
+type Comp = {
+    Int registry; Int compositor; Int shm; Int wm_base; Int seat;
+    Int surface; Int xdg_surface; Int toplevel; Int pointer; Int keyboard;
+    Int pools; Int commits; Int attached; Int frames; Bool input_sent; Bool bad; Str why;
+};
+
+Comp comp_new() {
+    return Comp { .registry = 0, .compositor = 0, .shm = 0, .wm_base = 0, .seat = 0, .surface = 0, .xdg_surface = 0,
+                  .toplevel = 0, .pointer = 0, .keyboard = 0, .pools = 0, .commits = 0, .attached = 0, .frames = 0,
+                  .input_sent = false, .bad = false, .why = "" };
+}
+
+Comp failed(Comp c, Str why) {
+    return Comp { .registry = c.registry, .compositor = c.compositor, .shm = c.shm, .wm_base = c.wm_base, .seat = c.seat,
+                  .surface = c.surface, .xdg_surface = c.xdg_surface, .toplevel = c.toplevel, .pointer = c.pointer,
+                  .keyboard = c.keyboard, .pools = c.pools, .commits = c.commits, .attached = c.attached, .frames = c.frames,
+                  .input_sent = c.input_sent, .bad = true, .why = why };
+}
+
+/// One field set by name, the rest kept.
+Comp set(Comp c, Str f, Int v) {
+    return Comp {
+        .registry = if (f == "registry") { v } else { c.registry }, .compositor = if (f == "compositor") { v } else { c.compositor },
+        .shm = if (f == "shm") { v } else { c.shm }, .wm_base = if (f == "wm_base") { v } else { c.wm_base },
+        .seat = if (f == "seat") { v } else { c.seat }, .surface = if (f == "surface") { v } else { c.surface },
+        .xdg_surface = if (f == "xdg_surface") { v } else { c.xdg_surface }, .toplevel = if (f == "toplevel") { v } else { c.toplevel },
+        .pointer = if (f == "pointer") { v } else { c.pointer }, .keyboard = if (f == "keyboard") { v } else { c.keyboard },
+        .pools = if (f == "pools") { v } else { c.pools }, .commits = if (f == "commits") { v } else { c.commits },
+        .attached = if (f == "attached") { v } else { c.attached }, .frames = if (f == "frames") { v } else { c.frames },
+        .input_sent = if (f == "input_sent") { v != 0 } else { c.input_sent }, .bad = c.bad, .why = c.why
+    };
+}
+
+List(Int) str_arg(Str s) { return wl_string(utf8_bytes(s)); }
+
+List(Int) global(Int reg, Int name, Str iface, Int version) {
+    return wl_msg(reg, 0, wl_words([name]).concat(str_arg(iface)).concat(wl_words([version])));
+}
+
+@requires(display)
+Bool out(Int fd, List(List(Int)) ms, Int i) {
+    if (i >= ms.len()) { return true; }
+    return resid_disp_send(fd, ms[i], -1) && out(fd, ms, i + 1);
+}
+
+@requires(display)
+Comp serve(Int fd, List(Int) buf, Comp c) {
+    if (c.bad) { return c; }
+    WlIn m = wl_take(buf);
+    if (m.bad) { return failed(c, "corrupt request"); }
+    if (!m.ok) {
+        List(Int) got = resid_disp_recv(fd, 65536);
+        if (got.len() == 0) { return c; }
+        return serve(fd, buf.concat(got), c);
+    }
+    return serve(fd, m.rest, request(fd, c, m.obj, m.opcode, m.msg));
+}
+
+/// Answer one request.
+@requires(display)
+Comp request(Int fd, Comp c, Int obj, Int op, List(Int) m) {
+    if (obj == 1 && op == 1) {
+        Int reg = wl_u32(m, 8);
+        _ = out(fd, [global(reg, 1, "wl_compositor", 4), global(reg, 2, "wl_shm", 1), global(reg, 3, "xdg_wm_base", 2), global(reg, 4, "wl_seat", 5)], 0);
+        return set(c, "registry", reg);
+    }
+    if (obj == 1 && op == 0) {
+        _ = out(fd, [wl_msg(wl_u32(m, 8), 0, wl_words([1]))], 0);
+        return c;
+    }
+    if (obj == c.registry && op == 0) {
+        WlStr s = wl_str(m, 12);
+        Int id = wl_u32(m, s.next + 4);
+        if (s.s == "wl_seat") {
+            _ = out(fd, [wl_msg(id, 0, wl_words([3]))], 0);
+            return set(c, "seat", id);
+        }
+        return set(c, if (s.s == "wl_compositor") { "compositor" } else { if (s.s == "wl_shm") { "shm" } else { "wm_base" } }, id);
+    }
+    if (obj == c.compositor && op == 0) { return set(c, "surface", wl_u32(m, 8)); }
+    if (obj == c.wm_base && op == 2) { return set(c, "xdg_surface", wl_u32(m, 8)); }
+    if (obj == c.xdg_surface && op == 1) { return set(c, "toplevel", wl_u32(m, 8)); }
+    if (obj == c.seat && op == 0) { return set(c, "pointer", wl_u32(m, 8)); }
+    if (obj == c.seat && op == 1) { return set(c, "keyboard", wl_u32(m, 8)); }
+    if (obj == c.shm && op == 0) {
+        Int pfd = resid_disp_recv_fd();
+        if (pfd < 0) { return failed(c, "create_pool came without a descriptor"); }
+        _ = resid_disp_close(pfd);
+        return set(c, "pools", c.pools + 1);
+    }
+    if (obj == c.surface && op == 1) { return set(c, "attached", wl_u32(m, 8)); }
+    if (obj == c.surface && op == 3) { return set(c, "frames", c.frames + 1); }
+    if (obj == c.surface && op == 6) { return commit(fd, set(c, "commits", c.commits + 1)); }
+    return c;
+}
+
+/// The first commit gets a configure; the first commit with a buffer gets
+/// the scripted input.
+@requires(display)
+Comp commit(Int fd, Comp c) {
+    if (c.commits == 1) {
+        _ = out(fd, [wl_msg(c.toplevel, 0, wl_words([200, 100]).concat(wl_array([]))), wl_msg(c.xdg_surface, 0, wl_words([7]))], 0);
+        return c;
+    }
+    if (c.attached != 0 && !c.input_sent) {
+        // enter at (10.5, 20), button 272 down and up, key 30 (A) down and up, close
+        List(List(Int)) input = [
+            wl_msg(c.pointer, 0, wl_words([1, c.surface, 10 * 256 + 128, 20 * 256])),
+            wl_msg(c.pointer, 3, wl_words([2, 0, 272, 1])),
+            wl_msg(c.pointer, 3, wl_words([3, 0, 272, 0])),
+            wl_msg(c.keyboard, 3, wl_words([4, 0, 30, 1])),
+            wl_msg(c.keyboard, 3, wl_words([5, 0, 30, 0])),
+            wl_msg(c.toplevel, 1, [])
+        ];
+        _ = out(fd, input, 0);
+        return set(c, "input_sent", 1);
+    }
+    return c;
+}
+
+/// What the client decoded.
+type Got = { Int downs; Int ups; Int keys; Str text; Int x; Bool closed; };
+
+Got count(Got g, List(Event) es, Int i) {
+    if (i >= es.len()) { return g; }
+    Got n = match (es[i]) {
+        PointerDown(x, y, b) => Got { .downs = g.downs + if (b == 1) { 1 } else { 0 }, .ups = g.ups, .keys = g.keys, .text = g.text, .x = x, .closed = g.closed },
+        PointerUp(x, y, b) => Got { .downs = g.downs, .ups = g.ups + 1, .keys = g.keys, .text = g.text, .x = g.x, .closed = g.closed },
+        KeyDown(k, t) => Got { .downs = g.downs, .ups = g.ups, .keys = g.keys + 1, .text = g.text + t, .x = g.x, .closed = g.closed },
+        Closed => Got { .downs = g.downs, .ups = g.ups, .keys = g.keys, .text = g.text, .x = g.x, .closed = true },
+        _ => g
+    };
+    return count(n, es, i + 1);
+}
+
+@requires(display, clock(readonly))
+Got pump_all(Wl w, Got g, Int n) {
+    if (g.closed || n <= 0 || !w.alive) { return g; }
+    Pumped(Wl) p = wl_pump(w, 1000);
+    return pump_all(p.b, count(g, p.events, 0), n - 1);
+}
+
+/// Open a 200x100 window, present one frame, then pump until closed.
+@requires(display, clock(readonly))
+Got client(Int fd) {
+    Got none = Got { .downs = 0, .ups = 0, .keys = 0, .text = "", .x = -1, .closed = false };
+    Wl w = wl_start_on(fd, WindowOptions { .title = "fake", .width = 64, .height = 48, .resizable = true });
+    if (!w.alive) { return Got { .downs = -1, .ups = 0, .keys = 0, .text = w.err, .x = -1, .closed = false }; }
+    if (wl_width(w) != 200 || wl_height(w) != 100) { return Got { .downs = -2, .ups = 0, .keys = 0, .text = "", .x = wl_width(w), .closed = false }; }
+    Wl p = wl_present(w, [OpFill(Rect { .x = 0, .y = 0, .w = 10, .h = 10 }, rgb(255, 0, 0))], 1, [Rect { .x = 0, .y = 0, .w = 200, .h = 100 }]);
+    Got g = pump_all(p, none, 10);
+    _ = resid_disp_close(fd);
+    return g;
+}
+
+@requires(display, clock(readonly))
+test "the Wayland backend configures, presents and decodes input" {
+    List(Int) pair = resid_disp_pair();
+    expect(pair.len()).toEqual(2);
+    Int sfd = pair[0];
+    Int cfd = pair[1];
+    Result(Got, RegionError) r = spawn (display, clock(readonly)) {
+        return client(cfd);
+    };
+    Comp c = serve(sfd, [], comp_new());
+    Got g = r else { Got { .downs = -9, .ups = 0, .keys = 0, .text = "", .x = -1, .closed = false } };
+    expect(c.why).toEqual("");
+    expect(c.pools).toEqual(2);
+    expect(c.attached != 0).toEqual(true);
+    expect(c.frames).toEqual(1);
+    expect(g.text).toEqual("a");
+    expect(g.downs).toEqual(1);
+    expect(g.ups).toEqual(1);
+    expect(g.keys).toEqual(1);
+    expect(g.x).toEqual(10);
+    expect(g.closed).toEqual(true);
+}

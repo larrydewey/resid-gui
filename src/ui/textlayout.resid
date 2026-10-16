@@ -1,22 +1,22 @@
 import "../gfx/font.resid";
 
-pub Int text_advance(Str s) { return s.len() * 8; }
+pub Int text_advance(Str s) { return str_len(s) * 8; }
 
 pub Str line_prefix(Str s, Int n) { return str_prefix(s, n); }
 pub Str line_suffix(Str s, Int n) { return str_suffix(s, n); }
 
 Str str_prefix(Str s, Int n) {
     if (n <= 0) { return ""; }
-    if (s.len() == 0) { return ""; }
+    if (str_len(s) == 0) { return ""; }
     StrBuf b0 = StrBuf();
-    StrBuf b1 = schars(s, 0, if (n > s.len()) { s.len() } else { n }, b0);
+    StrBuf b1 = schars(s, 0, if (n > str_len(s)) { str_len(s) } else { n }, b0);
     return b1.finish();
 }
 Str str_suffix(Str s, Int n) {
     Int start = if (n < 0) { 0 } else { n };
-    if (start >= s.len()) { return ""; }
+    if (start >= str_len(s)) { return ""; }
     StrBuf b0 = StrBuf();
-    StrBuf b2 = schars(s, start, s.len(), b0);
+    StrBuf b2 = schars(s, start, str_len(s), b0);
     return b2.finish();
 }
 StrBuf schars(Str s, Int i, Int n, StrBuf acc) {
@@ -26,18 +26,18 @@ StrBuf schars(Str s, Int i, Int n, StrBuf acc) {
 
 pub Int hit_caret(Str s, Int x) {
     Int cols = if (x < 0) { 0 } else { x / 8 };
-    if (cols > s.len()) { return s.len(); }
+    if (cols > str_len(s)) { return str_len(s); }
     return cols;
 }
 
 pub List(Str) wrap_text(Str s, Int width) {
-    if (s.len() == 0) { return []; }
+    if (str_len(s) == 0) { return []; }
     Int maxcols = if (width / 8 < 1) { 1 } else { width / 8 };
-    Int break_at = if (s.len() <= maxcols) { s.len() } else {
+    Int break_at = if (str_len(s) <= maxcols) { str_len(s) } else {
         find_break(s, maxcols)
     };
     Int break_at2 = if (break_at == 0) { maxcols } else { break_at };
-    Int break_at3 = if (break_at2 > s.len()) { s.len() } else { break_at2 };
+    Int break_at3 = if (break_at2 > str_len(s)) { str_len(s) } else { break_at2 };
     Str first = str_prefix(s, break_at3);
     Str rest = str_suffix(s, break_at3);
     Str rest2 = if (rest != "" && str_char_at(rest, 0) == 32) { str_suffix(rest, 1) } else { rest };
@@ -45,14 +45,14 @@ pub List(Str) wrap_text(Str s, Int width) {
 }
 
 Int find_break(Str s, Int maxcols) {
-    if (maxcols <= 0 || maxcols >= s.len()) { return maxcols; }
+    if (maxcols <= 0 || maxcols >= str_len(s)) { return maxcols; }
     if (str_char_at(s, maxcols) == 32) { return maxcols; }
     return find_break(s, maxcols - 1);
 }
 
 pub Int caret_x_pos(Str s, Int idx) {
     if (idx < 0) { return 0; }
-    Int safe = if (idx > s.len()) { s.len() } else { idx };
+    Int safe = if (idx > str_len(s)) { str_len(s) } else { idx };
     return safe * 8;
 }
 

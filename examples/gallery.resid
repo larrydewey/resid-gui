@@ -1,14 +1,65 @@
 import "../src/gui.resid";
-import "../src/gfx/color.resid";
 
-Int gallery_init() { return 0; }
-Int gallery_update(Int m, Event e) { return match (e) { AppMsg(msg) => m, _ => m }; }
-Widget gallery_view(Int m) {
-    return Column([Text("Gallery"), Row([Button("a", Clicked), Button("b", Toggled)]), Column([Stack([Text("layer"), Text("second")])]), Bitmap(4, 4, "demo"), Slider(m, Clicked)]);
+// Every widget once: text, buttons, a checkbox, a text input, a slider, a
+// bitmap, a scrolling list and stretching spacers.
+
+type Gallery = { Int clicks; Bool checked; Str text; Int caret; Int level; Int scroll; };
+
+Gallery gallery_init() { return Gallery { .clicks = 0, .checked = false, .text = "edit me", .caret = 7, .level = 30, .scroll = 0 }; }
+
+Gallery with_clicks(Gallery g, Int c) { return Gallery { .clicks = c, .checked = g.checked, .text = g.text, .caret = g.caret, .level = g.level, .scroll = g.scroll }; }
+Gallery with_checked(Gallery g, Bool c) { return Gallery { .clicks = g.clicks, .checked = c, .text = g.text, .caret = g.caret, .level = g.level, .scroll = g.scroll }; }
+Gallery with_text(Gallery g, Str t, Int k) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = t, .caret = k, .level = g.level, .scroll = g.scroll }; }
+Gallery with_level(Gallery g, Int v) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = g.text, .caret = g.caret, .level = v, .scroll = g.scroll }; }
+Gallery with_scroll(Gallery g, Int s) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = g.text, .caret = g.caret, .level = g.level, .scroll = if (s < 0) { 0 } else { if (s > 400) { 400 } else { s } } }; }
+
+Gallery on_msg(Gallery g, Msg m) {
+    return match (m) {
+        Clicked => with_clicks(g, g.clicks + 1),
+        Toggled => with_checked(g, !g.checked),
+        Submitted => with_text(g, "", 0),
+        _ => g
+    };
 }
-App(Int) = { .init = gallery_init, .update = gallery_update, .view = gallery_view };
 
-@requires(display)
+Gallery gallery_update(Gallery g, Event e) {
+    return match (e) {
+        AppMsg(m) => on_msg(g, m),
+        TextEdited(m, t, k) => with_text(g, t, k),
+        SliderSet(m, v) => with_level(g, v),
+        Wheel(dx, dy) => with_scroll(g, g.scroll + dy * 24),
+        _ => g
+    };
+}
+
+/// A 32x32 swatch whose colour follows the slider.
+List(Int) swatch(Int level) { return swatch_at(level, 0, ListBuf()); }
+
+List(Int) swatch_at(Int level, Int i, ListBuf(Int) b) {
+    if (i >= 32 * 32) { return b.finish(); }
+    Int x = i % 32;
+    Int y = i / 32;
+    return swatch_at(level, i + 1, b.push((x * 8) & 255).push((y * 8) & 255).push((level * 255) / 100).push(255));
+}
+
+List(Widget) lines(Int i, Int n, List(Widget) acc) {
+    return if (i >= n) { acc } else { lines(i + 1, n, acc.concat([Text(f"line {i + 1}")])) };
+}
+
+Widget gallery_view(Gallery g) {
+    return Padding(8, Column([
+        Text("Gallery"),
+        Row([Button("click", Clicked), Text(f"{g.clicks} clicks"), Spacer, Checkbox("checked", g.checked, Toggled)]),
+        Row([TextInput(g.text, g.caret, Submitted), Button("clear", Submitted)]),
+        Row([Slider(g.level, Clicked), Text(f"{g.level}%"), Bitmap(32, 32, swatch(g.level))]),
+        Stack([Text("under"), Align(100, 0, Text("over, right"))]),
+        Scroll(g.scroll, Column(lines(0, 20, [])))
+    ]));
+}
+
+App(Gallery) = { .init = gallery_init, .update = gallery_update, .view = gallery_view };
+
+@requires(display, clock(readonly))
 Int main() {
-    return gui_run(WindowOptions { .title = "Gallery", .width = 320, .height = 200, .resizable = true });
+    return gui_run(WindowOptions { .title = "Gallery", .width = 420, .height = 360, .resizable = true });
 }

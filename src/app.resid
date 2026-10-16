@@ -1,0 +1,77 @@
+// app.resid — the types a program and the library share.
+//
+// A program describes its window with these values and nothing else: an
+// `App(M)` instance (initial model, a pure step over events, a pure view)
+// and the `WindowOptions` it opens with. The library owns the display, the
+// loop and the pixels.
+
+/// A message a widget raises. Widgets carry these as values, never
+/// closures: a closure cannot be compared, and value equality is what
+/// damage tracking is built on. `Custom(n)` tells many widgets apart.
+type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
+
+/// What reaches `update`. Coordinates are logical pixels relative to the
+/// window; key codes are Linux evdev codes (`KEY_A` is 30) whatever the
+/// display server, and the `Str` is the text the key types under the US
+/// layout, empty for keys that type nothing.
+///
+/// The widget events come from the library, not the display:
+/// - `AppMsg(m)`: a `Button` or `Checkbox` was clicked, or Enter was
+///   pressed in a focused `TextInput`; `m` is the widget's message.
+/// - `TextEdited(m, text, caret)`: a focused `TextInput` was edited; the
+///   program stores the new text and caret and passes them back in `view`.
+/// - `SliderSet(m, value)`: a `Slider` was clicked or dragged to `value`
+///   (0 to 100).
+type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int);
+
+/// What the program wants on screen. A widget is a value, so two equal
+/// models give two equal display lists and therefore identical pixels.
+///
+/// - `Text(s)`: one line of text.
+/// - `Button(label, m)`: raises `AppMsg(m)` when clicked.
+/// - `Checkbox(label, checked, m)`: raises `AppMsg(m)` when clicked.
+/// - `TextInput(text, caret, m)`: an editable line; see `TextEdited`.
+/// - `Row(xs)` / `Column(xs)`: children side by side or stacked, each at
+///   its natural size; `Spacer`s share whatever space is left.
+/// - `Stack(xs)`: children drawn over each other in the same box.
+/// - `Padding(n, w)`: `n` pixels of space around `w`.
+/// - `Align(ax, ay, w)`: takes the space it is given and places `w`, at
+///   its natural size, at `ax`/`ay`
+///   percent of the free space (0 start, 50 centre, 100 end).
+/// - `Scroll(offset, w)`: `w` shifted up by `offset` pixels and clipped to
+///   the box; the program moves `offset` on `Wheel` events.
+/// - `Bitmap(w, h, px)`: a `w` x `h` image, four bytes per pixel in
+///   blue-green-red-alpha order.
+/// - `Slider(value, m)`: a 0 to 100 slider; see `SliderSet`.
+/// - `Spacer`: empty space that stretches.
+type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget)) | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget) | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer;
+
+/// A program's application: a model, a pure step over events, a pure view.
+behavior App(M) {
+    M init();
+    M update(M m, Event e);
+    Widget view(M m);
+}
+
+/// How a window is opened. `width` and `height` are logical pixels.
+type WindowOptions = {
+    Str title; Int width; Int height; Bool resizable;
+};
+
+/// Message equality, field by field.
+pub Bool msg_eq(Msg a, Msg b) {
+    return match (a) {
+        Clicked => match (b) { Clicked => true, _ => false },
+        Toggled => match (b) { Toggled => true, _ => false },
+        Changed(sa) => match (b) { Changed(sb) => sa == sb, _ => false },
+        Submitted => match (b) { Submitted => true, _ => false },
+        Custom(na) => match (b) { Custom(nb) => na == nb, _ => false }
+    };
+}
+
+test "messages compare by value" {
+    expect(msg_eq(Custom(1), Custom(1))).toEqual(true);
+    expect(msg_eq(Custom(1), Custom(2))).toEqual(false);
+    expect(msg_eq(Clicked, Toggled)).toEqual(false);
+    expect(msg_eq(Changed("a"), Changed("a"))).toEqual(true);
+}

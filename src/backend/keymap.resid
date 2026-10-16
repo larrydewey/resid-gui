@@ -1,0 +1,68 @@
+// keymap.resid — keys to text, for every backend.
+//
+// Both display protocols report physical keys: X11 as evdev codes plus 8,
+// Wayland as evdev codes. A backend turns them into evdev codes and asks
+// here what they type. v1 knows the US layout only (PLAN-gui.md §1); a
+// server's own keymap (XKB) is not read.
+
+/// Evdev codes the library acts on.
+pub Int key_esc() { return 1; }
+pub Int key_backspace() { return 14; }
+pub Int key_tab() { return 15; }
+pub Int key_enter() { return 28; }
+pub Int key_left_ctrl() { return 29; }
+pub Int key_left_shift() { return 42; }
+pub Int key_right_shift() { return 54; }
+pub Int key_left_alt() { return 56; }
+pub Int key_caps_lock() { return 58; }
+pub Int key_kp_enter() { return 96; }
+pub Int key_right_ctrl() { return 97; }
+pub Int key_home() { return 102; }
+pub Int key_up() { return 103; }
+pub Int key_left() { return 105; }
+pub Int key_right() { return 106; }
+pub Int key_end() { return 107; }
+pub Int key_down() { return 108; }
+pub Int key_delete() { return 111; }
+
+/// The modifier state a backend tracks.
+pub type Mods = { Bool shift; Bool caps; Bool ctrl; Bool alt; };
+
+/// No modifier held.
+pub Mods mods_none() { return Mods { .shift = false, .caps = false, .ctrl = false, .alt = false }; }
+
+// Code points by evdev code, 0 where a key types nothing.
+List(Int) us_plain() { return [0, 0, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 45, 61, 0, 0, 113, 119, 101, 114, 116, 121, 117, 105, 111, 112, 91, 93, 0, 0, 97, 115, 100, 102, 103, 104, 106, 107, 108, 59, 39, 96, 0, 92, 122, 120, 99, 118, 98, 110, 109, 44, 46, 47, 0, 42, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 55, 56, 57, 45, 52, 53, 54, 43, 49, 50, 51, 48, 46, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 47]; }
+List(Int) us_shift() { return [0, 0, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 0, 0, 81, 87, 69, 82, 84, 89, 85, 73, 79, 80, 123, 125, 0, 0, 65, 83, 68, 70, 71, 72, 74, 75, 76, 58, 34, 126, 0, 124, 90, 88, 67, 86, 66, 78, 77, 60, 62, 63, 0, 42, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 55, 56, 57, 45, 52, 53, 54, 43, 49, 50, 51, 48, 46, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 47]; }
+
+/// Whether the code is a letter key, which Caps Lock affects.
+Bool is_letter(Int code) {
+    return (code >= 16 && code <= 25) || (code >= 30 && code <= 38) || (code >= 44 && code <= 50);
+}
+
+/// The text a key types under the US layout, empty for keys that type
+/// nothing and for any key pressed with Ctrl or Alt held.
+pub Str key_text(Int code, Mods m) {
+    if (code < 0 || code >= 99 || m.ctrl || m.alt) { return ""; }
+    Bool upper = if (is_letter(code)) { m.shift != m.caps } else { m.shift };
+    Int cp = if (upper) { us_shift()[code] } else { us_plain()[code] };
+    return if (cp == 0) { "" } else { str_from_code(cp) };
+}
+
+test "keys type US text" {
+    Mods none = mods_none();
+    Mods shift = Mods { .shift = true, .caps = false, .ctrl = false, .alt = false };
+    Mods caps = Mods { .shift = false, .caps = true, .ctrl = false, .alt = false };
+    Mods ctrl = Mods { .shift = false, .caps = false, .ctrl = true, .alt = false };
+    expect(key_text(30, none)).toEqual("a");
+    expect(key_text(30, shift)).toEqual("A");
+    expect(key_text(30, caps)).toEqual("A");
+    expect(key_text(2, caps)).toEqual("1");
+    expect(key_text(2, shift)).toEqual("!");
+    expect(key_text(40, shift)).toEqual("\"");
+    expect(key_text(43, none)).toEqual("\\");
+    expect(key_text(57, none)).toEqual(" ");
+    expect(key_text(30, ctrl)).toEqual("");
+    expect(key_text(key_enter(), none)).toEqual("");
+    expect(key_text(-1, none)).toEqual("");
+}

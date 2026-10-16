@@ -1,0 +1,58 @@
+// golden.resid — rendered frames compared by SHA-256 (PLAN-gui.md §7, G3).
+//
+// Each case paints a fixed widget tree, rasterizes it at scale 1 and 2,
+// encodes it as PNG and hashes the file. A change to layout, painting,
+// the font or the rasterizer changes a hash; when the change is meant,
+// regenerate with `tests/golden.sh` (which also writes the PNGs to
+// tests/golden/ for a look) and update the hashes here.
+
+import "../src/gui.resid";
+import "../src/gfx/png.resid";
+import "hash.resid";
+import "crypto.resid";
+
+pub Widget widgets() {
+    return Padding(8, Column([
+        Text("count: 7"),
+        Row([Button("+1", Custom(1)), Checkbox("on", true, Clicked), Spacer]),
+        Slider(40, Clicked),
+        TextInput("hello", 2, Clicked),
+        Scroll(10, Column([Text("one"), Text("two"), Text("three")]))
+    ]));
+}
+
+/// The PNG of `w` laid out in `lw` x `lh` logical pixels at `scale`, with
+/// the text input (widget 8) focused and its caret on.
+pub Png golden_png(Widget w, Int lw, Int lh, Int scale) {
+    List(DrawOp) ops = paint(w, Rect { .x = 0, .y = 0, .w = lw, .h = lh }, ui_with_focus(ui_new(), 8));
+    Canvas c = raster_rect(ops, Rect { .x = 0, .y = 0, .w = lw * scale, .h = lh * scale }, background(), scale);
+    return canvas_to_png(c);
+}
+
+pub Str golden_hash(Png p) { return hex_encode(hash_bytes(Sha256, p.bytes)); }
+
+test "widgets at scale 1" {
+    expect(golden_hash(golden_png(widgets(), 200, 200, 1))).toEqual("0bdfb3be58ae9947e7dea2c64bddf467693577abd16dd467d33fd017e3320879");
+}
+
+test "widgets at scale 2" {
+    expect(golden_hash(golden_png(widgets(), 200, 200, 2))).toEqual("846c9d5c7bc6598d07b411f1fe21eb1e1996c81d9492a42292dc7dfc9060db6b");
+}
+
+test "damage redraw equals a full redraw" {
+    // Paint a frame, change the model, redraw only the damage over the old
+    // pixels, and compare with drawing the new frame from scratch.
+    Rect area = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    List(DrawOp) a = paint(Column([Text("count: 1"), Button("+1", Custom(1))]), area, ui_new());
+    List(DrawOp) b = paint(Column([Text("count: 2"), Button("+1", Custom(1))]), area, ui_with_pressed(ui_new(), 2));
+    Canvas old = raster_rect(a, area, background(), 1);
+    Canvas fixed = redraw_all(old, b, damage_rects(a, b), 0);
+    Canvas fresh = raster_rect(b, area, background(), 1);
+    expect(png_equal(canvas_to_png(fixed), canvas_to_png(fresh))).toEqual(true);
+    expect(damage_rects(a, b).len() > 0).toEqual(true);
+}
+
+Canvas redraw_all(Canvas c, List(DrawOp) ops, List(Rect) rs, Int i) {
+    if (i >= rs.len()) { return c; }
+    return redraw_all(raster_region(c, ops, rs[i], background()), ops, rs, i + 1);
+}

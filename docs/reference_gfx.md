@@ -1,95 +1,84 @@
-# `src/gfx/` — Graphics Primitives
+# `src/gfx/` — pixels
 
-Pure Resid 2D graphics: canvas, draw operations, rasterization, text, fonts, images.
-
-## Modules
+Pure Resid 2D graphics in device pixels, four bytes per pixel in
+blue-green-red-alpha order (ARGB32 little-endian, what both window
+servers read).
 
 | Module | Purpose |
-|--------|---------|
-| `color.resid` | `Color`, `Rect`, premultiplied ARGB32 helpers |
-| `canvas.resid` | `Canvas(W, H)` linear builder over `List(Int)` pixels |
-| `draw.resid` | `DrawOp` sum type: `OpFill`, `OpText`, `OpClipPush`, `OpClipPop` |
-| `raster.resid` | `rasterize_ops(ops, w, h) -> List(Int)` pixels |
-| `font.resid` | Built-in 8×16 bitmap font + `FontAtlas` native unpacking |
-| `text.resid` | `render_text`, `render_glyph`, `draw_bits` |
-| `image.resid` | `Image` type, `blit_at`, native `DecodedImage` unpacking |
-| `png.resid` | `canvas_to_png` encoder (for golden-image tests) |
+|---|---|
+| `color.resid` | `Color`, `Rect`, rectangle algebra and rectangle lists |
+| `canvas.resid` | `Canvas`: a pixel list written in place |
+| `draw.resid` | `DrawOp`, the display-list instruction |
+| `raster.resid` | display list to pixels, by region, at a scale |
+| `text.resid` | the 8x16 bitmap font drawn into a canvas |
+| `font.resid` | the font data (printable ASCII) |
+| `image.resid` | `Image` and blitting |
+| `png.resid` | a PNG encoder for golden-image tests |
 
-## Core Types
+## Types
 
 ```resid
-// color.resid
-type Color = { Int r; Int g; Int b; Int a; }  // 0-255, premultiplied
-type Rect  = { Int x; Int y; Int w; Int h; }
-
-// canvas.resid
-type Canvas = { Int w; Int h; List(Int) px; }  // ARGB32, stride = w*4
-
-// draw.resid
-type DrawOp = OpFill(Rect, Color)
-            | OpText(Int x, Int y, Str text, Color)
-            | OpClipPush(Rect)
-            | OpClipPop
-
-// font.resid
-type Glyph = { List(Int) rows; }  // 16 rows of 8-bit bitmaps
-type FontAtlas = { Int w; Int h; Int glyph_count;
-                   List(Int) advances; List(Int) lsbs;
-                   List(Int) x0s; List(Int) y0s; List(Int) x1s;
-                   Int kerning_count; List(Int) kern_g1; List(Int) kern_g2; List(Int) kern_adv;
-                   List(Int) atlas; }  // alpha pixels (w*h)
-
-// image.resid
-type Image = { Int w; Int h; List(Int) px; }  // premultiplied BGRA
-type DecodedImage = { Int w; Int h; Int channels; List(Int) pixels; }
+pub type Color = { Int b; Int g; Int r; Int a; };
+pub type Rect = { Int x; Int y; Int w; Int h; };
+pub type Canvas = { Int w; Int h; List(Int) px; };
+pub type DrawOp = OpFill(Rect, Color) | OpText(Int, Int, Str, Color)
+                | OpImage(Int, Int, Int, Int, List(Int)) | OpClipPush(Rect) | OpClipPop;
+pub type Image = { Int w; Int h; List(Int) px; };
+pub type Png = { List(Int) bytes; };
 ```
 
-## Functions
+## Rectangles
 
 ```resid
-// canvas.resid
+pub Rect rect_intersect(Rect a, Rect b)
+pub Rect rect_union(Rect a, Rect b)
+pub Bool rect_is_empty(Rect r)
+pub Bool rect_contains(Rect r, Int x, Int y)
+pub List(Rect) rects_add(List(Rect) xs, Rect r)       // merge what touches
+pub List(Rect) rects_merge(List(Rect) xs, List(Rect) ys)
+pub List(Rect) rects_clip(List(Rect) xs, Rect c)
+```
+
+## Canvas
+
+```resid
 pub Canvas canvas_new(Int w, Int h)
 pub Canvas fill_rect(Canvas c, Rect r, Color col)
-pub List(Int) canvas_fill(Int val, Int n, List(Int) acc)
-pub List(Int) set_byte(List(Int) px, Int i, Int val)
-pub Canvas finish(Canvas c)
+pub Canvas fill_rect_clip(Canvas c, Rect r, Color col, Rect clip)
+pub Canvas set_pixel_clip(Canvas c, Int x, Int y, Color col, Rect clip)
+pub Color pixel_at(Canvas c, Int x, Int y)
+pub List(Int) canvas_rows(Canvas c, Int y0, Int y1)
+```
 
-// raster.resid
-pub List(Int) rasterize_ops(List(DrawOp) ops, Int w, Int h)
+Writes thread the pixel list through tail calls and replace elements with
+`with`, which the compiler does in place when the old list is dead, so a
+fill costs its area and not the canvas.
 
-// font.resid
-pub List(Int) font_data()
-pub List(Int) glyph_rows(Int code)  // 16 bytes
-pub Glyph glyph_for(Int code)
-pub Int text_width(Str s)
-pub Int text_height()
-pub FontAtlas unpack_font_atlas(Bytes(4194304) packed, Int len)
+## Rasterizing
 
-// text.resid
-pub Canvas render_text(Canvas c, Int x0, Int y0, Str s, Color col, Int i, Int cx)
-Canvas render_glyph(Canvas c, Int x0, Int y0, Int code, Color col, Int row)
-Canvas draw_bits(Canvas c, Int x, Int y, Int bits, Color col, Int bit)
+```resid
+pub Canvas raster_rect(List(DrawOp) ops, Rect r, Color bg, Int scale)
+pub Canvas raster_region_scaled(Canvas c, List(DrawOp) ops, Rect region, Color bg, Int scale)
+pub Canvas raster_region(Canvas c, List(DrawOp) ops, Rect region, Color bg)
+pub Canvas rasterize_frame(List(DrawOp) ops, Int w, Int h)
+pub Color background()
+```
 
-// image.resid
-pub Image image_new(Int w, Int h)
-pub Canvas blit_image(Canvas c, Image im, Int x0, Int y0, Int i, Int j)
-pub Canvas blit_at(Canvas c, Image im, Int x0, Int y0)
-pub DecodedImage unpack_image(Bytes(16777216) packed, Int len)
-pub Image decoded_to_image(DecodedImage d)
+Ops are logical pixels; `scale` device pixels make one logical pixel, so
+at scale 2 a fill doubles and each font pixel is a 2x2 block.
+`raster_rect` draws only device rectangle `r` into a canvas of its own
+(pixel (0, 0) is device (`r.x`, `r.y`)), which is what a backend uploads.
+Every op is clipped to the region and to the clip stack.
 
-// png.resid
+## PNG
+
+```resid
 pub Png canvas_to_png(Canvas c)
+pub Int crc32(List(Int) data)
 pub Bool png_equal(Png a, Png b)
 ```
 
-## Native Font / Image (Optional)
-
-```resid
-// Requires @requires(native_font) and -native font_atlas=font.ll
-@link("font_atlas") Bytes(4194304) font_atlas_native(Bytes(16777216) font, Int font_len, Str(4096) chars, Int px_size) {}
-
-// Requires @requires(native_image) and -native image_decode=image.ll
-@link("image_decode") Bytes(16777216) image_decode_native(Bytes(16777216) data, Int len) {}
-```
-
-Results are unpacked with `unpack_font_atlas` / `unpack_image` into structured values.
+8-bit RGBA, filter 0, stored deflate blocks: exact pixels, so a golden
+test compares hashes. `tests/golden.resid` holds the hashes;
+`tests/golden.sh` regenerates them and writes the images to
+`tests/golden/`.

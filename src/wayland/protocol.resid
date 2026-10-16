@@ -1,0 +1,79 @@
+// protocol.resid — the Wayland requests the client sends, one encoder
+// each, from wayland.xml, xdg-shell.xml and cursor-shape-v1.xml.
+//
+// Only the handful of interfaces a self-rendering window needs appear
+// here, written by hand like the X11 requests (PLAN-gui.md §3.6): the
+// display and registry, the compositor and surface, shared memory, the
+// xdg-shell toplevel, and the seat's pointer and keyboard.
+
+import "wire.resid";
+import "../x11/wire.resid";
+
+/// The display is object 1 in every connection.
+pub Int wl_display_id() { return 1; }
+
+/// `wl_shm` format 0: 32-bit ARGB, little-endian, which is a canvas's
+/// byte order.
+pub Int wl_format_argb8888() { return 0; }
+
+/// `wp_cursor_shape_device_v1` shape 1: the default arrow.
+pub Int wl_cursor_default() { return 1; }
+
+pub List(Int) wl_display_sync(Int cb) { return wl_msg(wl_display_id(), 0, wl_words([cb])); }
+pub List(Int) wl_display_get_registry(Int reg) { return wl_msg(wl_display_id(), 1, wl_words([reg])); }
+
+/// `wl_registry.bind` for an untyped new id: interface name and version
+/// travel with it.
+pub List(Int) wl_registry_bind(Int reg, Int name, Str iface, Int version, Int id) {
+    List(Int) args = wl_words([name]).concat(wl_string(utf8_bytes(iface))).concat(wl_words([version, id]));
+    return wl_msg(reg, 0, args);
+}
+
+pub List(Int) wl_compositor_create_surface(Int comp, Int id) { return wl_msg(comp, 0, wl_words([id])); }
+
+/// `wl_shm.create_pool`; the descriptor goes beside it.
+pub List(Int) wl_shm_create_pool(Int shm, Int id, Int size) { return wl_msg(shm, 0, wl_words([id, size])); }
+pub List(Int) wl_pool_create_buffer(Int pool, Int id, Int offset, Int w, Int h) {
+    return wl_msg(pool, 0, wl_words([id, offset, w, h, w * 4, wl_format_argb8888()]));
+}
+pub List(Int) wl_pool_destroy(Int pool) { return wl_msg(pool, 1, []); }
+pub List(Int) wl_buffer_destroy(Int buf) { return wl_msg(buf, 0, []); }
+
+pub List(Int) wl_surface_destroy(Int s) { return wl_msg(s, 0, []); }
+pub List(Int) wl_surface_attach(Int s, Int buf) { return wl_msg(s, 1, wl_words([buf, 0, 0])); }
+pub List(Int) wl_surface_frame(Int s, Int cb) { return wl_msg(s, 3, wl_words([cb])); }
+pub List(Int) wl_surface_commit(Int s) { return wl_msg(s, 6, []); }
+pub List(Int) wl_surface_set_buffer_scale(Int s, Int scale) { return wl_msg(s, 8, wl_words([scale])); }
+pub List(Int) wl_surface_damage_buffer(Int s, Int x, Int y, Int w, Int h) { return wl_msg(s, 9, wl_words([x, y, w, h])); }
+
+pub List(Int) xdg_wm_base_get_xdg_surface(Int base, Int id, Int surface) { return wl_msg(base, 2, wl_words([id, surface])); }
+pub List(Int) xdg_wm_base_pong(Int base, Int serial) { return wl_msg(base, 3, wl_words([serial])); }
+pub List(Int) xdg_surface_destroy(Int xs) { return wl_msg(xs, 0, []); }
+pub List(Int) xdg_surface_get_toplevel(Int xs, Int id) { return wl_msg(xs, 1, wl_words([id])); }
+pub List(Int) xdg_surface_ack_configure(Int xs, Int serial) { return wl_msg(xs, 4, wl_words([serial])); }
+pub List(Int) xdg_toplevel_destroy(Int t) { return wl_msg(t, 0, []); }
+pub List(Int) xdg_toplevel_set_title(Int t, Str title) { return wl_msg(t, 2, wl_string(utf8_bytes(title))); }
+pub List(Int) xdg_toplevel_set_app_id(Int t, Str app) { return wl_msg(t, 3, wl_string(utf8_bytes(app))); }
+pub List(Int) xdg_toplevel_set_max_size(Int t, Int w, Int h) { return wl_msg(t, 7, wl_words([w, h])); }
+pub List(Int) xdg_toplevel_set_min_size(Int t, Int w, Int h) { return wl_msg(t, 8, wl_words([w, h])); }
+
+pub List(Int) wl_seat_get_pointer(Int seat, Int id) { return wl_msg(seat, 0, wl_words([id])); }
+pub List(Int) wl_seat_get_keyboard(Int seat, Int id) { return wl_msg(seat, 1, wl_words([id])); }
+
+pub List(Int) cursor_shape_get_pointer(Int mgr, Int id, Int pointer) { return wl_msg(mgr, 1, wl_words([id, pointer])); }
+pub List(Int) cursor_shape_set_shape(Int dev, Int serial, Int shape) { return wl_msg(dev, 1, wl_words([serial, shape])); }
+
+test "requests carry their object, opcode and arguments" {
+    List(Int) b = wl_registry_bind(2, 7, "wl_shm", 1, 10);
+    expect(wl_u32(b, 0)).toEqual(2);
+    expect(wl_u32(b, 4) & 65535).toEqual(0);
+    expect((wl_u32(b, 4) >> 16) & 65535).toEqual(b.len());
+    expect(wl_u32(b, 8)).toEqual(7);
+    expect(wl_u32(b, 12)).toEqual(7);                 // "wl_shm" plus NUL
+    expect(wl_u32(b, 24)).toEqual(1);                 // version
+    expect(wl_u32(b, 28)).toEqual(10);                // new id
+    List(Int) cb = wl_pool_create_buffer(5, 6, 0, 10, 20);
+    expect(wl_u32(cb, 24)).toEqual(40);               // stride
+    expect(cb.len()).toEqual(32);
+    expect(wl_u32(wl_surface_damage_buffer(3, 1, 2, 3, 4), 4) & 65535).toEqual(9);
+}

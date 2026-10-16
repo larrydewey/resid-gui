@@ -138,19 +138,31 @@ pub ListBuf(Int) enc_bytes_at(ListBuf(Int) b, Int n, Int v, Int i) {
     return enc_bytes_at(enc_byte(b, v), n, v, i + 1);
 }
 
-/// Append a NUL-terminated string with its length word and padding, the
-/// X11 `STRING8` layout. The length word counts the NUL.
-pub ListBuf(Int) enc_string(ListBuf(Int) b, Str s) {
-    ListBuf(Int) r = enc_word16(b, s.len() + 1);
-    Int i = 0;
-    ListBuf(Int) r2 = enc_str_at(r, s, i);
-    return enc_pad(r2, s.len() + 1);
+/// Append the bytes of `s`, one per code point, with no terminator: the
+/// X11 `STRING8` layout, for the ASCII names the protocol uses (atoms,
+/// extensions, the authorization protocol).
+pub ListBuf(Int) enc_str_at(ListBuf(Int) b, Str s, Int i) {
+    if (i >= str_len(s)) { return b; }
+    return enc_str_at(enc_byte(b, str_char_at(s, i)), s, i + 1);
 }
 
-/// `enc_string`'s per-character step.
-pub ListBuf(Int) enc_str_at(ListBuf(Int) b, Str s, Int i) {
-    if (i >= s.len()) { return enc_byte(b, 0); }
-    return enc_str_at(enc_byte(b, str_char_at(s, i)), s, i + 1);
+/// The UTF-8 encoding of `s`.
+pub List(Int) utf8_bytes(Str s) {
+    ListBuf(Int) b = ListBuf();
+    return utf8_at(b, s, str_len(s), 0).finish();
+}
+
+ListBuf(Int) utf8_at(ListBuf(Int) b, Str s, Int n, Int i) {
+    if (i >= n) { return b; }
+    return utf8_at(enc_utf8_cp(b, str_char_at(s, i)), s, n, i + 1);
+}
+
+/// Append one code point as UTF-8.
+pub ListBuf(Int) enc_utf8_cp(ListBuf(Int) b, Int c) {
+    if (c < 128) { return b.push(c); }
+    if (c < 2048) { return b.push(192 | (c >> 6)).push(128 | (c & 63)); }
+    if (c < 65536) { return b.push(224 | (c >> 12)).push(128 | ((c >> 6) & 63)).push(128 | (c & 63)); }
+    return b.push(240 | (c >> 18)).push(128 | ((c >> 12) & 63)).push(128 | ((c >> 6) & 63)).push(128 | (c & 63));
 }
 
 /// The finished bytes.
@@ -190,11 +202,20 @@ pub Str bytes_str_at(List(Int) b, Int i, Int stop, StrBuf acc) {
     return bytes_str_at(b, i + 1, stop, acc.push_char(b[i]));
 }
 
+test "strings encode without a terminator, and as UTF-8" {
+    expect(enc_finish(enc_str_at(enc_new(), "ab", 0)).len()).toEqual(2);
+    List(Int) u = utf8_bytes("aé€");
+    expect(u.len()).toEqual(6);
+    expect(u[1]).toEqual(195);
+    expect(u[2]).toEqual(169);
+    expect(u[3]).toEqual(226);
+}
+
 test "words are little-endian" {
-    expect(enc_finish(enc_word32(enc_new(), 1))).toEqual([1, 0, 0, 0]);
-    expect(enc_finish(enc_word32(enc_new(), 65538))).toEqual([2, 1, 1, 0]);
-    expect(enc_finish(enc_word32(enc_new(), -1))).toEqual([255, 255, 255, 255]);
-    expect(enc_finish(enc_word16(enc_new(), 513))).toEqual([1, 2]);
+    expect(f"{enc_finish(enc_word32(enc_new(), 1))}").toEqual("[1, 0, 0, 0]");
+    expect(f"{enc_finish(enc_word32(enc_new(), 65538))}").toEqual("[2, 0, 1, 0]");
+    expect(f"{enc_finish(enc_word32(enc_new(), -1))}").toEqual("[255, 255, 255, 255]");
+    expect(f"{enc_finish(enc_word16(enc_new(), 513))}").toEqual("[1, 2]");
 }
 
 test "a word reads back from its bytes" {
@@ -203,14 +224,6 @@ test "a word reads back from its bytes" {
     expect(word_at([1, 2], 0) else { -1 }).toEqual(-1);
     expect(signed_word(4294967295)).toEqual(-1);
     expect(signed_word(65538)).toEqual(65538);
-}
-
-test "strings carry a length word, a NUL and padding" {
-    // "hi" is 3 bytes with the NUL, padded to 4.
-    expect(enc_finish(enc_string(enc_new(), "hi"))).toEqual([3, 0, 104, 105, 0, 0]);
-    expect(enc_finish(enc_string(enc_new(), ""))).toEqual([1, 0, 0, 0, 0]);
-    // "abcd" is 5 bytes, padded to 8.
-    expect(enc_finish(enc_string(enc_new(), "abcd")).len()).toEqual(10);
 }
 
 test "a short message is an error, never an out-of-range read" {

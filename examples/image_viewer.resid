@@ -1,43 +1,51 @@
 import "../src/gui.resid";
-import "../src/gfx/color.resid";
-import "../src/gfx/image.resid";
-import "../src/gfx/png.resid";
 
-// Simple image viewer - demonstrates Image widget and native image decode fallback
-Int viewer_init() { return 0; }
+// An image in a window: a generated gradient, shown at its own size and
+// centred. Wheel up and down zooms between 1x and 4x by repeating pixels.
 
-Int viewer_update(Int m, Event e) {
-    return m;
+type Viewer = { Int zoom; };
+
+Viewer viewer_init() { return Viewer { .zoom = 2 }; }
+
+Viewer viewer_update(Viewer v, Event e) {
+    return match (e) {
+        Wheel(dx, dy) => Viewer { .zoom = if (dy < 0 && v.zoom < 4) { v.zoom + 1 } else { if (dy > 0 && v.zoom > 1) { v.zoom - 1 } else { v.zoom } } },
+        _ => v
+    };
 }
 
-Widget viewer_view(Int m) {
+/// A `w` x `h` gradient, blue-green-red-alpha.
+List(Int) gradient(Int w, Int h) { return gradient_at(w, h, 0, ListBuf()); }
+
+List(Int) gradient_at(Int w, Int h, Int i, ListBuf(Int) b) {
+    if (i >= w * h) { return b.finish(); }
+    Int x = i % w;
+    Int y = i / w;
+    return gradient_at(w, h, i + 1, b.push(((x + y) * 255) / (w + h)).push((y * 255) / h).push((x * 255) / w).push(255));
+}
+
+/// Each pixel of a `w`-wide image repeated `k` times across and down.
+List(Int) zoomed(List(Int) px, Int w, Int h, Int k) { return zoom_at(px, w, k, 0, 0, w * k, h * k, ListBuf()); }
+
+List(Int) zoom_at(List(Int) px, Int w, Int k, Int x, Int y, Int zw, Int zh, ListBuf(Int) b) {
+    if (y >= zh) { return b.finish(); }
+    if (x >= zw) { return zoom_at(px, w, k, 0, y + 1, zw, zh, b); }
+    Int s = ((y / k) * w + (x / k)) * 4;
+    return zoom_at(px, w, k, x + 1, y, zw, zh, b.push(px[s]).push(px[s + 1]).push(px[s + 2]).push(px[s + 3]));
+}
+
+Widget viewer_view(Viewer v) {
+    Int w = 64;
+    Int h = 48;
     return Column([
-        Text("Image Viewer (fallback)"),
-        // In a real app with native_image capability, you'd load from file:
-        // Image img = decoded_to_image(unpack_image(native_decode(file_bytes), len));
-        // For now, create a synthetic gradient image as Bitmap
-        Bitmap(32, 32, "gradient")
+        Text(f"gradient {w}x{h} at {v.zoom}x (wheel zooms)"),
+        Align(50, 50, Bitmap(w * v.zoom, h * v.zoom, zoomed(gradient(w, h), w, h, v.zoom)))
     ]);
 }
 
-// Create a simple gradient image (as bytes for Bitmap)
-List(Int) gradient_img(Int w, Int h) {
-    return gradient_img_loop(w, h, 0, []);
-}
+App(Viewer) = { .init = viewer_init, .update = viewer_update, .view = viewer_view };
 
-List(Int) gradient_img_loop(Int w, Int h, Int i, List(Int) acc) {
-    if (i >= w * h) { return acc; }
-    Int x = i % w;
-    Int y = i / w;
-    Int r = (x * 255) / w;
-    Int g = (y * 255) / h;
-    Int b = ((x + y) * 255) / (w + h);
-    return gradient_img_loop(w, h, i + 1, acc.concat([r, g, b, 255]));
-}
-
-App(Int) = { .init = viewer_init, .update = viewer_update, .view = viewer_view };
-
-@requires(display)
+@requires(display, clock(readonly))
 Int main() {
-    return gui_run(WindowOptions { .title = "Image Viewer", .width = 320, .height = 240, .resizable = true });
+    return gui_run(WindowOptions { .title = "Image Viewer", .width = 320, .height = 260, .resizable = true });
 }

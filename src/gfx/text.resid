@@ -1,32 +1,57 @@
+// text.resid — drawing text with the built-in 8x16 bitmap font.
+//
+// One glyph is 16 rows of one byte each; a set bit is a pixel in the text
+// colour. Every write is clipped, so text that runs past its box or the
+// damaged region never touches pixels outside it.
+
 import "canvas.resid";
 import "font.resid";
 
-pub Canvas render_text(Canvas c, Int x0, Int y0, Str s, Color col, Int i, Int cx) {
-    if (i >= s.len()) { return c; }
-    Int code = str_char_code_at(s, i);
-    Int charx = x0 + (i * 8);
-    return render_text(render_glyph(c, charx, y0, code, col, 0), x0, y0, s, col, i + 1, cx);
+/// Draw `s` with its top-left corner at (`x0`, `y0`), clipped to `clip`.
+pub Canvas render_text_clip(Canvas c, Int x0, Int y0, Str s, Color col, Rect clip) {
+    return render_text_scaled(c, x0, y0, s, col, clip, 1);
 }
 
-Canvas render_glyph(Canvas c, Int x0, Int y0, Int code, Color col, Int row) {
-    Glyph g = glyph_for(code);
+/// `render_text_clip` with each font pixel drawn as a `k` x `k` block.
+pub Canvas render_text_scaled(Canvas c, Int x0, Int y0, Str s, Color col, Rect clip, Int k) {
+    Int n = str_len(s);
+    Rect box = rect_intersect(clip, Rect { .x = x0, .y = y0, .w = n * 8 * k, .h = 16 * k });
+    if (rect_is_empty(box)) { return c; }
+    return text_chars(c, x0, y0, s, n, col, box, 0, k);
+}
+
+/// Draw `s` clipped to the canvas alone.
+pub Canvas render_text(Canvas c, Int x0, Int y0, Str s, Color col) {
+    return render_text_clip(c, x0, y0, s, col, canvas_bounds(c));
+}
+
+Canvas text_chars(Canvas c, Int x0, Int y0, Str s, Int n, Color col, Rect clip, Int i, Int k) {
+    if (i >= n) { return c; }
+    Int gx = x0 + i * 8 * k;
+    Canvas next = if (gx + 8 * k <= clip.x || gx >= clip.x + clip.w) { c } else { glyph_rows_draw(c, gx, y0, str_char_at(s, i), col, clip, 0, k) };
+    return text_chars(next, x0, y0, s, n, col, clip, i + 1, k);
+}
+
+Canvas glyph_rows_draw(Canvas c, Int x, Int y, Int code, Color col, Rect clip, Int row, Int k) {
     if (row >= 16) { return c; }
-    Int bits = g.rows[row];
-    return render_glyph(draw_bits(c, x0, y0 + row, bits, col, 0), x0, y0, code, col, row + 1);
+    Int bits = glyph_row(code, row);
+    Canvas next = if (bits == 0) { c } else { glyph_bits(c, x, y + row * k, bits, col, clip, 0, k) };
+    return glyph_rows_draw(next, x, y, code, col, clip, row + 1, k);
 }
 
-Canvas draw_bits(Canvas c, Int x, Int y, Int bits, Color col, Int bit) {
+Canvas glyph_bits(Canvas c, Int x, Int y, Int bits, Color col, Rect clip, Int bit, Int k) {
     if (bit >= 8) { return c; }
-    Int mask = 1 << (7 - bit);
-    Canvas out = if ((bits & mask) != 0) { fill_rect(c, Rect { .x = x + bit, .y = y, .w = 1, .h = 1 }, col) } else { c };
-    return draw_bits(out, x, y, bits, col, bit + 1);
+    Bool on = (bits & (1 << (7 - bit))) != 0;
+    Canvas next = if (!on) { c } else { if (k == 1) { set_pixel_clip(c, x + bit, y, col, clip) } else { fill_rect_clip(c, Rect { .x = x + bit * k, .y = y, .w = k, .h = k }, col, clip) } };
+    return glyph_bits(next, x, y, bits, col, clip, bit + 1, k);
 }
 
-pub Int str_char_code_at(Str s, Int i) {
-    if (i < 0 || i >= s.len()) { return 0; }
-    return str_char_at(s, i);
-}
-
-test "text render width" {
-    expect(str_char_code_at("A",0)).toEqual(65);
+test "text sets glyph pixels and respects the clip" {
+    Color ink = rgb(200, 0, 0);
+    Canvas c = render_text(canvas_new(16, 16), 0, 0, "!", ink);
+    // '!' is a vertical bar in columns 3-4, rows 4-9.
+    expect(pixel_at(c, 3, 5).r).toEqual(200);
+    expect(pixel_at(c, 0, 5).r).toEqual(0);
+    Canvas d = render_text_clip(canvas_new(16, 16), 0, 0, "!", ink, Rect { .x = 0, .y = 0, .w = 3, .h = 16 });
+    expect(pixel_at(d, 3, 5).r).toEqual(0);
 }

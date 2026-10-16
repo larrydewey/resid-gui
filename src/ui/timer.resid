@@ -1,15 +1,34 @@
-import "../gui.resid";
+// timer.resid — periodic deadlines on a monotonic clock.
+//
+// Times are milliseconds from any fixed origin (the loop reads
+// `clock.monotonic_ns()` and divides). A timer is a value: firing it
+// returns the timer with its next deadline.
 
+/// A periodic timer: fires every `period` milliseconds once `next` passes.
 pub type Timer = { Int id; Int period; Int next; Bool on; };
 
-pub Timer timer_new(Int id, Int period) { return Timer { .id = id, .period = period, .next = period, .on = true }; }
+/// A timer that first fires `period` milliseconds after `now`.
+pub Timer timer_start(Int id, Int period, Int now) { return Timer { .id = id, .period = period, .next = now + period, .on = true }; }
 
+/// `timer_start` from time zero.
+pub Timer timer_new(Int id, Int period) { return timer_start(id, period, 0); }
+
+/// The timer re-armed one period after `now`.
 pub Timer timer_reset(Timer t, Int now) {
     return Timer { .id = t.id, .period = t.period, .next = now + t.period, .on = t.on };
 }
 
+/// Whether the timer's deadline has passed.
 pub Bool timer_due(Timer t, Int now) { return t.on && now >= t.next; }
 
+/// Milliseconds until the timer is due (0 when it already is), or -1 for
+/// a timer that is off.
+pub Int timer_wait(Timer t, Int now) {
+    if (!t.on) { return -1; }
+    return if (t.next <= now) { 0 } else { t.next - now };
+}
+
+/// The earliest deadline among `xs`, or `best` when none is earlier.
 pub Int timer_next_due(List(Timer) xs, Int i, Int best) {
     if (i >= xs.len()) { return best; }
     if (!xs[i].on) { return timer_next_due(xs, i + 1, best); }
@@ -18,12 +37,18 @@ pub Int timer_next_due(List(Timer) xs, Int i, Int best) {
     return timer_next_due(xs, i + 1, next_best);
 }
 
+/// The timer switched on or off.
 pub Timer timer_enabled(Timer t, Bool on) {
     return Timer { .id = t.id, .period = t.period, .next = t.next, .on = on };
 }
 
-test "timer due" {
+test "timer due and wait" {
     Timer t = timer_new(1, 10);
     expect(timer_due(t, 5)).toEqual(false);
     expect(timer_due(t, 10)).toEqual(true);
+    expect(timer_wait(t, 4)).toEqual(6);
+    expect(timer_wait(t, 40)).toEqual(0);
+    expect(timer_wait(timer_enabled(t, false), 0)).toEqual(-1);
+    expect(timer_reset(t, 100).next).toEqual(110);
+    expect(timer_next_due([timer_start(1, 50, 0), t], 0, -1)).toEqual(10);
 }

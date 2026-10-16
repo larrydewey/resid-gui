@@ -1,154 +1,196 @@
-// gui.resid — the application interface of resid-gui.
+// gui.resid — the program-facing entry point of resid-gui.
 //
 // A program declares an `App(M)` instance and calls `gui_run`. The library
 // owns the display connection, the frame loop and the pixels; the program
-// owns the model. Nothing here holds ambient authority: every function that
-// reaches a display builtin says so with @requires.
+// owns the model. Nothing here holds ambient authority: every function
+// that reaches a display builtin or the clock says so with @requires.
+//
+// The loop is written once against `Backend(B)` and runs over whichever
+// backend could open a window: Wayland when a compositor is reachable,
+// X11 otherwise. Each turn it
+//   1. presents the pixels changed since the last present, when the
+//      backend has a free buffer,
+//   2. waits for input until the next timer is due,
+//   3. folds every event through the widgets (`ui_event`) and `update`,
+//   4. fires the caret-blink timer (`FrameTick`),
+//   5. re-runs `view` and `paint` and diffs the display list against the
+//      previous one; the rectangles that differ are the damage, and only
+//      they are rasterized when the frame is presented.
+//
+// There is no frame buffer in the loop: a frame is its display list, and a
+// backend rasterizes the damaged rectangles straight into the shared
+// buffer it is about to show.
 
-import "x11/connect.resid";
-import "x11/conn.resid";
-import "x11/events.resid";
-import "x11/requests.resid";
+import "app.resid";
+import "backend/backend.resid";
+import "x11/x11.resid";
+import "wayland/wayland.resid";
 import "gfx/color.resid";
+import "gfx/canvas.resid";
 import "gfx/draw.resid";
 import "gfx/raster.resid";
+import "ui/layout.resid";
 import "ui/paint.resid";
 import "ui/damage.resid";
-import "ui/buffers.resid";
+import "ui/input.resid";
+import "ui/state.resid";
 import "ui/timer.resid";
 
-// What the display sends up. Every field is data: the loop decodes bytes
-// into one of these and folds it through `update`.
-type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg);
+/// The caret blinks, and `FrameTick` arrives, this often.
+pub Int blink_ms() { return 500; }
 
-// A message a widget raises. Widgets carry these as values, never closures:
-// a closure cannot be compared, and value equality is what damage tracking
-// is built on.
-type Msg = Clicked | Toggled | Changed(Str) | Submitted | Focused | Blurred;
-
-// What the program wants on screen. A widget is a value, so two equal models
-// give two equal display lists and therefore identical pixels.
-type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget)) | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Widget) | Bitmap(Int, Int, Str) | Slider(Int, Msg) | Spacer;
-
-// A program's application: a model, a pure step over events, a pure view.
-behavior App(M) {
-    M init();
-    M update(M m, Event e);
-    Widget view(M m);
-}
-
-// How a window is opened. `width`/`height` are in device pixels.
-type WindowOptions = {
-    Str title; Int width; Int height; Bool resizable;
+/// Everything the loop carries between turns. `ops` is the frame last
+/// painted, in logical pixels, for a window of `w` x `h` device pixels at
+/// `scale`; `pending` is the device damage not yet presented.
+type Loop(M) = {
+    M model; UiState ui; Widget view;
+    List(DrawOp) ops; Int w; Int h; Int scale;
+    List(Rect) pending; Timer blink; Bool done;
 };
 
-@requires(display)
-pub Int gui_send_seq(Int fd, List(List(Int)) seq, Int handle, Int i) {
-    if (i >= seq.len()) { return i; }
-    Int pass = if (i == seq.len() - 1) { resid_disp_shm_fd(handle) } else { -1 };
-    if (!resid_disp_send(fd, seq[i], pass)) { return i; }
-    return gui_send_seq(fd, seq, handle, i + 1);
-}
+/// Milliseconds on the monotonic clock.
+@requires(clock(readonly))
+Int now_ms() { return clock.monotonic_ns() / 1000000; }
 
-@requires(display)
-pub Int gui_event_loop(Int fd) {
-    List(Int) ready = resid_disp_poll([fd], [1], 1000);
-    if (ready.len() > 0 && (ready[0] & 1) != 0) {
-        List(Int) got = resid_disp_recv(fd, 65536);
-        if (got.len() == 0) { return 0; }
-    }
-    if (ready.len() > 0 && (ready[0] & 4) != 0) { return 0; }
-    if (ready.len() > 0 && (ready[0] & 8) != 0) { return 0; }
-    return gui_event_loop(fd);
-}
-
-// Open a window and run the program's `App(M)` instance until it is closed.
-// Blocks; returns the process exit status.
+/// Open a window and run the program's `App(M)` instance until the window
+/// is closed. Returns the process exit status: 0 after a clean close, 1
+/// when no display could be opened.
 @needs(App(M))
-@requires(display)
-pub Int gui_run_x11(WindowOptions opts) { return gui_run(opts); }
-
-@needs(App(M))
-@requires(display)
+@requires(display, clock(readonly))
 pub Int gui_run(WindowOptions opts) {
-    Session s = x11_open(auth_none());
-    if (s.fd < 0) { return 1; }
-    Conn c = conn_new(s.setup);
-    Int width = if (opts.width < 1) { 1 } else { opts.width };
-    Int height = if (opts.height < 1) { 1 } else { opts.height };
-    Int bytes = width * height * 4;
-    // Double buffering: two shm handles
-    Int handle0 = resid_disp_shm_new(bytes);
-    if (handle0 == 0) { _ = x11_close(s); return 1; }
-    Int handle1 = resid_disp_shm_new(bytes);
-    if (handle1 == 0) { _ = resid_disp_shm_free(handle0); _ = x11_close(s); return 1; }
-    List(List(Int)) seq = conn_open_window(c, width, height);
-    Int sent = gui_send_seq(s.fd, seq, handle0, 0);
-    if (sent != seq.len()) { _ = x11_close(s); _ = resid_disp_shm_free(handle0); _ = resid_disp_shm_free(handle1); return 1; }
-    // Initial frame for the program's initial model.
-    M model0 = init();
-    List(DrawOp) prev_ops = paint_widget(view(model0), Rect { .x = 0, .y = 0, .w = width, .h = height });
-    _ = gui_render_frame(s.fd, handle0, c, model0, width, height, prev_ops);
-    // Timer for caret blink (500ms)
-    Timer blink_timer = timer_new(0, 500);
-    M finalmodel = gui_run_loop(s, c, model0, width, height, handle0, handle1, 0, blink_timer, prev_ops, []);
-    _ = resid_disp_shm_free(handle0);
-    _ = resid_disp_shm_free(handle1);
-    _ = x11_close(s);
-    return 0;
+    Wl w = wl_start(opts);
+    if (w.alive) { return gui_run_on(w); }
+    Bool wl_tried = str_len(w.err) > 0;
+    X11 x = x11_start(opts);
+    if (x.alive) { return gui_run_on(x); }
+    if (wl_tried) { eprintln(w.err); }
+    eprintln(if (str_len(x.err) > 0) { x.err } else { "resid-gui: no display" });
+    return 1;
+}
+
+/// `gui_run` over X11 only, for testing the X11 backend on a Wayland
+/// desktop (Xwayland).
+@needs(App(M))
+@requires(display, clock(readonly))
+pub Int gui_run_x11(WindowOptions opts) {
+    X11 x = x11_start(opts);
+    if (x.alive) { return gui_run_on(x); }
+    eprintln(x.err);
+    return 1;
+}
+
+/// Run the program on an opened backend.
+@needs(App(M), Backend(B))
+@requires(display, clock(readonly))
+pub Int gui_run_on(B b) {
+    M m0 = init();
+    Widget v0 = view(m0);
+    Loop(M) st = Loop {
+        .model = m0, .ui = ui_new(), .view = v0, .ops = [], .w = 0, .h = 0, .scale = 0,
+        .pending = [], .blink = timer_start(0, blink_ms(), now_ms()), .done = false
+    };
+    return gui_loop(b, st);
+}
+
+@needs(App(M), Backend(B))
+@requires(display, clock(readonly))
+Int gui_loop(B b, Loop(M) st0) {
+    if (st0.done || !be_alive(b)) {
+        _ = be_close(b);
+        return 0;
+    }
+    Loop(M) st = render(b, st0);
+    Bool show = st.pending.len() > 0 && be_ready(b);
+    B b2 = if (show) { be_present(b, st.ops, st.scale, st.pending) } else { b };
+    Loop(M) st2 = if (show) { with_pending(st, []) } else { st };
+    Int wait = timer_wait(st2.blink, now_ms());
+    Pumped(B) p = be_pump(b2, if (wait < 0) { 1000 } else { wait });
+    Loop(M) st3 = fold_events(p.events, 0, st2, be_scale(p.b), be_width(p.b), be_height(p.b));
+    Loop(M) st4 = tick(st3, now_ms());
+    return gui_loop(p.b, st4);
+}
+
+/// Paint the current view and add what changed to the pending damage. A
+/// new window size or scale damages the whole window.
+@needs(App(M), Backend(B))
+Loop(M) render(B b, Loop(M) st) {
+    Int w = be_width(b);
+    Int h = be_height(b);
+    Int s = be_scale(b);
+    List(DrawOp) ops = paint(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui);
+    Bool fresh = st.w != w || st.h != h || st.scale != s;
+    Rect all = Rect { .x = 0, .y = 0, .w = w, .h = h };
+    List(Rect) dmg = if (fresh) { [all] } else { scale_all(damage_rects(st.ops, ops), s, 0, []) };
+    return Loop {
+        .model = st.model, .ui = st.ui, .view = st.view, .ops = ops, .w = w, .h = h, .scale = s,
+        .pending = rects_clip(if (fresh) { dmg } else { rects_merge(st.pending, dmg) }, all), .blink = st.blink, .done = st.done
+    };
+}
+
+List(Rect) scale_all(List(Rect) rs, Int s, Int i, List(Rect) acc) {
+    if (i >= rs.len()) { return acc; }
+    return scale_all(rs, s, i + 1, acc.concat([scale_up(rs[i], s)]));
 }
 
 @needs(App(M))
-@requires(display)
-Int gui_render_frame(Int fd, Int handle, Conn c, M model, Int width, Int height, List(DrawOp) ops) {
-    List(Int) px = rasterize_ops(ops, width, height);
-    _ = resid_disp_shm_put(handle, 0, px, width * height * 4);
-    _ = resid_disp_send(fd, conn_present(c, width, height), -1);
-    return 0;
+Loop(M) with_pending(Loop(M) st, List(Rect) p) {
+    return Loop { .model = st.model, .ui = st.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
+                  .pending = p, .blink = st.blink, .done = st.done };
 }
 
+/// A device-pixel event in the program's logical pixels.
+pub Event to_logical(Event e, Int s) {
+    if (s <= 1) { return e; }
+    return match (e) {
+        PointerMoved(x, y) => PointerMoved(x / s, y / s),
+        PointerDown(x, y, b) => PointerDown(x / s, y / s, b),
+        PointerUp(x, y, b) => PointerUp(x / s, y / s, b),
+        Resized(w, h) => Resized(w / s, h / s),
+        _ => e
+    };
+}
+
+/// Fold the backend's events, in order, through the widgets and `update`.
 @needs(App(M))
-@requires(display)
-M gui_run_loop(Session s, Conn c, M model, Int width, Int height, Int front_handle, Int back_handle, Int front_idx, Timer blink_timer, List(DrawOp) prev_ops, List(Int) buf) {
-    // Check timers
-    Int now = 0; // Simplified: would use clock capability in real impl
-    // For now, just use poll timeout for timer approximation
-    Int poll_timeout = timer_next_due([blink_timer], 0, 16);
-    
-    if (buf.len() >= 32) {
-        Event e = decode_event(slice_bytes(buf, 0, 32, 0, []));
-        M m2 = update(model, e);
-        // Handle timer events
-        Timer next_blink = if (timer_due(blink_timer, now)) { timer_reset(blink_timer, now) } else { blink_timer };
-        M m3 = if (timer_due(blink_timer, now)) { update(m2, FrameTick) } else { m2 };
-        Widget vw = view(m3);
-        List(DrawOp) new_ops = paint_widget(vw, Rect { .x = 0, .y = 0, .w = width, .h = height });
-        
-        // Damage tracking: only redraw if display list changed
-        if (!draw_lists_equal(prev_ops, new_ops)) {
-            List(Int) changed = changed_ops(prev_ops, new_ops);
-            // For simplicity, full frame redraw if any change
-            _ = gui_render_frame(s.fd, front_handle, c, m3, width, height, new_ops);
-            // Swap buffers
-            Int next_front = if (front_idx == 0) { back_handle } else { front_handle };
-            Int next_back = if (front_idx == 0) { front_handle } else { back_handle };
-            Int next_idx = if (front_idx == 0) { 1 } else { 0 };
-            // Note: In real impl, would present next_front and swap
-        }
-        
-        Bool closed = match (e) { Closed => true, _ => false };
-        List(Int) rest = slice_bytes(buf, 32, buf.len(), 0, []);
-        if (closed) { return m3; }
-        return gui_run_loop(s, c, m3, width, height, front_handle, back_handle, front_idx, next_blink, new_ops, rest);
-    }
-    List(Int) ready = resid_disp_poll([s.fd], [1], poll_timeout);
-    if (ready.len() > 0 && (ready[0] & 1) != 0) {
-        List(Int) got = resid_disp_recv(s.fd, 65536);
-        if (got.len() == 0) { return model; }
-        return gui_run_loop(s, c, model, width, height, front_handle, back_handle, front_idx, blink_timer, prev_ops, buf.concat(got));
-    }
-    if (ready.len() > 0 && (ready[0] & 8) != 0) { return model; }
-    // Timer tick
-    return gui_run_loop(s, c, model, width, height, front_handle, back_handle, front_idx, blink_timer, prev_ops, buf);
+Loop(M) fold_events(List(Event) es, Int i, Loop(M) st, Int s, Int w, Int h) {
+    if (i >= es.len() || st.done) { return st; }
+    Rect area = Rect { .x = 0, .y = 0, .w = w / s, .h = h / s };
+    UiStep u = ui_event(st.ui, st.view, area, to_logical(es[i], s));
+    Loop(M) next = apply(u.out, 0, Loop {
+        .model = st.model, .ui = u.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
+        .pending = st.pending, .blink = st.blink, .done = st.done
+    });
+    return fold_events(es, i + 1, next, s, w, h);
 }
 
+/// Hand each event to `update`, refreshing the view after each so the next
+/// event meets the widgets the program now shows. `Closed` ends the loop
+/// once `update` has seen it.
+@needs(App(M))
+Loop(M) apply(List(Event) es, Int i, Loop(M) st) {
+    if (i >= es.len()) { return st; }
+    M m = update(st.model, es[i]);
+    Bool closed = match (es[i]) { Closed => true, _ => false };
+    return apply(es, i + 1, Loop {
+        .model = m, .ui = st.ui, .view = view(m), .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
+        .pending = st.pending, .blink = st.blink, .done = st.done || closed
+    });
+}
+
+/// Fire the blink timer: flip the caret and send `FrameTick`.
+@needs(App(M))
+Loop(M) tick(Loop(M) st, Int now) {
+    if (!timer_due(st.blink, now) || st.done) { return st; }
+    M m = update(st.model, FrameTick);
+    return Loop {
+        .model = m, .ui = ui_with_caret(st.ui, !st.ui.caret_on), .view = view(m), .ops = st.ops, .w = st.w, .h = st.h,
+        .scale = st.scale, .pending = st.pending, .blink = timer_reset(st.blink, now), .done = st.done
+    };
+}
+
+test "device events become logical" {
+    Bool ok = match (to_logical(PointerDown(10, 20, 1), 2)) { PointerDown(x, y, b) => x == 5 && y == 10 && b == 1, _ => false };
+    expect(ok).toEqual(true);
+    Bool same = match (to_logical(KeyDown(30, "a"), 2)) { KeyDown(k, t) => k == 30 && t == "a", _ => false };
+    expect(same).toEqual(true);
+}

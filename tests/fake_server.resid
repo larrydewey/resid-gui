@@ -1,226 +1,129 @@
-// fake_server.resid — a client and a fake X server over one socket pair.
+// fake_server.resid — the X11 backend against a fake server over a socket
+// pair.
 //
-// This is the exit criterion for the first half of G2 (PLAN-gui.md §3.5):
-// a client that completes the connection setup, opens a window, attaches a
-// shared segment and presents a frame, against a server that only has to
-// answer. Nothing here renders: the frame is one solid colour, and the
-// server checks the bytes rather than showing anything.
-//
-// The client runs in a spawned region and the server in the main thread,
-// because the two must be in step with each other and only one of them can
-// block. The server is the referee: it returns a count of what it saw, and
-// the test asserts on that.
+// The client is the library's own code: `x11_handshake`, `x11_start_on`
+// (atoms, MIT-SHM, the window, two attached segments) and `x11_present`.
+// It runs in a spawned region; the server runs here and is the referee. It
+// answers the setup and every request that has a reply, checks that each
+// request's length field matches its bytes, and records what it saw: the
+// requests by opcode, how many descriptors arrived with `ShmAttachFd`, and
+// the rectangle of the first `ShmPutImage`.
 
+import "../src/app.resid";
+import "../src/gfx/color.resid";
+import "../src/gfx/draw.resid";
 import "../src/x11/wire.resid";
 import "../src/x11/setup.resid";
 import "../src/x11/requests.resid";
+import "../src/x11/events.resid";
 import "../src/x11/stream.resid";
-import "../src/x11/conn.resid";
+import "../src/x11/connect.resid";
+import "../src/x11/x11.resid";
 
-// ─── The server's reply ─────────────────────────────────────────────
+/// The extension opcode and first event the fake server gives MIT-SHM.
+Int fake_shm() { return 130; }
+Int fake_shm_event() { return 90; }
 
-/// The setup reply the fake server sends: release 1, resource ids from
-/// 0x2000_0000 with a mask of 0x001f_ffff, vendor "fake". The length
-/// field is derived from the bytes, so a client that trusts it and a
-/// server that means it cannot disagree.
-pub List(Int) fake_setup_reply() {
-    ListBuf(Int) e = enc_words(enc_new(), [1, 0x20000000, 0x001fffff, 65536]);
-    ListBuf(Int) f = enc_words16(e, [4, 65535]);              // vendor len, max request
-    ListBuf(Int) g = enc_bytes(f, 8, 0);                     // screens..max keycode
-    List(Int) body = pad_to(enc_finish(enc_str_at(g, "fake", 0)), 4);
-    Int units = (body.len() + 3) / 4;
-    ListBuf(Int) a = enc_byte(enc_byte(enc_new(), 1), 0);     // success, no auth
-    ListBuf(Int) b = enc_word16(a, 11);                       // major version
-    ListBuf(Int) c = enc_word16(b, 0);                        // minor version
-    return enc_finish(enc_word16(c, units)).concat(body);
+/// A 32-byte reply with the given words from byte 8 on.
+List(Int) reply_words(Int seq, List(Int) words) {
+    ListBuf(Int) b = enc_words(enc_word16(enc_byte(enc_byte(enc_new(), 1), 0), seq), [0]);
+    List(Int) r = enc_finish(enc_words(b, words));
+    return r.concat(enc_finish(enc_bytes(enc_new(), 32 - r.len(), 0)));
 }
 
-/// The reply to `ShmAttach`: a segment id of 0x3000_0001.
-pub List(Int) fake_attach_reply() {
-    ListBuf(Int) b = enc_byte(enc_byte(enc_new(), 1), 1);
-    ListBuf(Int) c = enc_words16(b, [0]);                    // sequence
-    ListBuf(Int) d = enc_words(c, [0]);                      // extra length
-    ListBuf(Int) e = enc_words(d, [0x30000001]);             // the segment id
-    ListBuf(Int) f = enc_words(e, [0, 0]);
-    ListBuf(Int) g = enc_bytes(f, 16, 0);
-    return enc_finish(g);
+/// The reply to a request that has one, or an empty list.
+List(Int) answer(List(Int) r, Int seq) {
+    Int op = r[0];
+    if (op == op_intern_atom()) { return reply_words(seq, [500 + seq]); }
+    if (op == op_query_extension()) {
+        // present, major opcode, first event, first error
+        return reply_words(seq, [1 | (fake_shm() << 8) | (fake_shm_event() << 16)]);
+    }
+    if (op == fake_shm() && r[1] == shm_query_version()) { return reply_words(seq, [1 | (2 << 16)]); }
+    return [];
 }
 
-/// Whether a read succeeded. `Result` has no `ok` field, and a caller that
-/// wants only that should not have to match.
-Bool got_bytes(Result(List(Int), Str) r) {
-    return match (r) { Ok(v) => true, Err(e) => false };
-}
+/// What the server saw.
+type Seen = { List(Int) ops; Int fds; Rect put; Bool bad; Str why; };
 
-/// The bytes of a read, or an empty list when it failed.
-List(Int) read_value(Result(List(Int), Str) r) {
-    return match (r) { Ok(v) => v, Err(e) => [] };
-}
+Seen seen_bad(Seen s, Str why) { return Seen { .ops = s.ops, .fds = s.fds, .put = s.put, .bad = true, .why = why }; }
 
-// ─── Reading exactly `want` bytes ───────────────────────────────────
-
-/// Read until `buf` holds `want` bytes. `want` must be a real count: a
-/// receive blocks, so "read whatever is there" is `read_some`, not a loop
-/// with no end.
 @requires(display)
-Result(List(Int), Str) read_exact(Int fd, Int want, List(Int) buf) {
-    if (buf.len() >= want) { return Ok(buf); }
-    List(Int) got = resid_disp_recv(fd, 65536);
-    if (got.len() == 0) { return Err("x11: connection closed while reading"); }
-    return read_exact(fd, want, buf.concat(got));
-}
-
-/// One receive, whatever arrives. A reply's own length field says how much
-/// more is needed, so one read is enough to start.
-@requires(display)
-Result(List(Int), Str) read_some(Int fd, List(Int) buf) {
-    List(Int) got = resid_disp_recv(fd, 65536);
-    if (got.len() == 0) { return Err("x11: connection closed while reading"); }
-    return Ok(buf.concat(got));
-}
-
-// ─── The client ─────────────────────────────────────────────────────
-
-/// Connect, open a window and present one solid frame. Runs in a region.
-@requires(display)
-pub Int client_session(Int fd) {
-    Bool sent0 = resid_disp_send(fd, setup_request("", []), -1);
-    if (!sent0) { return 1; }
-    Result(List(Int), Str) r0 = read_some(fd, []);
-    if (!got_bytes(r0)) { return 2; }
-    List(Int) head = read_value(r0);
-    if (head.len() < 8) { return 2; }
-    // The setup reply's length field says how much of it there is.
-    Int need = 8 + ((half_at(head, 6) & 65535) * 4);
-    Result(List(Int), Str) r0b = read_exact(fd, need, head);
-    if (!got_bytes(r0b)) { return 2; }
-    Setup s = setup_parse(read_value(r0b)) else { setup_empty() };
-    if (s.id_base == 0) { return 3; }
-    Conn c = conn_new(s);
-    List(List(Int)) seq = conn_open_window(c, 64, 48);
-    Int sent = send_all(fd, seq, conn_segment_id(c));
-    if (sent != seq.len()) { return 4; }
-    Result(List(Int), Str) r1 = read_exact(fd, 32, []);
-    if (!got_bytes(r1)) { return 5; }
-    Int seg_id = reply_word32(read_value(r1), 0) else { 0 };
-    if (seg_id != 0x30000001) { return 7; }
-    List(Int) put = conn_present(c, 64, 48);
-    if (!resid_disp_send(fd, put, -1)) { return 8; }
-    return 0;
-}
-
-/// Send the open-window sequence. The last one is the SHM attach, which
-/// carries the descriptor out of band, so it is sent with a descriptor and
-/// the rest without.
-@requires(display)
-Int send_all(Int fd, List(List(Int)) seq, Int seg) {
-    Int shm = resid_disp_shm_new(64 * 48 * 4);
-    if (shm == 0) { return 0; }
-    Int n = 0;
-    return send_from(fd, seq, seg, shm, n);
-}
-
-/// `send_all`'s loop: every request but the last goes out plainly, and the
-/// last carries the segment's descriptor.
-@requires(display)
-Int send_from(Int fd, List(List(Int)) seq, Int seg, Int shm, Int n) {
-    if (n >= seq.len()) { return n; }
-    Bool last = (n == seq.len() - 1);
-    Int pass = if (last) { resid_disp_shm_fd(shm) } else { -1 };
-    if (!resid_disp_send(fd, seq[n], pass)) { return n; }
-    return send_from(fd, seq, seg, shm, n + 1);
-}
-
-// ─── The server ─────────────────────────────────────────────────────
-
-/// What the fake server saw: the opcode of each request, and whether the
-/// descriptor arrived with the attach.
-type Served = { Int requests; Int last_op; Int shm_op; Bool fd_seen; Bool bad; };
-
-/// Accept one client: the setup, the open-window sequence, the attach and
-/// one present. Returns what it saw.
-@requires(display)
-pub Served serve(Int fd, List(Int) buf) {
-    return serve_setup(fd, buf);
-}
-
-/// The setup handshake: wait for the client's first bytes, check the byte
-/// order, and answer with the reply whose length field matches its body.
-@requires(display)
-Served serve_setup(Int fd, List(Int) buf) {
+Seen serve(Int fd) {
+    List(Int) buf = recv_until(fd, 12, []);
     Taken s0 = take_setup(buf);
-    if (s0.ok) { return serve_after_setup(fd, s0.req, s0.rest); }
-    if (s0.bad) { return Served { .requests = 0, .last_op = -1, .shm_op = -1, .fd_seen = false, .bad = true }; }
-    Result(List(Int), Str) got = read_some(fd, buf);
-    if (!got_bytes(got)) { return Served { .requests = 0, .last_op = -1, .shm_op = -1, .fd_seen = false, .bad = true }; }
-    return serve_setup(fd, read_value(got));
+    Seen none = Seen { .ops = [], .fds = 0, .put = rect_none(), .bad = false, .why = "" };
+    if (!s0.ok || s0.req[0] != 108) { return seen_bad(none, "no setup request"); }
+    if (!resid_disp_send(fd, setup_reply_bytes(0x00400000, 0x001fffff, "fake", 0x100, 33, 1920, 1080), -1)) { return seen_bad(none, "reply failed"); }
+    return serve_requests(fd, s0.rest, 1, none);
 }
 
-/// The handshake's checks, once the request has arrived whole.
 @requires(display)
-Served serve_after_setup(Int fd, List(Int) req, List(Int) rest) {
-    if (half_at(req, 0) != 108) { return Served { .requests = 0, .last_op = -1, .shm_op = -1, .fd_seen = false, .bad = true }; }
-    Bool back = resid_disp_send(fd, fake_setup_reply(), -1);
-    if (!back) { return Served { .requests = 0, .last_op = -1, .shm_op = -1, .fd_seen = false, .bad = true }; }
-    return serve_requests(fd, rest, 0, -1, -1, false, false);
-}
-
-/// Read the open-window sequence, answer the attach, and read the present.
-/// `n` counts the requests taken so far.
-@requires(display)
-Served serve_requests(Int fd, List(Int) buf, Int n, Int last_op, Int shm_op, Bool fd_seen, Bool bad) {
-    Taken t = take_request_dispatch(buf);
-    if (t.bad) { return Served { .requests = n, .last_op = last_op, .shm_op = shm_op, .fd_seen = fd_seen, .bad = true }; }
+Seen serve_requests(Int fd, List(Int) buf, Int seq, Seen seen) {
+    Taken t = take_request(buf);
+    if (t.bad) { return seen_bad(seen, t.err); }
     if (!t.ok) {
         List(Int) got = resid_disp_recv(fd, 65536);
-        if (got.len() == 0) { return Served { .requests = n, .last_op = last_op, .shm_op = shm_op, .fd_seen = fd_seen, .bad = bad }; }
-        return serve_requests(fd, t.rest.concat(got), n, last_op, shm_op, fd_seen, bad);
+        if (got.len() == 0) { return seen; }
+        return serve_requests(fd, t.rest.concat(got), seq, seen);
     }
-    Int op = t.req[0];
-    // MIT-SHM requests carry their minor opcode in the second byte, so an
-    // attach is opcode 70 with 1 beside it — never opcode 1 on its own.
-    if (op == op_shm() && t.req.len() > 1 && t.req[1] == shm_attach()) {
-        // The descriptor rides beside the attach. SCM_RIGHTS delivers a
-        // new descriptor number in the receiving process, so what is
-        // checked is that one arrived.
-        Int fd_in = resid_disp_recv_fd();
-        Bool r = resid_disp_send(fd, fake_attach_reply(), -1);
-        if (!r) { return Served { .requests = n, .last_op = op, .shm_op = shm_op, .fd_seen = false, .bad = true }; }
-        return serve_requests(fd, t.rest, n + 1, op, shm_op, fd_in >= 0, false);
-    }
-    if (op == op_shm() && t.req[1] == shm_put_image()) {
-        return Served { .requests = n + 1, .last_op = op_shm(), .shm_op = t.req[1], .fd_seen = fd_seen, .bad = bad };
-    }
-    return serve_requests(fd, t.rest, n + 1, op, shm_op, fd_seen, bad);
+    List(Int) r = t.req;
+    if (req_len_bytes(r) != r.len()) { return seen_bad(seen, "length field disagrees with the bytes"); }
+    Bool attach = r[0] == fake_shm() && r[1] == shm_attach_fd();
+    Int fd_in = if (attach) { resid_disp_recv_fd() } else { -1 };
+    _ = if (fd_in >= 0) { resid_disp_close(fd_in) } else { false };
+    List(Int) back = answer(r, seq);
+    if (back.len() > 0 && !resid_disp_send(fd, back, -1)) { return seen_bad(seen, "answer failed"); }
+    Bool put = r[0] == fake_shm() && r[1] == shm_put_image();
+    Rect pr = if (put) { Rect { .x = half_at(r, 16), .y = half_at(r, 18), .w = half_at(r, 20), .h = half_at(r, 22) } } else { seen.put };
+    Seen next = Seen { .ops = seen.ops.concat([r[0]]), .fds = seen.fds + if (fd_in >= 0) { 1 } else { 0 }, .put = pr, .bad = false, .why = "" };
+    if (put) { return next; }
+    return serve_requests(fd, t.rest, seq + 1, next);
 }
 
-/// Run one session: the client in a region, the server here.
-@requires(display)
-Served fake_session() {
+/// The client: open a 64x48 window and present one frame with a red
+/// square in it.
+@requires(display, clock(readonly))
+Int client(Int fd) {
+    Session s = x11_handshake(fd);
+    if (str_len(s.err) > 0) { return 1; }
+    X11 x = x11_start_on(s, WindowOptions { .title = "fake", .width = 64, .height = 48, .resizable = false });
+    if (!x.alive) { return 2; }
+    if (x.shm != fake_shm() || x.shm_event != fake_shm_event()) { return 3; }
+    if (x.w != 64 || x.h != 48 || x.wid != 0x00400001) { return 4; }
+    List(DrawOp) ops = [OpFill(Rect { .x = 8, .y = 8, .w = 16, .h = 16 }, rgb(255, 0, 0))];
+    X11 y = x11_present(x, ops, 1, [Rect { .x = 0, .y = 0, .w = 64, .h = 48 }]);
+    return if (y.s0.busy) { 0 } else { 5 };
+}
+
+Bool has(List(Int) xs, Int v, Int i) { return if (i >= xs.len()) { false } else { xs[i] == v || has(xs, v, i + 1) }; }
+
+@requires(display, clock(readonly))
+test "the X11 backend opens a window and presents through MIT-SHM" {
     List(Int) pair = resid_disp_pair();
-    if (pair.len() != 2) { return Served { .requests = 0, .last_op = -1, .shm_op = -1, .fd_seen = false, .bad = true }; }
+    expect(pair.len()).toEqual(2);
     Int sfd = pair[0];
     Int cfd = pair[1];
-    Result(Int, RegionError) r = spawn (display) {
-        return client_session(cfd);
+    Result(Int, RegionError) r = spawn (display, clock(readonly)) {
+        return client(cfd);
     };
-    Served seen = serve(sfd, []);
-    Int client_rc = r else { -1 };
-    if (client_rc != 0) { return with_bad(seen, true); }
-    return seen;
-}
-
-/// `Served` with `bad` set, for a client that failed.
-Served with_bad(Served s, Bool b) {
-    return Served { .requests = s.requests, .last_op = s.last_op, .shm_op = s.shm_op, .fd_seen = s.fd_seen, .bad = b };
-}
-
-@requires(display)
-test "a client completes the handshake and presents a frame" {
-    Served seen = fake_session();
+    Seen seen = serve(sfd);
+    expect(seen.why).toEqual("");
     expect(seen.bad).toEqual(false);
-    expect(seen.requests).toEqual(6);
-    expect(seen.last_op).toEqual(op_shm());
-    expect(seen.shm_op).toEqual(shm_put_image());
-    expect(seen.fd_seen).toEqual(true);
+    expect(r else { -1 }).toEqual(0);
+    expect(has(seen.ops, op_intern_atom(), 0)).toEqual(true);
+    expect(has(seen.ops, op_create_window(), 0)).toEqual(true);
+    expect(has(seen.ops, op_change_property(), 0)).toEqual(true);
+    expect(has(seen.ops, op_create_gc(), 0)).toEqual(true);
+    expect(has(seen.ops, op_map_window(), 0)).toEqual(true);
+    expect(seen.fds).toEqual(2);
+    expect(seen.put.w).toEqual(64);
+    expect(seen.put.h).toEqual(48);
+}
+
+test "replies frame as the client expects" {
+    List(Int) r = reply_words(3, [7]);
+    expect(r.len()).toEqual(32);
+    expect(x_take(r).kind).toEqual(1);
+    expect(word_at(r, 8) else { 0 }).toEqual(7);
 }

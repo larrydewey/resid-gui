@@ -1,31 +1,131 @@
+// raster.resid — replaying a display list into a canvas.
+//
+// The rasterizer redraws one region at a time: it clears the region to the
+// background and replays every op clipped to it, so the pixels outside the
+// region keep whatever the previous frame left there. A full frame is the
+// region that covers the whole canvas.
+
 import "canvas.resid";
 import "color.resid";
 import "draw.resid";
 import "text.resid";
+import "image.resid";
 
-Canvas ramp_apply(Canvas c, DrawOp op) {
-    return match (op) {
-        OpFill(rect, col) => fill_rect(c, rect, col),
-        OpText(x, y, s, col) => render_text(c, x, y, s, col, 0, 0),
-        OpClipPush(rect) => c,
-        OpClipPop => c
+/// The window background every frame starts from.
+pub Color background() { return rgb(240, 240, 240); }
+
+/// Redraw `region` of `c` from `ops`: clear it to `bg`, then apply each op
+/// clipped to the region and to the clip stack in force. The ops are in
+/// logical pixels and the canvas in device pixels, `scale` of them per
+/// logical pixel; `region` is in device pixels.
+pub Canvas raster_region_scaled(Canvas c, List(DrawOp) ops, Rect region, Color bg, Int scale) {
+    Rect r = rect_intersect(region, canvas_bounds(c));
+    if (rect_is_empty(r)) { return c; }
+    Int s = if (scale < 1) { 1 } else { scale };
+    return raster_ops(fill_rect(c, r, bg), ops, 0, [r], s, 0, 0);
+}
+
+/// `raster_region_scaled` at one device pixel per logical pixel.
+pub Canvas raster_region(Canvas c, List(DrawOp) ops, Rect region, Color bg) {
+    return raster_region_scaled(c, ops, region, bg, 1);
+}
+
+/// The device rectangle `r` of the frame `ops` describes, as a canvas of
+/// its own: its pixel (0, 0) is device pixel (`r.x`, `r.y`). Rasterizing
+/// only what changed into a small canvas keeps a frame's cost
+/// proportional to its damage, not to the window.
+pub Canvas raster_rect(List(DrawOp) ops, Rect r, Color bg, Int scale) {
+    Int s = if (scale < 1) { 1 } else { scale };
+    Canvas c = canvas_new(r.w, r.h);
+    Rect all = canvas_bounds(c);
+    return raster_ops(fill_rect(c, all, bg), ops, 0, [all], s, r.x, r.y);
+}
+
+/// A logical rectangle in device pixels.
+pub Rect scale_up(Rect r, Int s) { return Rect { .x = r.x * s, .y = r.y * s, .w = r.w * s, .h = r.h * s }; }
+
+/// A logical rectangle in the device pixels of a canvas whose origin is
+/// device pixel (`ox`, `oy`).
+Rect place(Rect r, Int s, Int ox, Int oy) { return Rect { .x = r.x * s - ox, .y = r.y * s - oy, .w = r.w * s, .h = r.h * s }; }
+
+Canvas raster_ops(Canvas c, List(DrawOp) ops, Int i, List(Rect) clips, Int s, Int ox, Int oy) {
+    if (i >= ops.len()) { return c; }
+    Rect clip = clips[clips.len() - 1];
+    return match (ops[i]) {
+        OpFill(r, col) => raster_ops(fill_rect_clip(c, place(r, s, ox, oy), col, clip), ops, i + 1, clips, s, ox, oy),
+        OpText(x, y, t, col) => raster_ops(render_text_scaled(c, x * s - ox, y * s - oy, t, col, clip, s), ops, i + 1, clips, s, ox, oy),
+        OpImage(x, y, w, h, px) => raster_ops(blit_scaled(c, Image { .w = w, .h = h, .px = px }, x * s - ox, y * s - oy, clip, s), ops, i + 1, clips, s, ox, oy),
+        OpClipPush(r) => raster_ops(c, ops, i + 1, clips.concat([rect_intersect(clip, place(r, s, ox, oy))]), s, ox, oy),
+        OpClipPop => raster_ops(c, ops, i + 1, if (clips.len() > 1) { clips[0..(clips.len() - 1)] } else { clips }, s, ox, oy)
     };
 }
 
-pub Canvas rasterize(List(DrawOp) ops, Int w, Int h, Int i, Canvas acc) {
-    if (i >= ops.len()) { return acc; }
-    Canvas next = ramp_apply(acc, ops[i]);
-    return rasterize(ops, w, h, i + 1, next);
+/// A whole frame from a display list.
+pub Canvas rasterize_frame(List(DrawOp) ops, Int w, Int h) {
+    Canvas c = canvas_new(w, h);
+    return raster_region(c, ops, canvas_bounds(c), background());
 }
 
+/// A whole frame's bytes, for a caller that only wants the pixels.
 pub List(Int) rasterize_ops(List(DrawOp) ops, Int w, Int h) {
-    Canvas c = rasterize(ops, w, h, 0, canvas_new(w, h));
-    return finish(c);
+    return finish(rasterize_frame(ops, w, h));
 }
 
-test "raster" {
+test "a fill lands where it says" {
     List(DrawOp) ops = [OpFill(Rect { .x = 0, .y = 0, .w = 1, .h = 1 }, Color { .b = 1, .g = 2, .r = 3, .a = 4 })];
     List(Int) px = rasterize_ops(ops, 2, 2);
     expect(px.len()).toEqual(16);
     expect(px[0]).toEqual(1);
+    expect(px[4]).toEqual(240);
+}
+
+test "clips nest and pop" {
+    Color red = rgb(255, 0, 0);
+    List(DrawOp) ops = [
+        OpClipPush(Rect { .x = 0, .y = 0, .w = 2, .h = 4 }),
+        OpClipPush(Rect { .x = 1, .y = 0, .w = 4, .h = 4 }),
+        OpFill(Rect { .x = 0, .y = 0, .w = 4, .h = 1 }, red),
+        OpClipPop,
+        OpFill(Rect { .x = 0, .y = 1, .w = 4, .h = 1 }, red),
+        OpClipPop,
+        OpFill(Rect { .x = 0, .y = 2, .w = 4, .h = 1 }, red)
+    ];
+    Canvas c = rasterize_frame(ops, 4, 4);
+    expect(pixel_at(c, 0, 0).r).toEqual(240);
+    expect(pixel_at(c, 1, 0).r).toEqual(255);
+    expect(pixel_at(c, 2, 0).r).toEqual(240);
+    expect(pixel_at(c, 0, 1).r).toEqual(255);
+    expect(pixel_at(c, 2, 1).r).toEqual(240);
+    expect(pixel_at(c, 3, 2).r).toEqual(255);
+}
+
+test "scale doubles every op" {
+    Color red = rgb(255, 0, 0);
+    Canvas c = raster_region_scaled(canvas_new(4, 4), [OpFill(Rect { .x = 1, .y = 1, .w = 1, .h = 1 }, red)], Rect { .x = 0, .y = 0, .w = 4, .h = 4 }, background(), 2);
+    expect(pixel_at(c, 1, 1).r).toEqual(240);
+    expect(pixel_at(c, 2, 2).r).toEqual(255);
+    expect(pixel_at(c, 3, 3).r).toEqual(255);
+    Canvas d = raster_region_scaled(canvas_new(4, 4), [OpImage(0, 0, 1, 1, [0, 0, 255, 255])], Rect { .x = 0, .y = 0, .w = 4, .h = 4 }, background(), 2);
+    expect(pixel_at(d, 1, 1).r).toEqual(255);
+    expect(pixel_at(d, 2, 2).r).toEqual(240);
+}
+
+test "a rectangle rasterizes on its own, at its own origin" {
+    Color red = rgb(255, 0, 0);
+    List(DrawOp) ops = [OpFill(Rect { .x = 2, .y = 2, .w = 1, .h = 1 }, red)];
+    Canvas c = raster_rect(ops, Rect { .x = 4, .y = 4, .w = 2, .h = 2 }, background(), 2);
+    expect(c.w).toEqual(2);
+    expect(pixel_at(c, 0, 0).r).toEqual(255);
+    expect(pixel_at(c, 1, 1).r).toEqual(255);
+    Canvas d = raster_rect(ops, Rect { .x = 0, .y = 0, .w = 2, .h = 2 }, background(), 2);
+    expect(pixel_at(d, 0, 0).r).toEqual(240);
+}
+
+test "a region redraw leaves the rest alone" {
+    Color red = rgb(255, 0, 0);
+    Canvas c0 = fill_rect(canvas_new(4, 1), Rect { .x = 0, .y = 0, .w = 4, .h = 1 }, rgb(1, 1, 1));
+    Canvas c1 = raster_region(c0, [OpFill(Rect { .x = 0, .y = 0, .w = 4, .h = 1 }, red)], Rect { .x = 2, .y = 0, .w = 1, .h = 1 }, background());
+    expect(pixel_at(c1, 1, 0).r).toEqual(1);
+    expect(pixel_at(c1, 2, 0).r).toEqual(255);
+    expect(pixel_at(c1, 3, 0).r).toEqual(1);
 }

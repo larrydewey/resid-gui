@@ -5,14 +5,17 @@ the language: values and pure functions, no ambient authority, compile-time
 reduction of whatever is static, and native code only where it is the right
 tool.
 
-A program states that it touches the display and nothing else:
+A program states that it touches the display (and reads the clock, for
+timers) and nothing else:
 
 ```resid
+import "../src/gui.resid";
+
 Int counter_init() { return 0; }
 
 Int counter_update(Int m, Event e) {
     return match (e) {
-        AppMsg(Clicked) => m + 1,
+        AppMsg(msg) => match (msg) { Clicked => m + 1, _ => m },
         _ => m
     };
 }
@@ -23,112 +26,126 @@ Widget counter_view(Int m) {
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display)
+@requires(display, clock(readonly))
 Int main() {
-    return gui_run(WindowOptions { .title = "Counter", .width = 320, .height = 120 });
+    return gui_run(WindowOptions { .title = "Counter", .width = 320, .height = 120, .resizable = true });
 }
 ```
 
-`src/gui.resid` declares the whole interface; a program adds one instance of
+`src/app.resid` declares the types; a program adds one instance of
 `App(M)` and calls `gui_run`. The library turns that value into pixels on a
-real window.
+real window: a native Wayland toplevel when a compositor is running, an X11
+window otherwise.
 
-## Status: G2 operational; G3/G5/G7 architecture in progress
+## Status
 
-The `display` capability landed in the Resid runtime (phase G1), so
-`@requires(display)` compiles and the Unix-socket transport with descriptor
-passing and the shared-memory handle are available. The X11 backend is under
-construction: `src/x11/` holds the wire codec, the connection setup, the
-request set, stream framing and the connection state, all pure and tested
-against recorded byte sequences; `tests/fake_server.resid` runs a real
-client against a fake server over a socket pair — handshake, window, shared
-segment, one presented frame. `src/gui.resid` still does not compile: it
-calls `gui_run_x11`, which arrives with the backend. The phases are sequenced in
-[PLAN-gui.md](https://github.com/larrydewey/Resid/blob/master/PLAN-gui.md) in
-the Resid repository; each ends with a green test suite plus a commit.
+Both backends run on real servers: Wayland (tested on Hyprland, with
+pointer, keyboard, resizing and buffer scale 2) and X11 (tested on
+Xwayland, with MIT-SHM, pointer, keyboard and resizing). The suite is
+green:
 
 ```sh
-tests/run.sh     # every test file under src/
+tests/run.sh     # every test file under src/ and tests/, then every example
 ```
 
-| Layer | What it is | Phase |
-|---|---|---|
-| `src/backend/` | the `Backend(B)` behavior: frame events in, frames out | G2 |
-| `src/x11/` | the X11 wire codec and setup handshake, spoken directly in Resid | G2 |
-| `src/gfx/` | `Canvas(W, H)`, a linear builder over ARGB32 pixels | G3 |
-| `src/ui/` | widgets, constraint layout, hit testing, focus, the loop | G5 |
-| `src/gui.resid` | `App(M)`, `Event`, `Widget`, `gui_run` — the interface | G1 |
-| `packages/` | optional native modules for fonts and images (`resid-gui-font`, `resid-gui-image`) | G4, G6 |
+It includes a fake X server and a fake Wayland compositor that drive the
+real backends over socket pairs, and golden images compared by SHA-256.
 
-## The display backend is X11 first, Wayland second
+Open items:
 
-Both are spoken directly on the wire in Resid: a Resid program links no
-client library, so there is no `libX11` and no `libwayland`. Only the
-backend differs; `src/gfx/` and `src/ui/` are backend-agnostic.
+- **Native font and image modules** (`native/font`, `native/image`): the C
+  sources exist but are not wired to `@link` yet, so text is the built-in
+  8x16 bitmap font and images are `Bitmap` pixels the program supplies.
+- **Keyboard layouts.** Keys are typed through a built-in US layout. A
+  Wayland compositor sends its keymap as a file descriptor, and Resid has no
+  builtin that reads a received descriptor, so the keymap is closed unread;
+  that needs a runtime addition (`resid_disp_fd_read` or a read-only map).
+- **X11 authorization.** The X11 backend connects without a cookie, which
+  Xwayland, Xephyr, Xnest and servers started without `-auth` accept. A
+  server that demands `MIT-MAGIC-COOKIE-1` needs `~/.Xauthority`, which the
+  `display` family should read itself, like `$DISPLAY`: another runtime
+  addition.
+- **Choosing a backend.** `resid_disp_connect` prefers Wayland and falls
+  back to X11 without saying which it returned; the Wayland backend tells
+  them apart by the first exchange. `WAYLAND_DISPLAY=` forces X11, and
+  `gui_run_x11` skips Wayland. A builtin per protocol would be cleaner.
+- **Speed.** The rasterizer is plain Resid lists, about 0.4 s for a whole
+  2700x2200 frame; damage tracking keeps ordinary frames to the changed
+  rectangles. `Vec` lanes and packed pixels are the next step
+  (PLAN-gui.md G0, G3's 4 ms gate).
 
-**X11 (v1)** is the target. The protocol is a small fixed set of requests for
-a client that renders everything itself, and Xlibre ships the server, the
-`Xfbdev` framebuffer server and `Xnest` for testing. There are no object
-ids, no reference counting, no handshake state machine and no XML to
-generate. Frames go up through MIT-SHM, which is why the display capability
-also needs Unix sockets with descriptor passing.
+| Layer | What it is |
+|---|---|
+| `src/app.resid` | `App(M)`, `Event`, `Msg`, `Widget`, `WindowOptions` |
+| `src/gui.resid` | `gui_run` and the loop, written once against `Backend(B)` |
+| `src/backend/` | the `Backend(B)` behavior, shared-buffer slots, the US keymap |
+| `src/wayland/` | Wayland: wire codec, requests, the xdg-shell toplevel |
+| `src/x11/` | X11: wire codec, setup, requests, events, MIT-SHM |
+| `src/gfx/` | canvas, display lists, the rasterizer, the bitmap font, PNG |
+| `src/ui/` | layout, painting, hit testing, focus, damage, timers |
+| `native/` | `stb_truetype` and `stb_image` modules (not wired yet) |
 
-**Wayland (v2)** is a second implementation of `Backend(Wl)`. It buys
-compositor isolation, a frame callback for pacing and a text-input protocol
-for IME; it costs a generated binding layer and a shm-pool dance. The
-runtime support both backends share — the `display` family, Unix sockets,
-shared-memory `Surface` handles — lives in the Resid repository
-(`runtime/rt/unix.resid`), not here.
+## Both backends are spoken on the wire
+
+A Resid program links no client library: there is no `libwayland` and no
+`libX11`. Each backend is hand-written encoders for the requests a
+self-rendering window needs and bounds-checked decoders for what the server
+sends back.
+
+**Wayland** binds `wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat` and
+(when offered) the cursor-shape protocol, opens one xdg-shell toplevel,
+paces frames with frame callbacks, and draws into two `wl_shm` buffers,
+never writing one the compositor still holds.
+
+**X11** creates a window under the root, sets the properties a window
+manager reads (title, class, `WM_DELETE_WINDOW`, size hints), and presents
+through two MIT-SHM segments attached with `ShmAttachFd`, each busy until
+its `ShmCompletion`. Without MIT-SHM it falls back to `PutImage`.
 
 ## Rendering
 
-CPU, in pure Resid, into a shared-memory buffer. There is no GPU path in
-v1: a GPU needs a device context that outlives a call, and a native module
-is a fresh process every time.
+CPU, in pure Resid, straight into the shared buffer the window server
+reads. There is no GPU path: a GPU needs a device context that outlives a
+call, and a native module is a fresh process every time.
 
-Frames are display lists. `paint(Widget, Layout) -> List(DrawOp)` is a pure
-function, so:
+Frames are display lists. `paint(Widget, Rect, UiState) -> List(DrawOp)`
+is pure, so:
 
-- **Damage** is value equality. The previous and next frame's lists are
-  diffed per box and only the changed rectangles are rasterized and
-  uploaded.
-- **Reduction** applies. A `view` whose model is known at compile time folds
-  to a literal display list at compile time. This is a tested property, not
-  an aspiration.
-
-## Native modules, only for asset preparation
-
-Two optional packages, `resid-gui-font` (stb_truetype) and `resid-gui-image`
-(stb_image), each pinned by SHA-256. A call costs about 2 ms because it is a
-fresh process, so they run once per asset and their results are cached as
-Resid values. They never run per frame or per glyph.
-
-The core library works without either: an 8×16 bitmap font ships as a Resid
-literal, and a program then needs nothing but `display`.
+- **Damage** is value comparison. The previous and next frame's lists are
+  diffed op by op; the rectangles that differ, and only those, are
+  rasterized into the buffer about to be shown (plus whatever that buffer
+  missed while the other was on screen).
+- **HiDPI** is a scale applied at rasterization: the program works in
+  logical pixels, the buffer is `scale` times larger.
+- **Reduction** applies: a `view` of a model known at compile time folds to
+  a literal display list.
 
 ## Security
 
-- Every function that reaches a display builtin declares `@requires`.
-- Compositor and server data is untrusted input: every decoder
-  bounds-checks sizes, ids and opcodes, and a malformed message ends the
-  connection with an error rather than an out-of-range access.
-- Font and image bytes are untrusted input to native code. The process
-  boundary contains a crash; the Resid caller validates the decoded size
-  and format before use.
-- No new mutable value type: mutable pixels are a linear builder, legal and
-  unobservable through linearity (spec §4, §45).
+- Every function that reaches a display builtin or the clock declares
+  `@requires`. A GUI program needs `display` and `clock(readonly)`, nothing
+  more.
+- Everything the server sends is untrusted input. Every decoder
+  bounds-checks; a reply longer than 1 MB, a Wayland message over 4096
+  bytes or a string that overruns its message is refused, and a corrupt
+  stream ends the connection rather than an out-of-range read.
+- No new mutable value type: pixels are lists updated in place through
+  linearity (spec §4, §45).
 
 ## Layout
 
 ```
-src/gui.resid  the program-facing interface: App, Event, Widget, gui_run
-src/backend/   the Backend behavior, shared by every backend
-src/x11/       X11: wire codec, auth, connection, MIT-SHM
-src/gfx/       Canvas, paths, display lists, rasterization
-src/ui/        widgets, layout, hit testing, focus
-tests/         the suite, plus a fake server that injects scripted input
-examples/      counter, todo, and a font/image demo
-packages/      resid-gui-font, resid-gui-image (the native modules)
+src/app.resid    the program-facing types
+src/gui.resid    gui_run and the loop
+src/backend/     Backend(B), shared-buffer slots, the keymap
+src/wayland/     Wayland
+src/x11/         X11
+src/gfx/         pixels: canvas, rasterizer, font, images, PNG
+src/ui/          layout, painting, input, damage, timers
+tests/           fake X server, fake compositor, golden images
+examples/        counter, todo, gallery, image viewer, connect probe
+docs/            a Learn chapter and a reference page per layer
+native/          the stb_truetype and stb_image modules
 ```
 
 ## Building
@@ -137,16 +154,11 @@ The Resid toolchain lives in the sibling checkout:
 
 ```sh
 ../resid/install.sh          # residc + stage2 + lib + keys into ~/.resid
+~/.resid/bin/residc examples/todo.resid -o todo && ./todo
 ```
 
-Tests run once the phases land:
-
-```sh
-tests/run.sh
-```
-
-`@link` is refused outside a package, so this repository is where the native
-modules live. The runtime and compiler additions it needs go into the Resid
+`@link` is refused in Resid's own `lib/`, so this repository is where the
+native modules live. Runtime and compiler additions go into the Resid
 repository; this one only ever adds to them.
 
 ## License

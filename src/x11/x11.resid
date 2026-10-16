@@ -1,0 +1,387 @@
+// x11.resid — the X11 backend: one window, frames through MIT-SHM.
+//
+// `x11_start` connects, interns the atoms a window manager needs, finds
+// MIT-SHM, creates and maps the window and attaches two shared segments.
+// Frames are written into whichever segment the server is not reading and
+// presented with `ShmPutImage`, asking for a completion event; that event
+// is what frees the segment again (double buffering). Without MIT-SHM, or
+// with a version too old for `ShmAttachFd`, frames go over the socket with
+// `PutImage`, in bands that fit the server's request limit.
+
+import "../app.resid";
+import "../backend/backend.resid";
+import "../backend/keymap.resid";
+import "../gfx/canvas.resid";
+import "../gfx/color.resid";
+import "../gfx/draw.resid";
+import "../gfx/raster.resid";
+import "../ui/hidpi.resid";
+import "wire.resid";
+import "setup.resid";
+import "requests.resid";
+import "events.resid";
+import "connect.resid";
+
+/// Everything the client holds about its window. `shm` is MIT-SHM's major
+/// opcode, 0 when frames go over the socket.
+type X11 = {
+    Int fd; Bool alive; Str err;
+    Setup setup; Int wid; Int gc; Int next_id;
+    Int shm; Int shm_event;
+    Int seg0; Int seg1; Slot s0; Slot s1;
+    Int w; Int h; Int scale;
+    Int wm_protocols; Int wm_delete;
+    Mods mods; List(Int) buf; List(Rect) redraw;
+};
+
+/// A backend that failed to start, carrying why.
+pub X11 x11_failed(Int fd, Str why) {
+    return X11 { .fd = fd, .alive = false, .err = why, .setup = setup_empty(), .wid = 0, .gc = 0, .next_id = 0,
+                 .shm = 0, .shm_event = 0, .seg0 = 0, .seg1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0),
+                 .w = 0, .h = 0, .scale = 1, .wm_protocols = 0, .wm_delete = 0, .mods = mods_none(), .buf = [], .redraw = [] };
+}
+
+/// The scale a screen's DPI calls for.
+pub Int x11_scale(Setup s) {
+    if (s.width_mm <= 0) { return 1; }
+    return hi_dpi_scale((s.width_px * 254) / (s.width_mm * 10));
+}
+
+/// An atom by name, or 0.
+@requires(display)
+Reply intern(Int fd, Str name, List(Int) buf) { return x11_call(fd, req_intern_atom(name, false), buf); }
+
+/// Latin-1 bytes for `WM_NAME`; characters outside it become `?`.
+List(Int) latin1(Str s) { return latin1_at(s, str_len(s), 0, ListBuf()); }
+
+List(Int) latin1_at(Str s, Int n, Int i, ListBuf(Int) b) {
+    if (i >= n) { return b.finish(); }
+    Int c = str_char_at(s, i);
+    return latin1_at(s, n, i + 1, b.push(if (c < 256) { c } else { 63 }));
+}
+
+/// Open a window on the display the environment names.
+@requires(display)
+pub X11 x11_start(WindowOptions opts) {
+    Session s = x11_open();
+    if (s.fd < 0 || str_len(s.err) > 0) {
+        _ = x11_close_fd(s.fd);
+        return x11_failed(-1, s.err);
+    }
+    return x11_start_on(s, opts);
+}
+
+/// Open a window over a session that has completed its handshake.
+@requires(display)
+pub X11 x11_start_on(Session s, WindowOptions opts) {
+    Int fd = s.fd;
+    Setup st = s.setup;
+    if (st.root_depth != 24 || st.bpp24 != 32) {
+        _ = x11_close_fd(fd);
+        return x11_failed(-1, f"x11: unsupported screen (depth {st.root_depth}, {st.bpp24} bits per pixel)");
+    }
+    Reply a1 = intern(fd, "WM_PROTOCOLS", s.buf);
+    Reply a2 = intern(fd, "WM_DELETE_WINDOW", a1.buf);
+    Reply a3 = intern(fd, "_NET_WM_NAME", a2.buf);
+    Reply a4 = intern(fd, "UTF8_STRING", a3.buf);
+    Reply qe = x11_call(fd, req_query_extension("MIT-SHM"), a4.buf);
+    if (str_len(a1.err) + str_len(a2.err) + str_len(a3.err) + str_len(a4.err) + str_len(qe.err) > 0) {
+        _ = x11_close_fd(fd);
+        return x11_failed(-1, "x11: the server refused a setup request");
+    }
+    Int major = if (reply_byte(qe, 8) == 1) { reply_byte(qe, 9) } else { 0 };
+    Reply qv = if (major > 0) { x11_call(fd, req_shm_query_version(major), qe.buf) } else { qe };
+    // ShmAttachFd arrived in MIT-SHM 1.2.
+    Int vmaj = half_at(qv.msg, 8);
+    Int vmin = half_at(qv.msg, 10);
+    Bool fds = major > 0 && str_len(qv.err) == 0 && (vmaj > 1 || (vmaj == 1 && vmin >= 2));
+    Int shm = if (fds) { major } else { 0 };
+    Int scale = x11_scale(st);
+    Int w = max1(opts.width) * scale;
+    Int h = max1(opts.height) * scale;
+    Int wid = st.id_base + 1;
+    Int gc = st.id_base + 2;
+    List(Int) title = utf8_bytes(opts.title);
+    List(List(Int)) setup_reqs = [
+        req_create_window(wid, st.root, w, h, 0, 0, cw_back_pixmap() | cw_event_mask(), [0, event_mask_all()]),
+        req_change_property8(wid, atom_wm_name(), atom_string(), latin1(opts.title)),
+        req_change_property8(wid, reply_word(a3, 8), reply_word(a4, 8), title),
+        req_change_property8(wid, atom_wm_class(), atom_string(), utf8_bytes("resid-gui").concat([0]).concat(utf8_bytes("resid-gui")).concat([0])),
+        req_change_property32(wid, reply_word(a1, 8), atom_atom(), [reply_word(a2, 8)]),
+        req_create_gc(gc, wid, gc_graphics_exposures(), [0])
+    ];
+    List(List(Int)) hints = if (opts.resizable) { [] } else { [req_change_property32(wid, atom_wm_normal_hints(), atom_wm_size_hints(), size_hints_fixed(w, h))] };
+    if (!send_all(fd, setup_reqs.concat(hints).concat([req_map_window(wid)]), 0)) {
+        _ = x11_close_fd(fd);
+        return x11_failed(-1, "x11: could not create the window");
+    }
+    X11 x = X11 { .fd = fd, .alive = true, .err = "", .setup = st, .wid = wid, .gc = gc, .next_id = st.id_base + 3,
+                  .shm = shm, .shm_event = if (shm > 0) { reply_byte(qe, 10) } else { 0 },
+                  .seg0 = 0, .seg1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0),
+                  .w = w, .h = h, .scale = scale, .wm_protocols = reply_word(a1, 8), .wm_delete = reply_word(a2, 8),
+                  .mods = mods_none(), .buf = qv.buf, .redraw = [] };
+    return if (shm > 0) { x11_attach(x) } else { x };
+}
+
+Int max1(Int v) { return if (v < 1) { 1 } else { v }; }
+
+/// Send every request in order; false at the first that fails.
+@requires(display)
+Bool send_all(Int fd, List(List(Int)) rs, Int i) {
+    if (i >= rs.len()) { return true; }
+    if (!resid_disp_send(fd, rs[i], -1)) { return false; }
+    return send_all(fd, rs, i + 1);
+}
+
+/// Two shared segments the size of the window, attached under fresh ids.
+/// When either cannot be made, frames fall back to the socket.
+@requires(display)
+X11 x11_attach(X11 x) {
+    Int bytes = x.w * x.h * 4;
+    Int h0 = resid_disp_shm_new(bytes);
+    Int h1 = resid_disp_shm_new(bytes);
+    Int seg0 = x.next_id;
+    Int seg1 = x.next_id + 1;
+    Bool ok = h0 != 0 && h1 != 0
+        && resid_disp_send(x.fd, req_shm_attach_fd(x.shm, seg0), resid_disp_shm_fd(h0))
+        && resid_disp_send(x.fd, req_shm_attach_fd(x.shm, seg1), resid_disp_shm_fd(h1));
+    if (!ok) {
+        _ = resid_disp_shm_free(h0);
+        _ = resid_disp_shm_free(h1);
+        return x11_with_shm(x, 0, 0, 0, slot_new(0, 0, 0), slot_new(0, 0, 0), x.next_id);
+    }
+    return x11_with_shm(x, x.shm, seg0, seg1, slot_new(h0, x.w, x.h), slot_new(h1, x.w, x.h), x.next_id + 2);
+}
+
+X11 x11_with_shm(X11 x, Int shm, Int seg0, Int seg1, Slot s0, Slot s1, Int next_id) {
+    return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = next_id,
+                 .shm = shm, .shm_event = x.shm_event, .seg0 = seg0, .seg1 = seg1, .s0 = s0, .s1 = s1,
+                 .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                 .mods = x.mods, .buf = x.buf, .redraw = x.redraw };
+}
+
+/// Detach and free both segments.
+@requires(display)
+Bool x11_detach(X11 x) {
+    if (x.shm == 0) { return true; }
+    _ = resid_disp_send(x.fd, req_shm_detach(x.shm, x.seg0), -1);
+    _ = resid_disp_send(x.fd, req_shm_detach(x.shm, x.seg1), -1);
+    _ = resid_disp_shm_free(x.s0.handle);
+    _ = resid_disp_shm_free(x.s1.handle);
+    return true;
+}
+
+/// The window at its new size, with segments to match.
+@requires(display)
+X11 x11_resized(X11 x, Int w, Int h) {
+    Int shm = x.shm;
+    _ = x11_detach(x);
+    X11 y = X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
+                  .shm = shm, .shm_event = x.shm_event, .seg0 = 0, .seg1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0),
+                  .w = w, .h = h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                  .mods = x.mods, .buf = x.buf, .redraw = [] };
+    return if (shm > 0) { x11_attach(y) } else { y };
+}
+
+// ─── Input ──────────────────────────────────────────────────────────
+
+/// What decoding the buffer produced.
+type XStep = { X11 x; List(Event) events; };
+
+/// Wait up to `ms` for the server, then decode every whole message.
+@requires(display)
+pub Pumped(X11) x11_pump(X11 x, Int ms) {
+    if (!x.alive) { return Pumped { .b = x, .events = [] }; }
+    List(Int) ready = resid_disp_poll([x.fd], [1], ms);
+    Int bits = if (ready.len() > 0) { ready[0] } else { 0 };
+    if ((bits & 8) != 0) { return Pumped { .b = x11_dead(x, "x11: the connection failed"), .events = [Closed] }; }
+    if ((bits & 1) == 0) { return Pumped { .b = x, .events = [] }; }
+    List(Int) got = resid_disp_recv(x.fd, 65536);
+    if (got.len() == 0) { return Pumped { .b = x11_dead(x, "x11: the server closed the connection"), .events = [Closed] }; }
+    XStep s = x11_drain(x11_with_buf(x, x.buf.concat(got)), []);
+    return Pumped { .b = s.x, .events = s.events };
+}
+
+X11 x11_with_buf(X11 x, List(Int) buf) {
+    return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
+                 .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
+                 .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                 .mods = x.mods, .buf = buf, .redraw = x.redraw };
+}
+
+X11 x11_dead(X11 x, Str why) {
+    return X11 { .fd = x.fd, .alive = false, .err = why, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
+                 .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
+                 .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                 .mods = x.mods, .buf = [], .redraw = x.redraw };
+}
+
+@requires(display)
+XStep x11_drain(X11 x, List(Event) acc) {
+    XIn m = x_take(x.buf);
+    if (m.kind == 0) { return XStep { .x = x, .events = acc }; }
+    if (m.kind < 0) { return XStep { .x = x11_dead(x, "x11: corrupt message from the server"), .events = acc.concat([Closed]) }; }
+    X11 rest = x11_with_buf(x, m.rest);
+    if (m.kind == 2) {
+        eprintln(x_error_text(m.msg));
+        return x11_drain(rest, acc);
+    }
+    if (m.kind == 1) { return x11_drain(rest, acc); }
+    XStep s = x11_event(rest, x_decode_event(m.msg, x.shm_event));
+    return x11_drain(s.x, acc.concat(s.events));
+}
+
+/// The modifiers a key or button event's state field says are held.
+Mods mods_of(Int state) {
+    return Mods { .shift = (state & 1) != 0, .caps = (state & 2) != 0, .ctrl = (state & 4) != 0, .alt = (state & 8) != 0 };
+}
+
+@requires(display)
+XStep x11_event(X11 x, XEv e) {
+    return match (e) {
+        XKey(down, kc, state) => x11_key(x, down, kc - 8, mods_of(state)),
+        XButton(down, b, px, py) => XStep { .x = x, .events = button_events(down, b, px, py) },
+        XMotion(px, py) => XStep { .x = x, .events = [PointerMoved(px, py)] },
+        XFocus(on) => XStep { .x = x, .events = [if (on) { Focused } else { Blurred }] },
+        XExpose(ex, ey, ew, eh) => XStep { .x = x11_with_redraw(x, rects_add(x.redraw, Rect { .x = ex, .y = ey, .w = ew, .h = eh })), .events = [] },
+        XConfigure(w, h) => if (w == x.w && h == x.h) { XStep { .x = x, .events = [] } } else { XStep { .x = x11_resized(x, w, h), .events = [Resized(w, h)] } },
+        XClient(t, d) => XStep { .x = x, .events = if (t == x.wm_protocols && d == x.wm_delete) { [Closed] } else { [] } },
+        XDestroy => XStep { .x = x11_dead(x, ""), .events = [Closed] },
+        XShmDone(seg) => XStep { .x = x11_shm_done(x, seg), .events = [] },
+        XOther => XStep { .x = x, .events = [] }
+    };
+}
+
+XStep x11_key(X11 x, Bool down, Int code, Mods m) {
+    X11 y = X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
+                  .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
+                  .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                  .mods = m, .buf = x.buf, .redraw = x.redraw };
+    return XStep { .x = y, .events = [if (down) { KeyDown(code, key_text(code, m)) } else { KeyUp(code) }] };
+}
+
+/// Buttons 4-7 are the wheel: one notch per press, nothing on release.
+pub List(Event) button_events(Bool down, Int b, Int x, Int y) {
+    if (b >= 4 && b <= 7) {
+        if (!down) { return []; }
+        return [if (b == 4) { Wheel(0, -1) } else { if (b == 5) { Wheel(0, 1) } else { if (b == 6) { Wheel(-1, 0) } else { Wheel(1, 0) } } }];
+    }
+    return [if (down) { PointerDown(x, y, b) } else { PointerUp(x, y, b) }];
+}
+
+X11 x11_with_redraw(X11 x, List(Rect) r) {
+    return X11 { .fd = x.fd, .alive = x.alive, .err = x.err, .setup = x.setup, .wid = x.wid, .gc = x.gc, .next_id = x.next_id,
+                 .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
+                 .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
+                 .mods = x.mods, .buf = x.buf, .redraw = r };
+}
+
+X11 x11_shm_done(X11 x, Int seg) {
+    Slot a = if (seg == x.seg0) { slot_released(x.s0) } else { x.s0 };
+    Slot b = if (seg == x.seg1) { slot_released(x.s1) } else { x.s1 };
+    return x11_with_shm(x, x.shm, x.seg0, x.seg1, a, b, x.next_id);
+}
+
+// ─── Output ─────────────────────────────────────────────────────────
+
+/// Whether a frame can go out now.
+pub Bool x11_ready(X11 x) { return x.alive && (x.shm == 0 || !x.s0.busy || !x.s1.busy); }
+
+/// Present the damaged rectangles of the frame `ops` describes, plus
+/// whatever the server asked to have redrawn (`Expose`).
+@requires(display)
+pub X11 x11_present(X11 x, List(DrawOp) ops, Int scale, List(Rect) damage) {
+    if (!x11_ready(x)) { return x; }
+    Rect bounds = Rect { .x = 0, .y = 0, .w = x.w, .h = x.h };
+    List(Rect) want = rects_clip(rects_merge(x.redraw, damage), bounds);
+    X11 y = x11_with_redraw(x, []);
+    if (want.len() == 0) { return y; }
+    if (y.shm == 0) {
+        _ = put_rects(y, ops, scale, want, 0);
+        return y;
+    }
+    Bool first = !y.s0.busy;
+    Slot s = if (first) { y.s0 } else { y.s1 };
+    List(Rect) rs = slot_need(s, want, bounds);
+    _ = slot_paint(s, x.w, ops, scale, rs);
+    Int seg = if (first) { y.seg0 } else { y.seg1 };
+    _ = shm_puts(y, seg, rs, 0);
+    Slot sent = slot_sent(s);
+    Slot a = if (first) { sent } else { slot_dirty(y.s0, rs) };
+    Slot b = if (first) { slot_dirty(y.s1, rs) } else { sent };
+    return x11_with_shm(y, y.shm, y.seg0, y.seg1, a, b, y.next_id);
+}
+
+/// One `ShmPutImage` per rectangle. Only the last asks for a completion
+/// event: the server handles requests in order, so when the last is done
+/// the segment is free.
+@requires(display)
+Bool shm_puts(X11 x, Int seg, List(Rect) rs, Int i) {
+    if (i >= rs.len()) { return true; }
+    Rect r = rs[i];
+    Bool last = i == rs.len() - 1;
+    if (!resid_disp_send(x.fd, req_shm_put_image(x.shm, x.wid, x.gc, x.w, x.h, r.x, r.y, r.w, r.h, r.x, r.y, 24, seg, last), -1)) { return false; }
+    return shm_puts(x, seg, rs, i + 1);
+}
+
+/// Without MIT-SHM: rasterize each rectangle and send it with `PutImage`.
+@requires(display)
+Bool put_rects(X11 x, List(DrawOp) ops, Int scale, List(Rect) rs, Int i) {
+    if (i >= rs.len()) { return true; }
+    Rect r = rs[i];
+    Canvas c = raster_rect(ops, r, background(), scale);
+    if (!put_bands(x, c, r, 0)) { return false; }
+    return put_rects(x, ops, scale, rs, i + 1);
+}
+
+/// `PutImage` the rows of `c` (the pixels of device rectangle `r`) from
+/// row `y0` on, as many rows per request as the server's limit allows.
+@requires(display)
+Bool put_bands(X11 x, Canvas c, Rect r, Int y0) {
+    if (y0 >= r.h) { return true; }
+    Int limit = x.setup.max_request_len * 4 - 24;
+    Int per = if (r.w * 4 > limit) { 0 } else { limit / (r.w * 4) };
+    if (per <= 0) { return false; }
+    Int rows = if (y0 + per > r.h) { r.h - y0 } else { per };
+    List(Int) px = c.px[(y0 * r.w * 4)..((y0 + rows) * r.w * 4)];
+    if (!resid_disp_send(x.fd, req_put_image(x.wid, x.gc, r.w, rows, r.x, r.y + y0, 24, px), -1)) { return false; }
+    return put_bands(x, c, r, y0 + rows);
+}
+
+/// Destroy the window and close the connection.
+@requires(display)
+pub Bool x11_close(X11 x) {
+    if (x.fd < 0) { return false; }
+    _ = x11_detach(x);
+    if (x.alive) {
+        _ = resid_disp_send(x.fd, req_free_gc(x.gc), -1);
+        _ = resid_disp_send(x.fd, req_destroy_window(x.wid), -1);
+    }
+    return resid_disp_close(x.fd);
+}
+
+pub Int x11_width(X11 x) { return x.w; }
+pub Int x11_height(X11 x) { return x.h; }
+pub Int x11_scale_of(X11 x) { return x.scale; }
+pub Bool x11_alive(X11 x) { return x.alive; }
+
+Backend(X11) = {
+    .be_pump = x11_pump, .be_alive = x11_alive, .be_width = x11_width, .be_height = x11_height,
+    .be_scale = x11_scale_of, .be_ready = x11_ready, .be_present = x11_present, .be_close = x11_close
+};
+
+test "wheel buttons are notches, other buttons press and release" {
+    expect(button_events(false, 4, 0, 0).len()).toEqual(0);
+    Bool up = match (button_events(true, 4, 0, 0)[0]) { Wheel(dx, dy) => dx == 0 && dy == -1, _ => false };
+    expect(up).toEqual(true);
+    Bool down = match (button_events(true, 1, 3, 4)[0]) { PointerDown(x, y, b) => x == 3 && y == 4 && b == 1, _ => false };
+    expect(down).toEqual(true);
+}
+
+test "the scale follows the screen's DPI" {
+    Setup s = setup_parse(setup_reply_bytes(16777216, 2097151, "x", 1, 33, 1920, 1080)) else { setup_empty() };
+    expect(x11_scale(s)).toEqual(1);
+    expect(mods_of(5).ctrl).toEqual(true);
+    expect(mods_of(5).shift).toEqual(true);
+    expect(f"{latin1("aé€")}").toEqual("[97, 233, 63]");
+}

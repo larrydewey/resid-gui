@@ -1,0 +1,238 @@
+// input.resid — what raw input means to the widgets on screen.
+//
+// The display reports pointers and keys; this module finds the widget
+// under the pointer (with the same geometry painting used), tracks focus
+// and presses in `UiState`, and turns them into the widget events a
+// program handles: `AppMsg`, `TextEdited` and `SliderSet`. Every raw
+// event is passed on too, first, so a program can still see it.
+
+import "../app.resid";
+import "../gfx/color.resid";
+import "../backend/keymap.resid";
+import "layout.resid";
+import "paint.resid";
+import "state.resid";
+
+/// A widget found in the tree: its number, itself and its box.
+type Found = { Int id; Widget w; Rect r; };
+
+Found not_found() { return Found { .id = -1, .w = Spacer, .r = rect_none() }; }
+
+/// What one event did: the new widget state and the events for `update`.
+type UiStep = { UiState ui; List(Event) out; };
+
+/// Whether a widget reacts to the pointer or the keyboard.
+pub Bool interactive(Widget w) {
+    return match (w) {
+        Button(s, m) => true,
+        Checkbox(s, c, m) => true,
+        TextInput(s, k, m) => true,
+        Slider(v, m) => true,
+        _ => false
+    };
+}
+
+/// The topmost interactive widget under (`x`, `y`), or one with id -1.
+pub Found hit(Widget w, Rect r, Int x, Int y) { return hit_node(w, r, x, y, 0); }
+
+Found hit_node(Widget w, Rect r, Int x, Int y, Int id) {
+    if (!rect_contains(r, x, y)) { return not_found(); }
+    if (interactive(w)) { return Found { .id = id, .w = w, .r = r }; }
+    List(Widget) kids = children(w);
+    return hit_kids(kids, child_rects(w, r), x, y, kids.len() - 1, kid_ids(kids, id + 1, 0, []));
+}
+
+/// The number of each child, given the first child's.
+List(Int) kid_ids(List(Widget) xs, Int id, Int i, List(Int) acc) {
+    return if (i >= xs.len()) { acc } else { kid_ids(xs, id + node_count(xs[i]), i + 1, acc.concat([id])) };
+}
+
+// Later children are drawn over earlier ones, so they are asked first.
+Found hit_kids(List(Widget) xs, List(Rect) rs, Int x, Int y, Int i, List(Int) ids) {
+    if (i < 0 || i >= rs.len()) { return not_found(); }
+    Found f = hit_node(xs[i], rs[i], x, y, ids[i]);
+    if (f.id >= 0) { return f; }
+    return hit_kids(xs, rs, x, y, i - 1, ids);
+}
+
+/// The widget numbered `target`, or one with id -1.
+pub Found find(Widget w, Rect r, Int target) { return find_node(w, r, target, 0); }
+
+Found find_node(Widget w, Rect r, Int target, Int id) {
+    if (target < id || target >= id + node_count(w)) { return not_found(); }
+    if (target == id) { return Found { .id = id, .w = w, .r = r }; }
+    List(Widget) kids = children(w);
+    return find_kids(kids, child_rects(w, r), target, 0, id + 1);
+}
+
+Found find_kids(List(Widget) xs, List(Rect) rs, Int target, Int i, Int id) {
+    if (i >= xs.len() || i >= rs.len()) { return not_found(); }
+    Int n = node_count(xs[i]);
+    if (target < id + n) { return find_node(xs[i], rs[i], target, id); }
+    return find_kids(xs, rs, target, i + 1, id + n);
+}
+
+/// The numbers of every text input, in order.
+pub List(Int) inputs(Widget w) { return inputs_node(w, 0, []); }
+
+List(Int) inputs_node(Widget w, Int id, List(Int) acc) {
+    List(Int) here = match (w) { TextInput(s, k, m) => acc.concat([id]), _ => acc };
+    return inputs_kids(children(w), 0, id + 1, here);
+}
+
+List(Int) inputs_kids(List(Widget) xs, Int i, Int id, List(Int) acc) {
+    if (i >= xs.len()) { return acc; }
+    return inputs_kids(xs, i + 1, id + node_count(xs[i]), inputs_node(xs[i], id, acc));
+}
+
+/// The input after `cur` in tab order, wrapping; -1 when there is none.
+pub Int next_input(List(Int) ids, Int cur) {
+    if (ids.len() == 0) { return -1; }
+    return next_input_at(ids, cur, 0);
+}
+
+Int next_input_at(List(Int) ids, Int cur, Int i) {
+    if (i >= ids.len()) { return ids[0]; }
+    if (ids[i] > cur) { return ids[i]; }
+    return next_input_at(ids, cur, i + 1);
+}
+
+/// Fold one raw event through the widgets on screen.
+pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) {
+    UiStep s = match (e) {
+        PointerDown(x, y, b) => if (b == 1) { pointer_down(ui, root, area, x, y) } else { none(ui) },
+        PointerMoved(x, y) => pointer_moved(ui, root, area, x),
+        PointerUp(x, y, b) => if (b == 1) { pointer_up(ui, root, area, x, y) } else { none(ui) },
+        KeyDown(code, text) => key_down(ui, root, area, code, text),
+        Blurred => UiStep { .ui = ui_with_pressed(ui, -1), .out = [] },
+        _ => none(ui)
+    };
+    return UiStep { .ui = s.ui, .out = [e].concat(s.out) };
+}
+
+UiStep none(UiState ui) { return UiStep { .ui = ui, .out = [] }; }
+
+UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y) {
+    Found f = hit(root, area, x, y);
+    UiState pressed = ui_with_pressed(ui, f.id);
+    return match (f.w) {
+        TextInput(s, k, m) => UiStep { .ui = ui_with_focus(pressed, f.id), .out = [TextEdited(m, s, caret_at(f.r, s, k, x))] },
+        Slider(v, m) => UiStep { .ui = ui_with_focus(pressed, -1), .out = [SliderSet(m, slider_value_at(f.r, x))] },
+        _ => UiStep { .ui = ui_with_focus(pressed, -1), .out = [] }
+    };
+}
+
+/// The caret position a click at `x` puts in an input showing `s`.
+pub Int caret_at(Rect r, Str s, Int caret, Int x) {
+    Int n = str_len(s);
+    Int first = input_scroll(clamp_int(caret, 0, n), max_int((r.w - 10) / 8, 0));
+    return clamp_int((x - (r.x + 5) + 4) / 8 + first, 0, n);
+}
+
+UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x) {
+    if (ui.pressed < 0) { return none(ui); }
+    Found f = find(root, area, ui.pressed);
+    return match (f.w) {
+        Slider(v, m) => UiStep { .ui = ui, .out = [SliderSet(m, slider_value_at(f.r, x))] },
+        _ => none(ui)
+    };
+}
+
+UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y) {
+    UiState released = ui_with_pressed(ui, -1);
+    if (ui.pressed < 0) { return none(released); }
+    Found f = find(root, area, ui.pressed);
+    Bool inside = hit(root, area, x, y).id == ui.pressed;
+    return match (f.w) {
+        Button(s, m) => UiStep { .ui = released, .out = if (inside) { [AppMsg(m)] } else { [] } },
+        Checkbox(s, c, m) => UiStep { .ui = released, .out = if (inside) { [AppMsg(m)] } else { [] } },
+        _ => none(released)
+    };
+}
+
+UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text) {
+    if (code == key_tab()) {
+        return none(ui_with_focus(ui, next_input(inputs(root), ui.focus)));
+    }
+    if (ui.focus < 0) { return none(ui); }
+    if (code == key_esc()) { return none(ui_with_focus(ui, -1)); }
+    Found f = find(root, area, ui.focus);
+    return match (f.w) {
+        TextInput(s, k, m) => UiStep { .ui = ui_with_caret(ui, true), .out = edit(s, clamp_int(k, 0, str_len(s)), m, code, text) },
+        _ => none(ui_with_focus(ui, -1))
+    };
+}
+
+/// What a key does to a text input holding `s` with the caret at `k`.
+pub List(Event) edit(Str s, Int k, Msg m, Int code, Str text) {
+    Int n = str_len(s);
+    if (code == key_enter() || code == key_kp_enter()) { return [AppMsg(m)]; }
+    if (code == key_backspace()) {
+        return if (k > 0) { [TextEdited(m, str_slice(s, 0, k - 1) + str_slice(s, k, n), k - 1)] } else { [] };
+    }
+    if (code == key_delete()) {
+        return if (k < n) { [TextEdited(m, str_slice(s, 0, k) + str_slice(s, k + 1, n), k)] } else { [] };
+    }
+    if (code == key_left()) { return if (k > 0) { [TextEdited(m, s, k - 1)] } else { [] }; }
+    if (code == key_right()) { return if (k < n) { [TextEdited(m, s, k + 1)] } else { [] }; }
+    if (code == key_home()) { return [TextEdited(m, s, 0)]; }
+    if (code == key_end()) { return [TextEdited(m, s, n)]; }
+    if (str_len(text) == 0) { return []; }
+    return [TextEdited(m, str_slice(s, 0, k) + text + str_slice(s, k, n), k + str_len(text))];
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────
+
+Widget demo() { return Column([Text("t"), Button("go", Custom(1)), TextInput("ab", 2, Custom(2)), Slider(10, Custom(3)), TextInput("", 0, Custom(4))]); }
+Rect demo_area() { return Rect { .x = 0, .y = 0, .w = 200, .h = 200 }; }
+
+Bool is_msg(Event e, Msg want) { return match (e) { AppMsg(m) => msg_eq(m, want), _ => false }; }
+
+test "hit finds the control under the pointer" {
+    // Column children: Text 0-24, Button 28-56, TextInput 60-88, Slider 92-116.
+    expect(hit(demo(), demo_area(), 5, 5).id).toEqual(-1);
+    expect(hit(demo(), demo_area(), 5, 30).id).toEqual(2);
+    expect(hit(demo(), demo_area(), 5, 70).id).toEqual(3);
+    expect(hit(demo(), demo_area(), 5, 100).id).toEqual(4);
+    expect(find(demo(), demo_area(), 3).r.y).toEqual(60);
+    expect(inputs(demo()).len()).toEqual(2);
+    expect(next_input(inputs(demo()), 3)).toEqual(5);
+    expect(next_input(inputs(demo()), 5)).toEqual(3);
+}
+
+test "a click is a press and a release on the same button" {
+    UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(5, 30, 1));
+    expect(a.ui.pressed).toEqual(2);
+    expect(a.out.len()).toEqual(1);
+    UiStep b = ui_event(a.ui, demo(), demo_area(), PointerUp(6, 31, 1));
+    expect(b.ui.pressed).toEqual(-1);
+    expect(b.out.len()).toEqual(2);
+    expect(is_msg(b.out[1], Custom(1))).toEqual(true);
+    // Released somewhere else: no click.
+    UiStep c = ui_event(a.ui, demo(), demo_area(), PointerUp(5, 5, 1));
+    expect(c.out.len()).toEqual(1);
+}
+
+test "clicking an input focuses it and typing edits at the caret" {
+    UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(100, 70, 1));
+    expect(a.ui.focus).toEqual(3);
+    UiStep b = ui_event(a.ui, demo(), demo_area(), KeyDown(30, "x"));
+    expect(b.out.len()).toEqual(2);
+    Bool ok = match (b.out[1]) { TextEdited(m, s, k) => s == "abx" && k == 3, _ => false };
+    expect(ok).toEqual(true);
+    List(Event) bs = edit("abc", 1, Clicked, key_backspace(), "");
+    Bool ok2 = match (bs[0]) { TextEdited(m, s, k) => s == "bc" && k == 0, _ => false };
+    expect(ok2).toEqual(true);
+    expect(is_msg(edit("abc", 1, Submitted, key_enter(), "")[0], Submitted)).toEqual(true);
+    expect(ui_event(a.ui, demo(), demo_area(), KeyDown(key_esc(), "")).ui.focus).toEqual(-1);
+    expect(ui_event(a.ui, demo(), demo_area(), KeyDown(key_tab(), "")).ui.focus).toEqual(5);
+}
+
+test "dragging a slider reports values" {
+    UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(6, 100, 1));
+    Bool zero = match (a.out[1]) { SliderSet(m, v) => v == 0, _ => false };
+    expect(zero).toEqual(true);
+    UiStep b = ui_event(a.ui, demo(), demo_area(), PointerMoved(500, 100));
+    Bool full = match (b.out[1]) { SliderSet(m, v) => v == 100, _ => false };
+    expect(full).toEqual(true);
+}

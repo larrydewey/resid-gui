@@ -1,0 +1,146 @@
+// wire.resid — the Wayland wire format, as pure functions over bytes.
+//
+// A message is `[object id:4][size:2 | opcode:2]` (both little-endian
+// words, size in the high half and counting the header) followed by its
+// arguments, each a whole number of words: 32-bit integers, 24.8 fixed
+// point, strings (length including the NUL, the bytes, the NUL, padding),
+// arrays (length, bytes, padding) and object ids. File descriptors travel
+// beside the message, never in it. Everything the compositor sends is
+// untrusted, so every reader bounds-checks and a malformed message is
+// refused, never read past.
+
+/// The largest message either side may send (libwayland's limit).
+pub Int wl_max_message() { return 4096; }
+
+/// A message to object `obj`: opcode and argument bytes.
+pub List(Int) wl_msg(Int obj, Int opcode, List(Int) args) {
+    ListBuf(Int) b = ListBuf();
+    return wl_put_bytes(wl_put(wl_put(b, obj), ((8 + args.len()) << 16) | opcode), args, 0).finish();
+}
+
+/// Append a 32-bit little-endian word (signed values as two's complement).
+pub ListBuf(Int) wl_put(ListBuf(Int) b, Int v) {
+    return b.push(v & 255).push((v >> 8) & 255).push((v >> 16) & 255).push((v >> 24) & 255);
+}
+
+ListBuf(Int) wl_put_bytes(ListBuf(Int) b, List(Int) v, Int i) {
+    if (i >= v.len()) { return b; }
+    return wl_put_bytes(b.push(v[i] & 255), v, i + 1);
+}
+
+/// Arguments that are all 32-bit words.
+pub List(Int) wl_words(List(Int) vs) { return wl_words_at(ListBuf(), vs, 0).finish(); }
+
+ListBuf(Int) wl_words_at(ListBuf(Int) b, List(Int) vs, Int i) {
+    if (i >= vs.len()) { return b; }
+    return wl_words_at(wl_put(b, vs[i]), vs, i + 1);
+}
+
+/// A string argument from its UTF-8 bytes.
+pub List(Int) wl_string(List(Int) utf8) {
+    Int n = utf8.len() + 1;
+    ListBuf(Int) b = wl_put_bytes(wl_put(ListBuf(), n), utf8, 0).push(0);
+    return wl_pad(b, n).finish();
+}
+
+ListBuf(Int) wl_pad(ListBuf(Int) b, Int n) { return wl_zeros(b, (4 - (n & 3)) & 3); }
+
+ListBuf(Int) wl_zeros(ListBuf(Int) b, Int n) { return if (n <= 0) { b } else { wl_zeros(b.push(0), n - 1) }; }
+
+/// An array argument.
+pub List(Int) wl_array(List(Int) bytes) {
+    return wl_pad(wl_put_bytes(wl_put(ListBuf(), bytes.len()), bytes, 0), bytes.len()).finish();
+}
+
+// ─── Reading ────────────────────────────────────────────────────────
+
+/// The unsigned 32-bit word at `i`, or -1 when the message is short.
+pub Int wl_u32(List(Int) m, Int i) {
+    if (i < 0 || i + 4 > m.len()) { return -1; }
+    return m[i] | (m[i + 1] << 8) | (m[i + 2] << 16) | (m[i + 3] << 24);
+}
+
+/// The signed 32-bit word at `i`, or 0 when the message is short.
+pub Int wl_i32(List(Int) m, Int i) {
+    Int v = wl_u32(m, i);
+    if (v < 0) { return 0; }
+    return if (v >= 2147483648) { v - 4294967296 } else { v };
+}
+
+/// A 24.8 fixed-point argument, rounded toward zero to a whole number.
+pub Int wl_fixed_int(List(Int) m, Int i) { return wl_i32(m, i) / 256; }
+
+/// One message off the front of the buffer. `ok` false with `bad` false
+/// means more bytes are needed; `bad` means the stream is corrupt.
+type WlIn = { Bool ok; Bool bad; Int obj; Int opcode; List(Int) msg; List(Int) rest; };
+
+pub WlIn wl_take(List(Int) buf) {
+    if (buf.len() < 8) { return WlIn { .ok = false, .bad = false, .obj = 0, .opcode = 0, .msg = [], .rest = buf }; }
+    Int head = wl_u32(buf, 4);
+    Int size = (head >> 16) & 65535;
+    if (size < 8 || (size & 3) != 0 || size > wl_max_message()) {
+        return WlIn { .ok = false, .bad = true, .obj = 0, .opcode = 0, .msg = [], .rest = buf };
+    }
+    if (buf.len() < size) { return WlIn { .ok = false, .bad = false, .obj = 0, .opcode = 0, .msg = [], .rest = buf }; }
+    return WlIn { .ok = true, .bad = false, .obj = wl_u32(buf, 0), .opcode = head & 65535, .msg = buf[0..size], .rest = buf[size..buf.len()] };
+}
+
+/// A string argument at byte `i`: its text (one code point per byte,
+/// enough for the ASCII interface names a client compares) and where the
+/// next argument starts. `next` is -1 when the string overruns the message
+/// or lacks its NUL.
+type WlStr = { Str s; Int next; };
+
+pub WlStr wl_str(List(Int) m, Int i) {
+    Int n = wl_u32(m, i);
+    if (n < 0 || n > m.len() || i + 4 + n > m.len()) { return WlStr { .s = "", .next = -1 }; }
+    if (n == 0) { return WlStr { .s = "", .next = i + 4 }; }
+    if (m[i + 4 + n - 1] != 0) { return WlStr { .s = "", .next = -1 }; }
+    return WlStr { .s = wl_ascii(m, i + 4, i + 4 + n - 1, StrBuf()), .next = i + 4 + ((n + 3) / 4) * 4 };
+}
+
+Str wl_ascii(List(Int) m, Int i, Int stop, StrBuf b) {
+    if (i >= stop) { return b.finish(); }
+    return wl_ascii(m, i + 1, stop, b.push_char(m[i]));
+}
+
+test "a message carries its size and opcode in one word" {
+    List(Int) m = wl_msg(1, 1, wl_words([2]));
+    expect(m.len()).toEqual(12);
+    expect(wl_u32(m, 0)).toEqual(1);
+    expect(wl_u32(m, 4)).toEqual((12 << 16) | 1);
+    expect(wl_u32(m, 8)).toEqual(2);
+}
+
+test "strings carry their NUL and padding; arrays their padding" {
+    List(Int) s = wl_string([104, 105]);
+    expect(s.len()).toEqual(8);
+    expect(wl_u32(s, 0)).toEqual(3);
+    expect(s[6]).toEqual(0);
+    List(Int) s4 = wl_string([97, 98, 99, 100]);
+    expect(s4.len()).toEqual(12);
+    expect(wl_array([1, 2, 3, 4, 5]).len()).toEqual(12);
+    WlStr r = wl_str([0, 0, 0, 0].concat(s).concat([9, 0, 0, 0]), 4);
+    expect(r.s).toEqual("hi");
+    expect(r.next).toEqual(12);
+}
+
+test "framing waits for whole messages and refuses impossible sizes" {
+    List(Int) a = wl_msg(3, 0, wl_words([7]));
+    WlIn t = wl_take(a.concat([1, 2]));
+    expect(t.ok).toEqual(true);
+    expect(t.obj).toEqual(3);
+    expect(t.opcode).toEqual(0);
+    expect(t.rest.len()).toEqual(2);
+    expect(wl_take(a[0..10]).ok).toEqual(false);
+    expect(wl_take(a[0..10]).bad).toEqual(false);
+    expect(wl_take([1, 0, 0, 0, 0, 0, 4, 0]).bad).toEqual(true);
+    expect(wl_take([1, 0, 0, 0, 0, 0, 255, 255]).bad).toEqual(true);
+}
+
+test "a string that lies about its length is refused" {
+    expect(wl_str([200, 0, 0, 0, 97], 0).next).toEqual(-1);
+    expect(wl_str([2, 0, 0, 0, 97, 98, 0, 0], 0).next).toEqual(-1);
+    expect(wl_i32([255, 255, 255, 255], 0)).toEqual(-1);
+    expect(wl_fixed_int([0, 2, 0, 0], 0)).toEqual(2);
+}

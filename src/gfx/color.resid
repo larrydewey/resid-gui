@@ -1,8 +1,140 @@
-pub Int color_dummy() { return 0; }
+// color.resid — colours and rectangles, the two values every draw op and
+// every damage computation is made of.
 
-test "color dummy" {
-    expect(1).toEqual(1);
+/// A colour in the byte order a canvas stores it: blue, green, red, alpha.
+pub type Color = { Int b; Int g; Int r; Int a; };
+
+/// An axis-aligned rectangle in device pixels. A rectangle with no area
+/// (`w <= 0` or `h <= 0`) is empty, whatever its origin.
+pub type Rect = { Int x; Int y; Int w; Int h; };
+
+/// An opaque colour from its red, green and blue components.
+pub Color rgb(Int r, Int g, Int b) { return Color { .b = b & 255, .g = g & 255, .r = r & 255, .a = 255 }; }
+
+/// The rectangle with no area.
+pub Rect rect_none() { return Rect { .x = 0, .y = 0, .w = 0, .h = 0 }; }
+
+/// Whether a rectangle covers no pixel.
+pub Bool rect_is_empty(Rect r) { return r.w <= 0 || r.h <= 0; }
+
+/// The pixels both rectangles cover; empty when they do not meet.
+pub Rect rect_intersect(Rect a, Rect b) {
+    Int x0 = if (a.x > b.x) { a.x } else { b.x };
+    Int y0 = if (a.y > b.y) { a.y } else { b.y };
+    Int ax1 = a.x + a.w;
+    Int bx1 = b.x + b.w;
+    Int ay1 = a.y + a.h;
+    Int by1 = b.y + b.h;
+    Int x1 = if (ax1 < bx1) { ax1 } else { bx1 };
+    Int y1 = if (ay1 < by1) { ay1 } else { by1 };
+    if (x1 <= x0 || y1 <= y0) { return rect_none(); }
+    return Rect { .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
 }
 
-pub type Color = { Int b; Int g; Int r; Int a; };
-pub type Rect = { Int x; Int y; Int w; Int h; };
+/// The smallest rectangle covering both. An empty rectangle contributes
+/// nothing, so folding `rect_union` from `rect_none()` gives the bounds.
+pub Rect rect_union(Rect a, Rect b) {
+    if (rect_is_empty(a)) { return b; }
+    if (rect_is_empty(b)) { return a; }
+    Int x0 = if (a.x < b.x) { a.x } else { b.x };
+    Int y0 = if (a.y < b.y) { a.y } else { b.y };
+    Int ax1 = a.x + a.w;
+    Int bx1 = b.x + b.w;
+    Int ay1 = a.y + a.h;
+    Int by1 = b.y + b.h;
+    Int x1 = if (ax1 > bx1) { ax1 } else { bx1 };
+    Int y1 = if (ay1 > by1) { ay1 } else { by1 };
+    return Rect { .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
+}
+
+/// Whether the point lies inside the rectangle.
+pub Bool rect_contains(Rect r, Int x, Int y) {
+    return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+}
+
+/// Field-by-field equality: records have no `==` of their own.
+pub Bool rect_eq(Rect a, Rect b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
+
+/// Field-by-field equality for colours.
+pub Bool color_eq(Color a, Color b) { return a.b == b.b && a.g == b.g && a.r == b.r && a.a == b.a; }
+
+/// `r` grown by `n` pixels on every side.
+pub Rect rect_grow(Rect r, Int n) { return Rect { .x = r.x - n, .y = r.y - n, .w = r.w + 2 * n, .h = r.h + 2 * n }; }
+
+/// The most rectangles a damage list keeps before collapsing to one.
+pub Int rects_max() { return 16; }
+
+/// Add `r` to a list of rectangles, merging it with any it touches (or
+/// comes within 8 pixels of): near-by damage is cheaper drawn as one
+/// rectangle than as many. A list grown past `rects_max` becomes its
+/// bounding box.
+pub List(Rect) rects_add(List(Rect) xs, Rect r) {
+    if (rect_is_empty(r)) { return xs; }
+    Int k = rects_touching(xs, rect_grow(r, 8), 0);
+    if (k >= 0) { return rects_add(rects_without(xs, k, 0, []), rect_union(xs[k], r)); }
+    List(Rect) ys = xs.concat([r]);
+    return if (ys.len() > rects_max()) { [rects_bounds(ys, 0, rect_none())] } else { ys };
+}
+
+Int rects_touching(List(Rect) xs, Rect r, Int i) {
+    if (i >= xs.len()) { return -1; }
+    if (!rect_is_empty(rect_intersect(xs[i], r))) { return i; }
+    return rects_touching(xs, r, i + 1);
+}
+
+List(Rect) rects_without(List(Rect) xs, Int k, Int i, List(Rect) acc) {
+    if (i >= xs.len()) { return acc; }
+    return rects_without(xs, k, i + 1, if (i == k) { acc } else { acc.concat([xs[i]]) });
+}
+
+/// Every rectangle of `ys` added to `xs`.
+pub List(Rect) rects_merge(List(Rect) xs, List(Rect) ys) { return rects_merge_at(xs, ys, 0); }
+
+List(Rect) rects_merge_at(List(Rect) xs, List(Rect) ys, Int i) {
+    if (i >= ys.len()) { return xs; }
+    return rects_merge_at(rects_add(xs, ys[i]), ys, i + 1);
+}
+
+/// The bounding box of a list of rectangles.
+pub Rect rects_bounds(List(Rect) xs, Int i, Rect acc) {
+    if (i >= xs.len()) { return acc; }
+    return rects_bounds(xs, i + 1, rect_union(acc, xs[i]));
+}
+
+/// Each rectangle clipped to `c`, the empty ones dropped.
+pub List(Rect) rects_clip(List(Rect) xs, Rect c) { return rects_clip_at(xs, c, 0, []); }
+
+List(Rect) rects_clip_at(List(Rect) xs, Rect c, Int i, List(Rect) acc) {
+    if (i >= xs.len()) { return acc; }
+    Rect r = rect_intersect(xs[i], c);
+    return rects_clip_at(xs, c, i + 1, if (rect_is_empty(r)) { acc } else { acc.concat([r]) });
+}
+
+test "rectangle lists merge what touches and keep what is apart" {
+    List(Rect) a = rects_add([], Rect { .x = 0, .y = 0, .w = 10, .h = 10 });
+    List(Rect) b = rects_add(a, Rect { .x = 100, .y = 100, .w = 10, .h = 10 });
+    expect(b.len()).toEqual(2);
+    List(Rect) c = rects_add(b, Rect { .x = 12, .y = 0, .w = 10, .h = 10 });
+    expect(c.len()).toEqual(2);
+    expect(rects_bounds(c, 0, rect_none()).w).toEqual(110);
+    List(Rect) d = rects_add(c, Rect { .x = 20, .y = 0, .w = 85, .h = 105 });
+    expect(d.len()).toEqual(1);
+    expect(rects_clip(d, Rect { .x = 0, .y = 0, .w = 5, .h = 5 })[0].w).toEqual(5);
+    expect(rects_merge([], d).len()).toEqual(1);
+}
+
+test "rectangles intersect, unite and contain" {
+    Rect a = Rect { .x = 0, .y = 0, .w = 10, .h = 10 };
+    Rect b = Rect { .x = 5, .y = 5, .w = 10, .h = 10 };
+    Rect i = rect_intersect(a, b);
+    expect(i.x).toEqual(5);
+    expect(i.w).toEqual(5);
+    expect(rect_is_empty(rect_intersect(a, Rect { .x = 20, .y = 0, .w = 1, .h = 1 }))).toEqual(true);
+    Rect u = rect_union(a, b);
+    expect(u.w).toEqual(15);
+    expect(u.h).toEqual(15);
+    expect(rect_eq(rect_union(rect_none(), a), a)).toEqual(true);
+    expect(rect_contains(a, 9, 9)).toEqual(true);
+    expect(rect_contains(a, 10, 9)).toEqual(false);
+    expect(rgb(1, 2, 3).r).toEqual(1);
+}

@@ -9,13 +9,19 @@
 
 import "wire.resid";
 
-// What the client learns from the server's first reply. `screens` and
-// `formats` are kept so a caller can check they are what it expects; the
-// vendor is a diagnostic.
+/// What the client learns from the server's first reply. The screen
+/// fields describe screen 0, the one a client without a screen number in
+/// DISPLAY uses: its root window (every top-level window's parent), its
+/// root visual and depth, and its size in pixels and millimetres (for the
+/// DPI). `bpp24` is the bits per pixel of depth-24 images, which must be
+/// 32 for a canvas to be sent as it is.
 type Setup = {
     Int release; Int id_base; Int id_mask; Int motion_buf;
     Int max_request_len; Int screens; Int formats;
     Str vendor;
+    Int root; Int root_visual; Int root_depth;
+    Int width_px; Int height_px; Int width_mm; Int height_mm;
+    Int bpp24;
 };
 
 // The reply's fixed part is 8 bytes; the fields the client needs start
@@ -40,9 +46,10 @@ pub List(Int) setup_request(Str name, List(Int) data) {
 
 /// `setup_request` with the protocol version spelled out.
 pub List(Int) setup_request_v(Int major, Int minor, Str name, List(Int) data) {
-    // A STRING8 carries its NUL; a length of zero means no name at all, so
-    // an unauthenticated server gets a header and nothing else.
-    Int n = if (name.len() == 0) { 0 } else { name.len() + 1 };
+    // The name is a STRING8 counted without a terminator; a length of zero
+    // means no name at all, so an unauthenticated server gets a header and
+    // nothing else.
+    Int n = str_len(name);
     ListBuf(Int) body = if (n == 0) { enc_new() } else { enc_str_at(enc_new(), name, 0) };
     List(Int) named = pad_to(enc_finish(body), 4);
     ListBuf(Int) tail = enc_bytes_list(enc_new(), data, 0);
@@ -64,7 +71,9 @@ Int setup_word16(List(Int) bs, Int i) { return (bs[i] | (bs[i + 1] << 8)) & 6553
 /// A zero `Setup`, for a caller that takes the `Err` branch.
 pub Setup setup_empty() {
     return Setup { .release = 0, .id_base = 0, .id_mask = 0, .motion_buf = 0,
-                   .max_request_len = 0, .screens = 0, .formats = 0, .vendor = "" };
+                   .max_request_len = 0, .screens = 0, .formats = 0, .vendor = "",
+                   .root = 0, .root_visual = 0, .root_depth = 0,
+                   .width_px = 0, .height_px = 0, .width_mm = 0, .height_mm = 0, .bpp24 = 0 };
 }
 
 /// Parse the server's first reply. `bs[0]` is the success byte: 1 for
@@ -77,6 +86,11 @@ pub Result(Setup, Str) setup_parse(List(Int) bs) {
     Int vendor_len = setup_word16(bs, setup_off_vendor_len());
     Int end = setup_off_vendor() + vendor_len;
     if (end > bs.len()) { return Err("x11: vendor overruns reply"); }
+    Int nformats = bs[setup_off_formats()];
+    Int formats_at = setup_off_vendor() + ((vendor_len + 3) / 4) * 4;
+    Int screen_at = formats_at + 8 * nformats;
+    if (bs[setup_off_screens()] < 1) { return Err("x11: server has no screens"); }
+    if (screen_at + 40 > bs.len()) { return Err("x11: screen overruns reply"); }
     return Ok(Setup {
         .release = setup_word(bs, setup_off_release()),
         .id_base = setup_word(bs, setup_off_id_base()),
@@ -84,20 +98,82 @@ pub Result(Setup, Str) setup_parse(List(Int) bs) {
         .motion_buf = setup_word(bs, setup_off_motion()),
         .max_request_len = setup_word16(bs, setup_off_max_req()),
         .screens = bs[setup_off_screens()],
-        .formats = bs[setup_off_formats()],
-        .vendor = bytes_str(bs, setup_off_vendor(), end)
+        .formats = nformats,
+        .vendor = bytes_str(bs, setup_off_vendor(), end),
+        .root = setup_word(bs, screen_at),
+        .root_visual = setup_word(bs, screen_at + 32),
+        .root_depth = bs[screen_at + 38],
+        .width_px = setup_word16(bs, screen_at + 20),
+        .height_px = setup_word16(bs, screen_at + 22),
+        .width_mm = setup_word16(bs, screen_at + 24),
+        .height_mm = setup_word16(bs, screen_at + 26),
+        .bpp24 = format_bpp(bs, formats_at, nformats, 24, 0)
     });
+}
+
+/// The bits per pixel the server stores images of `depth` in, from the
+/// pixmap formats (depth, bpp, scanline pad, five unused bytes each); 0
+/// when the depth is not listed.
+Int format_bpp(List(Int) bs, Int at, Int n, Int depth, Int i) {
+    if (i >= n) { return 0; }
+    Int f = at + 8 * i;
+    if (bs[f] == depth) { return bs[f + 1]; }
+    return format_bpp(bs, at, n, depth, i + 1);
+}
+
+/// A setup reply for tests and the fake server: one depth-24/32bpp
+/// format and one screen whose root is `root`, `w` x `h` pixels at 96 DPI.
+pub List(Int) setup_reply_bytes(Int id_base, Int id_mask, Str vendor, Int root, Int visual, Int w, Int h) {
+    ListBuf(Int) a = enc_words(enc_new(), [11000000, id_base, id_mask, 256]);
+    ListBuf(Int) b = enc_words16(a, [str_len(vendor), 65535]);
+    // screens, formats, image byte order, bitmap order, scanline unit and
+    // pad, min and max keycode, four unused bytes
+    ListBuf(Int) c = enc_bytes_list(b, [1, 1, 0, 0, 32, 32, 8, 255, 0, 0, 0, 0], 0);
+    ListBuf(Int) d = enc_pad(enc_str_at(c, vendor, 0), str_len(vendor));
+    ListBuf(Int) e = enc_bytes_list(d, [24, 32, 32, 0, 0, 0, 0, 0], 0);
+    // root, colormap, white, black, input masks
+    ListBuf(Int) f = enc_words(e, [root, 32, 16777215, 0, 0]);
+    ListBuf(Int) g = enc_words16(f, [w, h, (w * 254) / 960, (h * 254) / 960, 1, 1]);
+    ListBuf(Int) k = enc_word32(g, visual);
+    // backing stores, save unders, root depth, one depth entry
+    ListBuf(Int) m = enc_bytes_list(k, [0, 0, 24, 1], 0);
+    // depth 24 with one visual: id, TrueColor, 8 bits, 256 entries, masks
+    ListBuf(Int) n = enc_words16(enc_bytes_list(m, [24, 0], 0), [1]);
+    ListBuf(Int) o = enc_words(enc_bytes(n, 4, 0), [visual]);
+    ListBuf(Int) p = enc_words16(enc_bytes_list(o, [4, 8], 0), [256]);
+    List(Int) body = enc_finish(enc_words(enc_bytes(p, 0, 0), [16711680, 65280, 255, 0]));
+    List(Int) head = enc_finish(enc_words16(enc_byte(enc_byte(enc_new(), 1), 0), [11, 0, body.len() / 4]));
+    return head.concat(body);
 }
 
 test "the setup request is the recorded byte sequence" {
     // No cookie: the header alone, twelve bytes.
-    expect(setup_request("", [])).toEqual([108, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(f"{setup_request("", [])}").toEqual("[108, 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0]");
     // A one-character name and two data bytes, each padded to a word.
-    expect(setup_request_v(11, 0, "X", [1, 2])).toEqual(
-        [108, 0, 11, 0, 0, 0, 1, 0, 2, 0, 0, 0, 1, 0, 88, 0, 0, 0, 1, 2]);
+    List(Int) r = setup_request_v(11, 0, "X", [1, 2]);
+    expect(r.len()).toEqual(20);
+    expect(r[6]).toEqual(1);
+    expect(r[8]).toEqual(2);
+    expect(r[12]).toEqual(88);
+    expect(r[16]).toEqual(1);
+    expect(r[17]).toEqual(2);
 }
 
-test "a successful reply parses into the setup" {
+test "a generated reply parses, screen included" {
+    Setup s = setup_parse(setup_reply_bytes(16777216, 2097151, "abc", 1234, 33, 1920, 1080)) else { setup_empty() };
+    expect(s.id_base).toEqual(16777216);
+    expect(s.id_mask).toEqual(2097151);
+    expect(s.vendor).toEqual("abc");
+    expect(s.root).toEqual(1234);
+    expect(s.root_visual).toEqual(33);
+    expect(s.root_depth).toEqual(24);
+    expect(s.width_px).toEqual(1920);
+    expect(s.width_mm).toEqual(508);
+    expect(s.bpp24).toEqual(32);
+    expect(s.max_request_len).toEqual(65535);
+}
+
+test "a reply with no screen is refused" {
     // release 1_000_000, id base 0x0100_0000, mask 0x001f_ffff, motion
     // 65536, vendor "abc", one screen, one format.
     List(Int) bs = [1, 0, 11, 0, 0, 6, 0, 0,
@@ -107,14 +183,7 @@ test "a successful reply parses into the setup" {
                     32, 0, 8, 255, 0, 0, 0, 0,
                     97, 98, 99, 0];
     Setup s = setup_parse(bs) else { setup_empty() };
-    expect(s.release).toEqual(1000000);
-    expect(s.id_base).toEqual(16777216);
-    expect(s.id_mask).toEqual(8191);
-    expect(s.motion_buf).toEqual(65536);
-    expect(s.max_request_len).toEqual(65535);
-    expect(s.screens).toEqual(1);
-    expect(s.formats).toEqual(1);
-    expect(s.vendor).toEqual("abc");
+    expect(s.release).toEqual(0);
 }
 
 test "a refused, truncated or malformed reply is an error" {

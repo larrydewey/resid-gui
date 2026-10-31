@@ -3,7 +3,8 @@
  * The module's own source is compiled in, so the fuzzer runs exactly what
  * the artifact runs. A Resid caller hands it a Bytes(16777216) holding the
  * file and zeros after it, so the input is copied into a buffer of that
- * capacity, and AddressSanitizer reports any read past it. The bump arena
+ * capacity, and AddressSanitizer reports any read past it. The first input
+ * byte picks px in 4..256; the rest is the font. The bump arena
  * is reset before each input: in the artifact every call is a fresh
  * process.
  *
@@ -19,11 +20,12 @@
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t n) {
     static uint8_t *in, *out;
     if (!in) { in = malloc(CAP); out = malloc(OUT_CAP); }
-    if (n == 0 || n > CAP) return 0;
+    if (n < 2 || n - 1 > CAP) return 0;
+    int64_t px = 4 + data[0] % 253;
     memset(in, 0, CAP);
-    memcpy(in, data, n);
+    memcpy(in, data + 1, n - 1);
     memset(out, 0, OUT_CAP);
     arena_used = 0;
-    font_atlas(in, CAP, (int64_t)n, 16, out, OUT_CAP);
+    font_atlas(in, CAP, (int64_t)(n - 1), px, out, OUT_CAP);
     return 0;
 }

@@ -15,7 +15,10 @@
 /// The code point a keysym number types, or 0.
 pub Int keysym_cp(Int ks) {
     if ((ks >= 32 && ks <= 126) || (ks >= 160 && ks <= 255)) { return ks; }
-    if (ks >= 16777472 && ks <= 17891327) { return ks - 16777216; }     // 0x1000100..0x110ffff: Unicode
+    if (ks >= 16777472 && ks <= 17891327) {                             // 0x1000100..0x110ffff: Unicode
+        Int cp = ks - 16777216;
+        return if (cp >= 55296 && cp <= 57343) { 0 } else { cp };         // surrogates type nothing
+    }
     if (ks >= 65456 && ks <= 65465) { return ks - 65456 + 48; }          // KP_0..KP_9
     if (ks == 65408) { return 32; }                                      // KP_Space
     if (ks >= 65450 && ks <= 65455) { return [42, 43, 44, 45, 46, 47][ks - 65450]; }   // KP_Multiply..KP_Divide
@@ -555,7 +558,7 @@ pub Int keysym_name_cp(Map(Str, Int) names, Str n) {
     }
     if (len >= 5 && str_char_at(n, 0) == 85) {
         Int u = hex_value(n, 1, 0);
-        if (u > 0 && u <= 1114111) { return u; }
+        if (u > 0 && u <= 1114111 && (u < 55296 || u > 57343)) { return u; }
     }
     if (len >= 3 && str_starts_with(n, "0x")) {
         Int k = hex_value(n, 2, 0);

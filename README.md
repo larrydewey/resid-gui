@@ -148,7 +148,8 @@ is pure, so:
 - Font and image bytes are untrusted input to native code. The process
   boundary contains an escape attempt (`tests/evil.sh` tries a dozen),
   and the Resid side validates the answer. The calls run in spawn
-  regions, so a crash is an `Err`, not the end of the program; the
+  regions, so a crash of the module's host process is an `Err`, not the
+  end of the program (a fault in the program itself still is); the
   vendored decoders are fuzzed and patched so that they do not crash
   (stb_truetype's reads of the file are bounds-checked,
   docs/reference_native.md).
@@ -156,6 +157,12 @@ is pure, so:
   bounds-checks; a reply longer than 1 MB, a Wayland message over 4096
   bytes or a string that overruns its message is refused, and a corrupt
   stream ends the connection rather than an out-of-range read.
+- No server or compositor can size a window past 16384 pixels a side or
+  256 MB of pixels: X11 ends the connection with an error, Wayland clamps
+  the suggested size. X11 replies have a 5 s deadline. Held key events
+  are capped at 1024 and Wayland globals at 256; a keymap over 1 MB is
+  refused and the US layout kept. A compositor's error text has its
+  control characters replaced, and a surrogate keysym types nothing.
 - No new mutable value type: pixels are lists updated in place through
   linearity (spec §4, §45).
 

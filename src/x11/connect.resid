@@ -38,10 +38,11 @@ pub Session x11_handshake(Int fd) { return x11_handshake_auth(fd, []); }
 pub Session x11_handshake_auth(Int fd, List(Int) cookie) {
     Str name = if (cookie.len() > 0) { "MIT-MAGIC-COOKIE-1" } else { "" };
     if (!resid_disp_send(fd, setup_request(name, cookie), -1)) { return session_failed(fd, "x11: could not send the setup request"); }
-    List(Int) head = recv_until(fd, 8, []);
-    if (head.len() < 8) { return session_failed(fd, "x11: the server closed the connection during setup"); }
-    Int need = 8 + (half_at(head, 6) & 65535) * 4;
-    List(Int) all = recv_until(fd, need, head);
+    Reply rd = recv_within(fd, 8, [], true, 0);
+    if (str_len(rd.err) > 0) { return session_failed(fd, rd.err); }
+    List(Int) all = rd.buf;
+    if (all.len() < 8) { return session_failed(fd, "x11: the server closed the connection during setup"); }
+    Int need = setup_need(all, 8);
     if (all.len() < need) { return session_failed(fd, "x11: setup reply cut short"); }
     return match (setup_parse(all[0..need])) {
         Ok(s) => Session { .fd = fd, .setup = s, .buf = all[need..all.len()], .err = "" },
@@ -49,13 +50,34 @@ pub Session x11_handshake_auth(Int fd, List(Int) cookie) {
     };
 }
 
-/// Receive until `buf` holds at least `want` bytes, or the peer closes.
+/// Receive until `buf` holds at least `want` bytes, or the peer closes or
+/// stays silent for 5 seconds.
 @requires(display)
-pub List(Int) recv_until(Int fd, Int want, List(Int) buf) {
-    if (buf.len() >= want) { return buf; }
+pub List(Int) recv_until(Int fd, Int want, List(Int) buf) { return recv_within(fd, want, buf, false, 0).buf; }
+
+/// The bytes a setup reply needs once its 8-byte head is in, else `want`.
+Int setup_need(List(Int) buf, Int want) { return if (buf.len() >= 8) { 8 + (half_at(buf, 6) & 65535) * 4 } else { want }; }
+
+/// Receive until `buf` holds `want` bytes (with `setup`, the whole setup
+/// reply); `err` is set when the peer stays silent for 5 seconds or takes
+/// more than 64 reads, empty when it closes.
+@requires(display)
+Reply recv_within(Int fd, Int want, List(Int) buf, Bool setup, Int rounds) {
+    Int need = if (setup) { setup_need(buf, want) } else { want };
+    if (buf.len() >= need) { return Reply { .msg = [], .buf = buf, .err = "" }; }
+    if (rounds >= 64) { return Reply { .msg = [], .buf = buf, .err = "x11: the server is too slow to answer" }; }
+    if (!x11_answers(fd)) { return Reply { .msg = [], .buf = buf, .err = "x11: the server did not answer in 5 seconds" }; }
     List(Int) got = resid_disp_recv(fd, 65536);
-    if (got.len() == 0) { return buf; }
-    return recv_until(fd, want, buf.concat(got));
+    if (got.len() == 0) { return Reply { .msg = [], .buf = buf, .err = "" }; }
+    return recv_within(fd, want, buf.concat(got), setup, rounds + 1);
+}
+
+/// Whether the socket becomes readable or fails within 5 seconds.
+@requires(display)
+Bool x11_answers(Int fd) {
+    List(Int) ready = resid_disp_poll([fd], [1], 5000);
+    Int bits = if (ready.len() > 0) { ready[0] } else { 0 };
+    return (bits & 9) != 0;
 }
 
 /// What a round trip produced: the reply (empty on failure), the bytes
@@ -71,15 +93,25 @@ pub Reply x11_call(Int fd, List(Int) r, List(Int) buf) {
 
 /// Read until a reply or an error arrives.
 @requires(display)
-pub Reply x11_await(Int fd, List(Int) buf) {
+pub Reply x11_await(Int fd, List(Int) buf) { return x11_await_n(fd, buf, 0, 0); }
+
+/// `x11_await` having skipped `skipped` events and read `rounds` times; at
+/// most 4096 are skipped and 64 reads made.
+@requires(display)
+Reply x11_await_n(Int fd, List(Int) buf, Int skipped, Int rounds) {
     XIn m = x_take(buf);
     if (m.kind == 1) { return Reply { .msg = m.msg, .buf = m.rest, .err = "" }; }
     if (m.kind == 2) { return Reply { .msg = [], .buf = m.rest, .err = x_error_text(m.msg) }; }
-    if (m.kind == 3) { return x11_await(fd, m.rest); }
+    if (m.kind == 3) {
+        if (skipped >= 4096) { return Reply { .msg = [], .buf = [], .err = "x11: the server sent 4096 events without a reply" }; }
+        return x11_await_n(fd, m.rest, skipped + 1, rounds);
+    }
     if (m.kind < 0) { return Reply { .msg = [], .buf = [], .err = "x11: corrupt reply" }; }
+    if (rounds >= 64) { return Reply { .msg = [], .buf = buf, .err = "x11: the server is too slow to answer" }; }
+    if (!x11_answers(fd)) { return Reply { .msg = [], .buf = buf, .err = "x11: the server did not answer in 5 seconds" }; }
     List(Int) got = resid_disp_recv(fd, 65536);
     if (got.len() == 0) { return Reply { .msg = [], .buf = buf, .err = "x11: the server closed the connection" }; }
-    return x11_await(fd, buf.concat(got));
+    return x11_await_n(fd, buf.concat(got), skipped, rounds + 1);
 }
 
 /// The 32-bit word at `at` of a reply, or 0.

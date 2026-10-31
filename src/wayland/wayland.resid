@@ -253,6 +253,9 @@ Int clock_ms() { return clock.monotonic_ns() / 1000000; }
 Wl alloc_buffers(Wl w) {
     Int dw = w.win.lw * w.win.scale;
     Int dh = w.win.lh * w.win.scale;
+    if (dw > 65536 || dh > 65536 || dw * dh > 67108864) {
+        return dead(w, f"wayland: buffer {dw}x{dh} past 65536 pixels a side or 256 MB");
+    }
     Int bytes = dw * dh * 4;
     Int h0 = resid_disp_shm_new(bytes);
     Int h1 = resid_disp_shm_new(bytes);
@@ -264,7 +267,11 @@ Wl alloc_buffers(Wl w) {
     Int id = w.next_id;
     Bool ok = resid_disp_send(w.fd, wl_shm_create_pool(w.o.shm, id, bytes), resid_disp_shm_fd(h0))
            && resid_disp_send(w.fd, wl_shm_create_pool(w.o.shm, id + 1, bytes), resid_disp_shm_fd(h1));
-    if (!ok) { return dead(w, "wayland: could not share the window's memory"); }
+    if (!ok) {
+        _ = resid_disp_shm_free(h0);
+        _ = resid_disp_shm_free(h1);
+        return dead(w, "wayland: could not share the window's memory");
+    }
     Wl w2 = send(with_ids(w, 4), [wl_pool_create_buffer(id, id + 2, 0, dw, dh), wl_pool_create_buffer(id + 1, id + 3, 0, dw, dh)]);
     WlBufs b = WlBufs { .pool0 = id, .pool1 = id + 1, .buf0 = id + 2, .buf1 = id + 3,
                         .s0 = slot_new(h0, dw, dh), .s1 = slot_new(h1, dw, dh), .frame_cb = w.bufs.frame_cb };
@@ -350,7 +357,7 @@ WlStep dispatch(Wl w, Int obj, Int op, List(Int) m, Int now) {
     if (obj == wl_display_id()) {
         if (op == 0) {
             WlStr s = wl_str(m, 16);
-            return WlStep { .w = dead(w, f"wayland: protocol error {wl_u32(m, 12)} on object {wl_u32(m, 8)}: {s.s}"), .events = [Closed] };
+            return WlStep { .w = dead(w, f"wayland: protocol error {wl_u32(m, 12)} on object {wl_u32(m, 8)}: {wl_printable(s.s, 0, StrBuf())}"), .events = [Closed] };
         }
         return quiet(w);
     }
@@ -393,11 +400,28 @@ Wl with_scale(Wl w, Int s) {
                                .scale = s, .resizable = v.resizable, .dw = v.dw, .dh = v.dh });
 }
 
+/// `s` with control characters (C0, DEL, C1) shown as `?`.
+Str wl_printable(Str s, Int i, StrBuf b) {
+    if (i >= str_len(s)) { return b.finish(); }
+    Int c = str_char_at(s, i);
+    return wl_printable(s, i + 1, b.push_char(if (c < 32 || (c >= 127 && c <= 159)) { 63 } else { c }));
+}
+
+/// Whether the client binds globals of interface `iface`.
+Bool wanted_iface(Str iface) {
+    return iface == "wl_compositor" || iface == "wl_shm" || iface == "xdg_wm_base" || iface == "wl_seat" || iface == "wp_cursor_shape_manager_v1";
+}
+
 Wl on_global(Wl w, List(Int) m) {
     WlStr s = wl_str(m, 12);
     if (s.next < 0) { return w; }
+    // past 256 entries keep only the first global of each bound interface
+    if (w.globals.len() >= 256 && (!wanted_iface(s.s) || global_of(w.globals, s.s, 0).name != 0)) { return w; }
     return with_globals(w, w.globals.concat([Global { .name = wl_u32(m, 8), .iface = s.s, .version = wl_u32(m, s.next) }]));
 }
+
+/// A suggested size held to 0..16384.
+Int cfg_clamp(Int v) { return if (v < 0) { 0 } else { if (v > 16384) { 16384 } else { v } }; }
 
 /// Acknowledge a configure and adopt the size it suggested: a resizable
 /// window takes any size the compositor names, a fixed one keeps its own.
@@ -405,8 +429,10 @@ Wl on_global(Wl w, List(Int) m) {
 WlStep on_configure(Wl w, Int serial) {
     Wl a = send(w, [xdg_surface_ack_configure(w.o.xdg_surface, serial)]);
     WlWin v = a.win;
-    Int lw = if (v.resizable && v.cfg_w > 0) { v.cfg_w } else { v.lw };
-    Int lh = if (v.resizable && v.cfg_h > 0) { v.cfg_h } else { v.lh };
+    Int cw = cfg_clamp(v.cfg_w);
+    Int ch = cfg_clamp(v.cfg_h);
+    Int lw = if (v.resizable && cw > 0) { cw } else { v.lw };
+    Int lh = if (v.resizable && ch > 0) { ch } else { v.lh };
     Bool changed = v.configured && (lw != v.lw || lh != v.lh);
     Wl b = with_win(a, WlWin { .configured = true, .cfg_w = v.cfg_w, .cfg_h = v.cfg_h, .lw = v.lw, .lh = v.lh,
                                .scale = v.scale, .resizable = v.resizable, .dw = v.dw, .dh = v.dh });

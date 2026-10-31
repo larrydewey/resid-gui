@@ -188,6 +188,9 @@ void font_atlas(const uint8_t *font, int64_t cap, int64_t len, int64_t px, uint8
         if (h > row) row = h;
     }
     int atlas_h = y + row + 1;
+    /* The padding row is dropped when only it would overrun the answer. */
+    if ((int64_t)atlas_h * ATLAS_W > room) atlas_h = y + row;
+    if ((int64_t)atlas_h * ATLAS_W > room) { fail(out, 3); return; }
 
     int kerns = 0;
     for (int a = 32; a <= 126; a++)

@@ -15,6 +15,7 @@ import "keysym.resid";
 
 /// The layout the keymap text describes, or None.
 pub Option(Keymap) xkb_keymap(List(Int) text) {
+    if (text.len() > 1048576) { return None; }
     List(Str) toks = xkb_tokens(text, 0, sb());
     Map(Str, Int) codes = key_codes(toks, 0, {});
     Map(Str, Str) aliases = key_aliases(toks, 0, {});

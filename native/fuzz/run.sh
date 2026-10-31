@@ -20,11 +20,13 @@ clang -g -O1 -fwrapv -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=u
     -o "$work/fuzz_$m" "$here/fuzz_$m.c"
 if [ "$m" = font ]; then
     for f in /usr/share/fonts/noto/NotoSans-Regular.ttf /usr/share/fonts/TTF/DejaVuSans.ttf /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf; do
-        [ -f "$f" ] && cp "$f" "$work/corpus-$m/"
+        [ -f "$f" ] && { printf '\014'; cat "$f"; } > "$work/corpus-$m/$(basename "$f")"
     done
+    maxlen=16777217
 else
+    maxlen=16777216
     for e in png jpg gif bmp tga; do
         magick -size 7x5 gradient:red-blue "$work/corpus-$m/seed.$e" 2>/dev/null || true
     done
 fi
-"$work/fuzz_$m" -max_total_time="$secs" -rss_limit_mb=4096 -max_len=1048576 -timeout=20 "$@" "$work/corpus-$m"
+"$work/fuzz_$m" -max_total_time="$secs" -rss_limit_mb=4096 -max_len=$maxlen -timeout=20 "$@" "$work/corpus-$m"

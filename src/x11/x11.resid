@@ -222,10 +222,13 @@ List(Int) mapping_request(Setup st) {
 }
 
 /// The layout changed (MappingNotify): ask for it again. The reply is read
-/// with the events, in `x11_drain`.
+/// with the events, in `x11_drain`. At most 8 replies are waited for, and
+/// none once 1024 key events are held; a reply not waited for still
+/// updates the layout.
 @requires(display)
 X11 x11_refetch_mapping(X11 x) {
-    return if (resid_disp_send(x.fd, mapping_request(x.setup), -1)) { x11_held(x, x.km_wait + 1, x.held) } else { x11_dead(x, "x11: send failed") };
+    Int wait = if (x.km_wait >= 8) { x.km_wait } else { x.km_wait + 1 };
+    return if (resid_disp_send(x.fd, mapping_request(x.setup), -1)) { x11_held(x, wait, x.held) } else { x11_dead(x, "x11: send failed") };
 }
 
 X11 x11_with_keymap(X11 x, Keymap k) {
@@ -243,6 +246,17 @@ X11 x11_held(X11 x, Int wait, List(Int) held) {
                  .shm = x.shm, .shm_event = x.shm_event, .seg0 = x.seg0, .seg1 = x.seg1, .s0 = x.s0, .s1 = x.s1,
                  .w = x.w, .h = x.h, .scale = x.scale, .wm_protocols = x.wm_protocols, .wm_delete = x.wm_delete,
                  .keys = x.keys, .buf = x.buf, .redraw = x.redraw, .km_wait = wait, .held = held };
+}
+
+/// Hold a key event back. At 1024 held events the wait ends: the held ones
+/// and then this one are decoded under the current layout.
+XStep x11_hold(X11 x, Bool down, Int kc, Int state) {
+    if (x.held.len() >= 3072) {
+        XStep r = x11_replay(x11_held(x, 0, []), x.held, 0, []);
+        XStep k = x11_key(r.x, down, kc - 8, mods_of(state));
+        return XStep { .x = k.x, .events = r.events.concat(k.events) };
+    }
+    return XStep { .x = x11_held(x, x.km_wait, x.held.concat([if (down) { 1 } else { 0 }, kc, state])), .events = [] };
 }
 
 /// The held key events, decoded now.
@@ -287,13 +301,15 @@ Mods mods_of(Int state) { return mods_from_mask(state, state); }
 @requires(display)
 XStep x11_event(X11 x, XEv e) {
     return match (e) {
-        XKey(down, kc, state) => if (x.km_wait > 0) { XStep { .x = x11_held(x, x.km_wait, x.held.concat([if (down) { 1 } else { 0 }, kc, state])), .events = [] } }
+        XKey(down, kc, state) => if (x.km_wait > 0) { x11_hold(x, down, kc, state) }
                                  else { x11_key(x, down, kc - 8, mods_of(state)) },
         XButton(down, b, px, py) => XStep { .x = x, .events = button_events(down, b, px, py) },
         XMotion(px, py) => XStep { .x = x, .events = [PointerMoved(px, py)] },
         XFocus(on) => XStep { .x = x, .events = [if (on) { Focused } else { Blurred }] },
         XExpose(ex, ey, ew, eh) => XStep { .x = x11_with_redraw(x, rects_add(x.redraw, Rect { .x = ex, .y = ey, .w = ew, .h = eh })), .events = [] },
-        XConfigure(w, h) => if (w == x.w && h == x.h) { XStep { .x = x, .events = [] } } else { XStep { .x = x11_resized(x, w, h), .events = [Resized(w, h)] } },
+        XConfigure(w, h) => if (w == x.w && h == x.h) { XStep { .x = x, .events = [] } }
+                            else { if (w > 16384 || h > 16384 || w * h * 4 > 268435456) { XStep { .x = x11_dead(x, f"x11: the server sized the window {w}x{h}, past 16384 or 256 MB"), .events = [Closed] } }
+                                   else { XStep { .x = x11_resized(x, w, h), .events = [Resized(w, h)] } } },
         XClient(t, d) => XStep { .x = x, .events = if (t == x.wm_protocols && d == x.wm_delete) { [Closed] } else { [] } },
         XDestroy => XStep { .x = x11_dead(x, ""), .events = [Closed] },
         XShmDone(seg) => XStep { .x = x11_shm_done(x, seg), .events = [] },

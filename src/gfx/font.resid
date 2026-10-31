@@ -40,9 +40,12 @@ pub List(Int) font_data() { return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 
 /// Row `row` (0-15) of the built-in glyph for `code`: one byte, the
 /// leftmost pixel in the high bit. Codes outside printable ASCII are blank.
-pub Int glyph_row(Int code, Int row) {
+pub Int glyph_row(Int code, Int row) { return glyph_row_in(font_data(), code, row); }
+
+/// `glyph_row` read from `font`, a `font_data()` the caller built once.
+pub Int glyph_row_in(List(Int) font, Int code, Int row) {
     if (code < 32 || code > 126 || row < 0 || row > 15) { return 0; }
-    return font_data()[(code - 32) * 16 + row];
+    return font[(code - 32) * 16 + row];
 }
 
 // ─── Metrics ────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ pub Canvas render_text_scaled(Canvas c, Int x0, Int y0, Str s, Color col, Rect c
     Int n = str_len(s);
     Rect box = rect_intersect(clip, Rect { .x = x0, .y = y0, .w = n * 8 * k, .h = 16 * k });
     if (rect_is_empty(box)) { return c; }
-    return text_chars(c, x0, y0, s, n, col, box, 0, k);
+    return text_chars(c, x0, y0, s, n, col, box, 0, k, font_data());
 }
 
 /// Draw `s` in font `f` with its top-left at device (`x0`, `y0`), for a
@@ -65,18 +65,19 @@ pub Canvas render_text(Canvas c, Int x0, Int y0, Str s, Color col) {
     return render_text_clip(c, x0, y0, s, col, all);
 }
 
-Canvas text_chars(Canvas c, Int x0, Int y0, Str s, Int n, Color col, Rect clip, Int i, Int k) {
+// `font` is the built-in bitmap, built once per string by the caller.
+Canvas text_chars(Canvas c, Int x0, Int y0, Str s, Int n, Color col, Rect clip, Int i, Int k, List(Int) font) {
     if (i >= n) { return c; }
     Int gx = x0 + i * 8 * k;
-    Canvas next = if (gx + 8 * k <= clip.x || gx >= clip.x + clip.w) { c } else { glyph_rows_draw(c, gx, y0, str_char_at(s, i), col, clip, 0, k) };
-    return text_chars(next, x0, y0, s, n, col, clip, i + 1, k);
+    Canvas next = if (gx + 8 * k <= clip.x || gx >= clip.x + clip.w) { c } else { glyph_rows_draw(c, gx, y0, str_char_at(s, i), col, clip, 0, k, font) };
+    return text_chars(next, x0, y0, s, n, col, clip, i + 1, k, font);
 }
 
-Canvas glyph_rows_draw(Canvas c, Int x, Int y, Int code, Color col, Rect clip, Int row, Int k) {
+Canvas glyph_rows_draw(Canvas c, Int x, Int y, Int code, Color col, Rect clip, Int row, Int k, List(Int) font) {
     if (row >= 16) { return c; }
-    Int bits = glyph_row(code, row);
+    Int bits = glyph_row_in(font, code, row);
     Canvas next = if (bits == 0) { c } else { glyph_bits(c, x, y + row * k, bits, col, clip, 0, k) };
-    return glyph_rows_draw(next, x, y, code, col, clip, row + 1, k);
+    return glyph_rows_draw(next, x, y, code, col, clip, row + 1, k, font);
 }
 
 Canvas glyph_bits(Canvas c, Int x, Int y, Int bits, Color col, Rect clip, Int bit, Int k) {

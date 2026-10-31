@@ -6,9 +6,10 @@
 // `resid_disp_shm_put32` copies the words into shared memory as they are.
 // A pixel is one list element, so a fill writes one element where a list
 // of bytes took four. Every write threads the pixel list through a tail
-// call and replaces elements with `with`, which the compiler does in place
-// because the old list is dead afterwards; nothing here copies the frame
-// per pixel.
+// call and replaces elements with `with`, or a row's run at once with
+// `fill` (spec §17), which the compiler does in place because the old list
+// is dead afterwards; nothing here copies the frame per pixel. A new
+// canvas is one `grow` of an empty list.
 //
 // A writer reads the canvas's size from its fields, never by passing the
 // canvas to another function first (`canvas_bounds(c)`): the compiler
@@ -38,8 +39,8 @@ pub Color word_color(UInt(32) w) {
 pub Canvas canvas_new(Int ww, Int hh) {
     Int w = if (ww < 0) { 0 } else { ww };
     Int h = if (hh < 0) { 0 } else { hh };
-    ListBuf(UInt(32)) b = ListBuf();
-    return Canvas { .w = w, .h = h, .px = words_of(0, w * h, (UInt(32))0, b) };
+    List(UInt(32)) none = [];
+    return Canvas { .w = w, .h = h, .px = none.grow(w * h, (UInt(32))0) };
 }
 
 /// A canvas of the given size, every pixel `col`: one pass, where a new
@@ -47,13 +48,8 @@ pub Canvas canvas_new(Int ww, Int hh) {
 pub Canvas canvas_filled(Int ww, Int hh, Color col) {
     Int w = if (ww < 0) { 0 } else { ww };
     Int h = if (hh < 0) { 0 } else { hh };
-    ListBuf(UInt(32)) b = ListBuf();
-    return Canvas { .w = w, .h = h, .px = words_of(0, w * h, color_word(col), b) };
-}
-
-List(UInt(32)) words_of(Int i, Int n, UInt(32) v, ListBuf(UInt(32)) acc) {
-    if (i >= n) { return acc.finish(); }
-    return words_of(i + 1, n, v, acc.push(v));
+    List(UInt(32)) none = [];
+    return Canvas { .w = w, .h = h, .px = none.grow(w * h, color_word(col)) };
 }
 
 /// `n` zero bytes (an image's pixels start as these).
@@ -77,17 +73,14 @@ pub Canvas fill_rect_clip(Canvas c, Rect r, Color col, Rect clip) {
     Int hh = c.h;
     Rect a = rect_intersect(rect_intersect(r, clip), Rect { .x = 0, .y = 0, .w = ww, .h = hh });
     if (rect_is_empty(a)) { return c; }
-    List(UInt(32)) px = fill_rows(c.px, ww, a.x, a.x + a.w, a.y + a.h, color_word(col), a.y * ww + a.x, a.y);
+    List(UInt(32)) px = fill_rows(c.px, ww, a.x, a.w, a.y, a.y + a.h, color_word(col));
     return Canvas { .w = ww, .h = hh, .px = px };
 }
 
-/// Pixels `x0` up to `x1` of rows `y` up to `y1`, `i` being the index of
-/// the next one to write.
-List(UInt(32)) fill_rows(List(UInt(32)) px, Int ww, Int x0, Int x1, Int y1, UInt(32) v, Int i, Int y) {
+/// Pixels `x0` up to `x0 + n` of rows `y` up to `y1`, one `fill` a row.
+List(UInt(32)) fill_rows(List(UInt(32)) px, Int ww, Int x0, Int n, Int y, Int y1, UInt(32) v) {
     if (y >= y1) { return px; }
-    Int end = y * ww + x1;
-    if (i >= end) { return fill_rows(px, ww, x0, x1, y1, v, (y + 1) * ww + x0, y + 1); }
-    return fill_rows(px.with(i, v), ww, x0, x1, y1, v, i + 1, y);
+    return fill_rows(px.fill(y * ww + x0, n, v), ww, x0, n, y + 1, y1, v);
 }
 
 /// One pixel, when it lies inside `clip` and the canvas.

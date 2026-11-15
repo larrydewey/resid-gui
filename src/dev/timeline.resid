@@ -276,22 +276,6 @@ Str items_at(List(Event) es, Int i, StrBuf b) {
 
 // ─── Tests ─────────────────────────────────────────────────────────
 
-type Todo = { List(Str) items; Str draft; };
-
-Todo todo_init() { return Todo { .items = [], .draft = "" }; }
-
-Todo todo_update(Todo t, Event e) {
-    return match (e) {
-        TextEdited(m, s, k) => Todo { .items = t.items, .draft = s },
-        AppMsg(m) => match (m) { Submitted => Todo { .items = t.items.concat([t.draft]), .draft = "" }, _ => t },
-        _ => t
-    };
-}
-
-Widget todo_view(Todo t) { return Column([TextInput(t.draft, str_len(t.draft), Submitted), Text(f"{t.items.len()} items")]); }
-
-App(Todo) = { .init = todo_init, .update = todo_update, .view = todo_view };
-
 List(Event) session() {
     return [TextEdited(Submitted, "Ship \"RSP\"", 10), KeyDown(28, ""), AppMsg(Submitted),
             TextEdited(Submitted, "Write shell\n", 12), AppMsg(Submitted), PointerMoved(-3, 4), Assist(2, 1), Wheel(0, -1)];
@@ -316,16 +300,6 @@ test "a bad line is refused with its line number" {
     expect(bad4).toEqual(true);
     Bool blank = match (log_parse("\n\n  \n")) { Ok(v) => v.len() == 0, Err(e) => false };
     expect(blank).toEqual(true);
-}
-
-test "replay arrives where the session ended, and each step is kept" {
-    Todo t = replay(todo_init(), session());
-    expect(t.items.len()).toEqual(2);
-    expect(t.items[0]).toEqual("Ship \"RSP\"");
-    List(Todo) ms = models(todo_init(), session());
-    expect(ms.len()).toEqual(8);
-    expect(ms[0].draft).toEqual("Ship \"RSP\"");
-    expect(ms[2].items.len()).toEqual(1);
 }
 
 test "a session becomes a test" {

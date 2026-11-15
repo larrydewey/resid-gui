@@ -202,6 +202,17 @@ Bool hostile(Int fd, List(Int) reply, List(Int) config) {
     return window.len() > 0 && resid_disp_send(fd, config, -1);
 }
 
+/// Read until the core closes its end (or `n` reads), as an honest shell
+/// stays connected until the core is finished with it.
+@requires(display)
+Bool drain_until_closed(Int fd, Int n) {
+    if (n <= 0) { return false; }
+    List(Int) got = resid_disp_recv(fd, 65536);
+    if (got.len() == 0) { return true; }
+    _ = resid_disp_recv_fd();
+    return drain_until_closed(fd, n - 1);
+}
+
 @requires(display)
 Str start_against(List(Int) reply, List(Int) config) {
     List(Int) pair = resid_disp_pair();
@@ -215,6 +226,7 @@ Str start_against(List(Int) reply, List(Int) config) {
         return if (was) { "" } else { why };
     };
     _ = hostile(sfd, reply, config);
+    _ = drain_until_closed(sfd, 64);
     _ = resid_disp_close(sfd);
     return r else { "crashed" };
 }

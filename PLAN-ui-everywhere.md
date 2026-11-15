@@ -1,6 +1,9 @@
 # resid-gui Everywhere — Design Plan
 
-**Status: proposed** (2026-11-15). Nothing here is built yet. This plan
+**Status: in progress** (2026-11-15). U0 done; U2 done with the
+reference shell in Python rather than Resid (§11); the core of U3 (the
+semantics tree and assistive actions) and the hot-restart part of U8 are
+done. §11 records what shipped and what each was checked against. This plan
 turns resid-gui from a Linux GUI library into a UI framework you write
 once and run on every platform. It takes Flutter's *goal*, not its
 design: no Flutter widgets, API or look. Read `README.md`,
@@ -350,3 +353,35 @@ macOS port in `../Resid`.
 - Generated permission manifests are checked against the compiler's
   capability set in CI, so a manifest can never claim less than the code
   uses.
+
+## 11. Progress
+
+| Item | What shipped | Checked by |
+|---|---|---|
+| U0 | `docs/rsp.md` (RSP v1); `src/rsp/wire.resid`, a bounds-checked codec for all 31 messages; the `OpText` direction field is **not** done yet | round trips of every message; hostile input (overruns, invalid UTF-8, non-zero padding, wrong direction, unknown opcodes) |
+| U2 | `src/rsp/client.resid`, `Backend(Rsp)`; `gui_run` prefers a shell when `RSP_SOCKET` names one; `tools/rsp_shell.py`, a headless reference shell written from the spec alone | `tests/fake_shell.resid`: a counter driven by pointer and by screen reader through the whole loop, and a hostile shell; the compiled counter under the Python shell, frames read back from the shared buffers |
+| U3 core | `src/ui/semantics.resid` (`semantics`, `sem_diff`); `Assist(node, action)` events; `be_semantics` on every backend (a no-op on Wayland and X11 until AT-SPI) | 5 tests; the Python shell's screen-reader readout |
+| U8 part | `src/dev/timeline.resid` (event log as Resid expressions, `replay`, `models`, `test_source`); `src/dev/hot.resid` (`gui_run_dev`); `examples/dev_counter.resid` | 5 tests; three clicks, restart: count 3; rebuilt with "+1" adding 10, the same log: count 30 |
+| §5.2 part | `tools/caps_manifest.py`: macOS, Windows and Android manifests from `main`'s capabilities | self-test; reports `filesystem` as having no store entitlement |
+
+Changes in Resid (branch `ccr-dabcdde2-4pf7mc`):
+
+- `rt_disp_send` passes `MSG_NOSIGNAL`. Before, a window server or shell
+  that went away killed the program with SIGPIPE (found by the hostile
+  shell test, exit 141). Conformance case `display_peer_gone`.
+- `resid_disp_connect_rsp()`: the descriptor `RSP_SOCKET` names, under
+  `display`.
+
+Deviations from this plan, on purpose:
+
+- **The reference shell is Python, not Resid.** A shell must map the
+  buffers the core passes, and Resid has no builtin that maps a received
+  descriptor. Python also shows that the spec stands on its own: its
+  author needs nothing from the core.
+- **Hot restart replays events instead of serializing the model.** It
+  needs no `Serial(M)` instance and recomputes the state with the new
+  code. The cost: timers (`FrameTick`) are not logged, and a change to
+  what an event means changes the restored state.
+- **U1's directory split is not done.** The seam it aims for is
+  `Backend(B)`, which already exists; moving files would only churn
+  imports.

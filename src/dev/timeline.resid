@@ -1,0 +1,309 @@
+// timeline.resid — a program's history as a value.
+//
+// A resid-gui program's state is one model value and `update` is pure, so
+// the whole session is `init()` folded through the events `update` saw.
+// Keep those events and you can:
+//   - step back to any point (`models`: the model after each event),
+//   - restart the program after a code change and arrive where you were
+//     (`replay` the log through the *new* `update`: hot restart that keeps
+//     state, with no serializer for the model),
+//   - turn a session into a regression test (`test_source`).
+//
+// The events kept are the ones `update` received: after the widgets
+// turned a click into `AppMsg(m)` and keys into `TextEdited`. Replaying
+// them needs no window, no layout and no fonts.
+//
+// The log is text, one event per line, each line the event written as a
+// Resid expression (`AppMsg(Changed("milk"))`), so a log pastes straight
+// into a test. `event_parse` reads a line back, strictly: anything that is
+// not one of these constructors with the right arguments is an error.
+
+import "../app.resid";
+
+// ─── Writing ───────────────────────────────────────────────────────
+
+/// A string as a Resid literal: quotes, with `\\`, `\"`, `\n`, `\t` and
+/// `\r` escaped.
+pub Str str_lit(Str s) { return "\"" + esc_at(s, 0, StrBuf()) + "\""; }
+
+Str esc_at(Str s, Int i, StrBuf b) {
+    if (i >= str_len(s)) { return b.finish(); }
+    Int c = str_char_at(s, i);
+    StrBuf n = if (c == 92) { b.push("\\\\") } else { if (c == 34) { b.push("\\\"") } else { if (c == 10) { b.push("\\n") }
+               else { if (c == 9) { b.push("\\t") } else { if (c == 13) { b.push("\\r") } else { b.push_char(c) } } } } };
+    return esc_at(s, i + 1, n);
+}
+
+/// A message as a Resid expression.
+pub Str msg_lit(Msg m) {
+    return match (m) {
+        Clicked => "Clicked", Toggled => "Toggled", Submitted => "Submitted",
+        Changed(s) => "Changed(" + str_lit(s) + ")",
+        Custom(n) => f"Custom({n})"
+    };
+}
+
+/// An event as a Resid expression.
+pub Str event_lit(Event e) {
+    return match (e) {
+        PointerMoved(x, y) => f"PointerMoved({x}, {y})",
+        PointerDown(x, y, b) => f"PointerDown({x}, {y}, {b})",
+        PointerUp(x, y, b) => f"PointerUp({x}, {y}, {b})",
+        Wheel(x, y) => f"Wheel({x}, {y})",
+        KeyDown(k, t) => f"KeyDown({k}, " + str_lit(t) + ")",
+        KeyUp(k) => f"KeyUp({k})",
+        Resized(w, h) => f"Resized({w}, {h})",
+        Focused => "Focused", Blurred => "Blurred", Closed => "Closed", FrameTick => "FrameTick",
+        AppMsg(m) => "AppMsg(" + msg_lit(m) + ")",
+        TextEdited(m, t, k) => "TextEdited(" + msg_lit(m) + ", " + str_lit(t) + f", {k})",
+        SliderSet(m, v) => "SliderSet(" + msg_lit(m) + f", {v})",
+        Assist(n, a) => f"Assist({n}, {a})"
+    };
+}
+
+/// A log: one event per line.
+pub Str log_text(List(Event) es) { return log_at(es, 0, StrBuf()); }
+
+Str log_at(List(Event) es, Int i, StrBuf b) {
+    if (i >= es.len()) { return b.finish(); }
+    return log_at(es, i + 1, b.push(event_lit(es[i])).push("\n"));
+}
+
+// ─── Reading ───────────────────────────────────────────────────────
+
+/// A parsed expression: a constructor with arguments, an integer, or a
+/// string.
+pub type Lit = LCtor(Str, List(Lit)) | LInt(Int) | LStr(Str);
+
+type PStep = { Bool ok; Str why; Lit v; Int at; };
+
+PStep perr(Str why, Int at) { return PStep { .ok = false, .why = why, .v = LInt(0), .at = at }; }
+
+Int skip_ws(Str s, Int i) {
+    if (i < str_len(s) && (str_char_at(s, i) == 32 || str_char_at(s, i) == 9)) { return skip_ws(s, i + 1); }
+    return i;
+}
+
+Bool is_alpha(Int c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122); }
+Bool is_digit(Int c) { return c >= 48 && c <= 57; }
+
+/// One expression starting at `i`. Nesting is limited to 4 deep and
+/// arguments to 4, more than any event needs.
+PStep parse_lit(Str s, Int i0, Int depth) {
+    if (depth > 4) { return perr("nested too deep", i0); }
+    Int i = skip_ws(s, i0);
+    if (i >= str_len(s)) { return perr("expected a value", i); }
+    Int c = str_char_at(s, i);
+    if (c == 34) { return parse_str(s, i + 1, StrBuf()); }
+    if (is_digit(c) || c == 45) { return parse_int(s, i); }
+    if (!is_alpha(c)) { return perr("unexpected character", i); }
+    Int e = name_end(s, i);
+    Str name = str_slice(s, i, e);
+    Int j = skip_ws(s, e);
+    if (j >= str_len(s) || str_char_at(s, j) != 40) { return PStep { .ok = true, .why = "", .v = LCtor(name, []), .at = j }; }
+    return parse_args(s, j + 1, depth, name, []);
+}
+
+Int name_end(Str s, Int i) {
+    if (i < str_len(s) && (is_alpha(str_char_at(s, i)) || is_digit(str_char_at(s, i)))) { return name_end(s, i + 1); }
+    return i;
+}
+
+PStep parse_args(Str s, Int i, Int depth, Str name, List(Lit) acc) {
+    Int j = skip_ws(s, i);
+    if (j < str_len(s) && str_char_at(s, j) == 41 && acc.len() == 0) { return PStep { .ok = true, .why = "", .v = LCtor(name, acc), .at = j + 1 }; }
+    if (acc.len() >= 4) { return perr("too many arguments", j); }
+    PStep a = parse_lit(s, j, depth + 1);
+    if (!a.ok) { return a; }
+    Int k = skip_ws(s, a.at);
+    if (k >= str_len(s)) { return perr("unclosed argument list", k); }
+    Int c = str_char_at(s, k);
+    if (c == 44) { return parse_args(s, k + 1, depth, name, acc.concat([a.v])); }
+    if (c == 41) { return PStep { .ok = true, .why = "", .v = LCtor(name, acc.concat([a.v])), .at = k + 1 }; }
+    return perr("expected , or )", k);
+}
+
+PStep parse_int(Str s, Int i) {
+    Bool neg = str_char_at(s, i) == 45;
+    Int start = if (neg) { i + 1 } else { i };
+    Int e = digits_end(s, start);
+    if (e == start || e - start > 15) { return perr("bad integer", i); }
+    Int v = digits_value(s, start, e, 0);
+    return PStep { .ok = true, .why = "", .v = LInt(if (neg) { 0 - v } else { v }), .at = e };
+}
+
+Int digits_end(Str s, Int i) { return if (i < str_len(s) && is_digit(str_char_at(s, i))) { digits_end(s, i + 1) } else { i }; }
+Int digits_value(Str s, Int i, Int e, Int acc) { return if (i >= e) { acc } else { digits_value(s, i + 1, e, acc * 10 + str_char_at(s, i) - 48) }; }
+
+PStep parse_str(Str s, Int i, StrBuf b) {
+    if (i >= str_len(s)) {
+        _ = b.finish();
+        return perr("unclosed string", i);
+    }
+    Int c = str_char_at(s, i);
+    if (c == 34) { return PStep { .ok = true, .why = "", .v = LStr(b.finish()), .at = i + 1 }; }
+    if (c != 92) { return parse_str(s, i + 1, b.push_char(c)); }
+    if (i + 1 >= str_len(s)) {
+        _ = b.finish();
+        return perr("unclosed string", i);
+    }
+    Int d = str_char_at(s, i + 1);
+    Int out = if (d == 110) { 10 } else { if (d == 116) { 9 } else { if (d == 114) { 13 } else { if (d == 34 || d == 92) { d } else { -1 } } } };
+    if (out < 0) {
+        _ = b.finish();
+        return perr("unknown escape", i);
+    }
+    return parse_str(s, i + 2, b.push_char(out));
+}
+
+Bool is_int(Lit l) { return match (l) { LInt(v) => true, _ => false }; }
+Bool is_str(Lit l) { return match (l) { LStr(v) => true, _ => false }; }
+Int ival(Lit l) { return match (l) { LInt(v) => v, _ => 0 }; }
+Str sval(Lit l) { return match (l) { LStr(v) => v, _ => "" }; }
+
+/// Whether `args` has the kinds `kinds` names: `i` integer, `s` string,
+/// `m` message.
+Bool shaped(List(Lit) args, Str kinds) {
+    if (args.len() != str_len(kinds)) { return false; }
+    return shaped_at(args, kinds, 0);
+}
+
+Bool shaped_at(List(Lit) args, Str kinds, Int i) {
+    if (i >= args.len()) { return true; }
+    Int k = str_char_at(kinds, i);
+    Bool ok = if (k == 105) { is_int(args[i]) } else { if (k == 115) { is_str(args[i]) } else { is_msg(args[i]) } };
+    return ok && shaped_at(args, kinds, i + 1);
+}
+
+Bool is_msg(Lit l) {
+    return match (l) {
+        LCtor(n, a) => ((n == "Clicked" || n == "Toggled" || n == "Submitted") && a.len() == 0)
+                       || (n == "Changed" && shaped(a, "s")) || (n == "Custom" && shaped(a, "i")),
+        _ => false
+    };
+}
+
+Msg to_msg(Lit l) {
+    return match (l) {
+        LCtor(n, a) => if (n == "Toggled") { Toggled } else { if (n == "Submitted") { Submitted }
+                       else { if (n == "Changed") { Changed(sval(a[0])) } else { if (n == "Custom") { Custom(ival(a[0])) } else { Clicked } } } },
+        _ => Clicked
+    };
+}
+
+/// An event from its constructor and arguments.
+Result(Event, Str) to_event(Str n, List(Lit) a) {
+    if (n == "PointerMoved" && shaped(a, "ii")) { return Ok(PointerMoved(ival(a[0]), ival(a[1]))); }
+    if (n == "PointerDown" && shaped(a, "iii")) { return Ok(PointerDown(ival(a[0]), ival(a[1]), ival(a[2]))); }
+    if (n == "PointerUp" && shaped(a, "iii")) { return Ok(PointerUp(ival(a[0]), ival(a[1]), ival(a[2]))); }
+    if (n == "Wheel" && shaped(a, "ii")) { return Ok(Wheel(ival(a[0]), ival(a[1]))); }
+    if (n == "KeyDown" && shaped(a, "is")) { return Ok(KeyDown(ival(a[0]), sval(a[1]))); }
+    if (n == "KeyUp" && shaped(a, "i")) { return Ok(KeyUp(ival(a[0]))); }
+    if (n == "Resized" && shaped(a, "ii")) { return Ok(Resized(ival(a[0]), ival(a[1]))); }
+    if (n == "Focused" && a.len() == 0) { return Ok(Focused); }
+    if (n == "Blurred" && a.len() == 0) { return Ok(Blurred); }
+    if (n == "Closed" && a.len() == 0) { return Ok(Closed); }
+    if (n == "FrameTick" && a.len() == 0) { return Ok(FrameTick); }
+    if (n == "AppMsg" && shaped(a, "m")) { return Ok(AppMsg(to_msg(a[0]))); }
+    if (n == "TextEdited" && shaped(a, "msi")) { return Ok(TextEdited(to_msg(a[0]), sval(a[1]), ival(a[2]))); }
+    if (n == "SliderSet" && shaped(a, "mi")) { return Ok(SliderSet(to_msg(a[0]), ival(a[1]))); }
+    if (n == "Assist" && shaped(a, "ii")) { return Ok(Assist(ival(a[0]), ival(a[1]))); }
+    return Err(f"not an event: {n} with {a.len()} argument(s)");
+}
+
+/// One line of a log back into an event.
+pub Result(Event, Str) event_parse(Str line) {
+    PStep p = parse_lit(line, 0, 0);
+    if (!p.ok) { return Err(p.why); }
+    if (skip_ws(line, p.at) != str_len(line)) { return Err("text after the event"); }
+    return match (p.v) { LCtor(n, a) => to_event(n, a), _ => Err("not an event") };
+}
+
+/// A whole log. Blank lines are skipped; any other bad line is an error
+/// naming its line number.
+pub Result(List(Event), Str) log_parse(Str text) { return lines_at(text, 0, 0, 1, []); }
+
+Result(List(Event), Str) lines_at(Str t, Int start, Int i, Int line, List(Event) acc) {
+    if (i < str_len(t) && str_char_at(t, i) != 10) { return lines_at(t, start, i + 1, line, acc); }
+    Str l = str_trim(str_slice(t, start, i));
+    if (str_len(l) == 0) {
+        if (i >= str_len(t)) { return Ok(acc); }
+        return lines_at(t, i + 1, i + 1, line + 1, acc);
+    }
+    return match (event_parse(l)) {
+        Ok(e) => if (i >= str_len(t)) { Ok(acc.concat([e])) } else { lines_at(t, i + 1, i + 1, line + 1, acc.concat([e])) },
+        Err(why) => Err(f"line {line}: {why}")
+    };
+}
+
+// ─── Replaying ─────────────────────────────────────────────────────
+
+/// `m0` folded through every event: where the session ended.
+@needs(App(M))
+pub M replay(M m0, List(Event) es) { return replay_at(m0, es, 0); }
+
+@needs(App(M))
+M replay_at(M m, List(Event) es, Int i) {
+    if (i >= es.len()) { return m; }
+    return replay_at(update(m, es[i]), es, i + 1);
+}
+
+/// The model after each event: entry `k` is the state once event `k` was
+/// handled. The timeline view steps through these.
+@needs(App(M))
+pub List(M) models(M m0, List(Event) es) { return models_at(m0, es, 0, []); }
+
+@needs(App(M))
+List(M) models_at(M m, List(Event) es, Int i, List(M) acc) {
+    if (i >= es.len()) { return acc; }
+    M n = update(m, es[i]);
+    return models_at(n, es, i + 1, acc.concat([n]));
+}
+
+/// A Resid test that replays `es` from `init()` and expects the model to
+/// print as `expected` (what `f"{model}"` printed when the session was
+/// saved). Paste it into a file that defines the program's `App`.
+pub Str test_source(Str name, List(Event) es, Str expected) {
+    return "test " + str_lit(name) + " {\n    List(Event) es = [\n" + items_at(es, 0, StrBuf())
+        + "    ];\n    expect(f\"{replay(init(), es)}\").toEqual(" + str_lit(expected) + ");\n}\n";
+}
+
+Str items_at(List(Event) es, Int i, StrBuf b) {
+    if (i >= es.len()) { return b.finish(); }
+    Str sep = if (i + 1 < es.len()) { "," } else { "" };
+    return items_at(es, i + 1, b.push("        ").push(event_lit(es[i])).push(sep).push("\n"));
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+List(Event) session() {
+    return [TextEdited(Submitted, "Ship \"RSP\"", 10), KeyDown(28, ""), AppMsg(Submitted),
+            TextEdited(Submitted, "Write shell\n", 12), AppMsg(Submitted), PointerMoved(-3, 4), Assist(2, 1), Wheel(0, -1)];
+}
+
+test "every event survives the log, quotes and newlines included" {
+    List(Event) es = session();
+    List(Event) back = log_parse(log_text(es)) else { [] };
+    expect(back.len()).toEqual(es.len());
+    expect(log_text(back)).toEqual(log_text(es));
+    expect(event_lit(es[0])).toEqual("TextEdited(Submitted, \"Ship \\\"RSP\\\"\", 10)");
+}
+
+test "a bad line is refused with its line number" {
+    Bool bad1 = match (log_parse("AppMsg(Clicked)\nKeyDown(30)\n")) { Ok(v) => false, Err(e) => e == "line 2: not an event: KeyDown with 1 argument(s)" };
+    expect(bad1).toEqual(true);
+    Bool bad2 = match (event_parse("AppMsg(Clicked) junk")) { Ok(v) => false, Err(e) => true };
+    expect(bad2).toEqual(true);
+    Bool bad3 = match (event_parse("KeyDown(30, \"open")) { Ok(v) => false, Err(e) => true };
+    expect(bad3).toEqual(true);
+    Bool bad4 = match (event_parse("AppMsg(AppMsg(AppMsg(AppMsg(AppMsg(Clicked)))))")) { Ok(v) => false, Err(e) => true };
+    expect(bad4).toEqual(true);
+    Bool blank = match (log_parse("\n\n  \n")) { Ok(v) => v.len() == 0, Err(e) => false };
+    expect(blank).toEqual(true);
+}
+
+test "a session becomes a test" {
+    Str src = test_source("two tasks", [AppMsg(Submitted)], "x");
+    expect(str_contains(src, "        AppMsg(Submitted)\n")).toEqual(true);
+    expect(str_starts_with(src, "test \"two tasks\" {\n")).toEqual(true);
+}

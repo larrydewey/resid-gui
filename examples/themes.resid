@@ -1,0 +1,56 @@
+import "../src/gui.resid";
+import "../src/gfx/fontfile.resid";
+
+// themes.resid — what a program may change about the look, and what it
+// may not. The model holds a theme *spec*: an accent, a mode, a contrast.
+// `theme_from` derives every colour from it and keeps it readable: pick
+// the pale amber and, on a light ground, it is darkened until it stands
+// out; on a dark ground it is kept. "System" follows the platform's
+// dark-mode and high-contrast hints. The "Delete" button carries its own
+// red accent through a nested `Themed`: a local accent, the same look.
+
+type Look = { Int accent; Int mode; Bool high; Int volume; Bool alerts; };
+
+List(Color) accents() { return [rgb(36, 87, 230), rgb(31, 122, 90), rgb(255, 214, 0), rgb(255, 105, 180)]; }
+
+Look look_init() { return Look { .accent = 0, .mode = 2, .high = false, .volume = 60, .alerts = true }; }
+
+Look look_update(Look l, Event e) {
+    return match (e) {
+        AppMsg(m) => match (m) {
+            Custom(n) => if (n < 10) { Look { .accent = n, .mode = l.mode, .high = l.high, .volume = l.volume, .alerts = l.alerts } }
+                         else { if (n < 20) { Look { .accent = l.accent, .mode = n - 10, .high = l.high, .volume = l.volume, .alerts = l.alerts } }
+                         else { if (n == 20) { Look { .accent = l.accent, .mode = l.mode, .high = !l.high, .volume = l.volume, .alerts = l.alerts } }
+                         else { Look { .accent = l.accent, .mode = l.mode, .high = l.high, .volume = l.volume, .alerts = !l.alerts } } } },
+            _ => l
+        },
+        SliderSet(m, v) => Look { .accent = l.accent, .mode = l.mode, .high = l.high, .volume = v, .alerts = l.alerts },
+        _ => l
+    };
+}
+
+ThemeSpec spec_of(Look l) {
+    Mode m = if (l.mode == 0) { Light } else { if (l.mode == 1) { Dark } else { FollowSystem } };
+    ThemeSpec s = with_mode(with_accent(theme_default(), accents()[l.accent]), m);
+    return if (l.high) { with_contrast(s, HighContrast) } else { s };
+}
+
+Widget look_view(Look l) {
+    return Themed(spec_of(l), Padding(12, Column([
+        Text("Accent"),
+        Row([Button("Blue", Custom(0)), Button("Green", Custom(1)), Button("Amber", Custom(2)), Button("Pink", Custom(3))]),
+        Text("Mode"),
+        Row([Button("Light", Custom(10)), Button("Dark", Custom(11)), Button("System", Custom(12))]),
+        Row([Checkbox("High contrast", l.high, Custom(20)), Checkbox("Alerts", l.alerts, Custom(21))]),
+        Slider(l.volume, Clicked),
+        Row([TextInput("Inbox rules", 11, Clicked), Themed(with_accent(spec_of(l), rgb(200, 30, 30)), Checkbox("Delete", true, Custom(21)))])
+    ])));
+}
+
+App(Look) = { .init = look_init, .update = look_update, .view = look_view };
+
+@requires(display, clock(readonly), filesystem(readonly))
+Int main() {
+    List(Font) fonts = load_first(sans_paths(), 15);
+    return gui_run_with(WindowOptions { .title = "Themes", .width = 420, .height = 300, .resizable = true }, fonts);
+}

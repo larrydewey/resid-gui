@@ -7,12 +7,14 @@
 import "color.resid";
 import "font.resid";
 
-/// One drawing instruction, in logical pixels. `OpImage(x, y, w, h, px)`
+/// One drawing instruction, in logical pixels. `OpRound(r, radius, c)`
+/// fills `r` with antialiased corners of `radius`. `OpImage(x, y, w, h, px)`
 /// copies a `w` x `h` image of blue-green-red-alpha bytes. `OpClipPush` narrows every later op to its
 /// rectangle (intersected with the clip already in force) until the
 /// matching `OpClipPop`.
 pub type DrawOp =
     OpFill(Rect, Color) |
+    OpRound(Rect, Int, Color) |
     OpText(Int, Int, Str, Color) |
     OpImage(Int, Int, Int, Int, List(Int)) |
     OpClipPush(Rect) |
@@ -30,6 +32,7 @@ pub Rect op_bounds(DrawOp op) { return op_bounds_in(op, font_builtin()); }
 pub Rect op_bounds_in(DrawOp op, Font f) {
     return match (op) {
         OpFill(r, c) => r,
+        OpRound(r, rad, c) => r,
         OpText(x, y, s, c) => if (font_is_builtin(f)) { Rect { .x = x, .y = y, .w = text_width(s), .h = text_height() } }
                               else { Rect { .x = x - 2, .y = y, .w = text_width_in(f, s) + 4, .h = text_height_in(f) } },
         OpImage(x, y, w, h, px) => Rect { .x = x, .y = y, .w = w, .h = h },
@@ -42,6 +45,7 @@ pub Rect op_bounds_in(DrawOp op, Font f) {
 pub Bool draw_op_eq(DrawOp a, DrawOp b) {
     return match (a) {
         OpFill(ra, ca) => match (b) { OpFill(rb, cb) => rect_eq(ra, rb) && color_eq(ca, cb), _ => false },
+        OpRound(ra, da, ca) => match (b) { OpRound(rb, db, cb) => rect_eq(ra, rb) && da == db && color_eq(ca, cb), _ => false },
         OpText(xa, ya, sa, ca) => match (b) { OpText(xb, yb, sb, cb) => xa == xb && ya == yb && sa == sb && color_eq(ca, cb), _ => false },
         OpImage(xa, ya, wa, ha, pa) => match (b) { OpImage(xb, yb, wb, hb, pb) => xa == xb && ya == yb && wa == wb && ha == hb && bytes_eq(pa, pb), _ => false },
         OpClipPush(ra) => match (b) { OpClipPush(rb) => rect_eq(ra, rb), _ => false },

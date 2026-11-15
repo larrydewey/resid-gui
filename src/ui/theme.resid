@@ -1,0 +1,204 @@
+// theme.resid — resid-gui's design language, and how a program tunes it.
+//
+// A program never builds a `Theme` field by field. It states a few
+// intentions in a `ThemeSpec` (an accent colour, light, dark or the
+// platform's choice, the shape of corners, the contrast) and
+// `theme_from` derives every colour from them. Derivation enforces
+// readability: an accent too pale to see on its surface is darkened (or,
+// on dark surfaces, lightened) until it reaches 3:1, text on the accent is
+// whichever of white and near-black reaches 4.5:1, and the selection is
+// mixed so text on it stays readable. Any spec gives a theme that passes
+// `theme_check`, and every theme is the same design language: the same
+// neutrals, rules, spacing and type, with the program's accent.
+//
+// A theme is applied to a subtree with the `Themed(spec, child)` widget,
+// so a view can switch dark mode from its model or give one panel its own
+// accent; the tree holds specs, never raw colours, so the look cannot be
+// broken from inside a view. `FollowSystem` takes light or dark, and high
+// contrast, from the platform's hints (RSP `Configure`).
+
+import "../gfx/color.resid";
+
+pub type Mode = Light | Dark | FollowSystem;
+pub type Corners = SquareCorners | SoftCorners | RoundCorners;
+pub type Contrast = StandardContrast | HighContrast;
+
+/// What a program may choose.
+pub type ThemeSpec = { Color accent; Mode mode; Corners corners; Contrast contrast; };
+
+/// Everything painting reads, derived by `theme_from`.
+pub type Theme = {
+    Color ground;       // the window behind everything
+    Color surface;      // controls, fields
+    Color surface_down; // a control held down
+    Color ink;          // text
+    Color muted;        // secondary text, placeholder
+    Color rule;         // borders at rest, tracks
+    Color rule_strong;  // borders of fields and controls
+    Color accent;       // focus, checked, filled track
+    Color accent_ink;   // text and marks on the accent
+    Color selection;    // selected text
+    Int radius;         // corners of controls
+    Int small_radius;   // corners of checkboxes, tracks
+    Bool dark;          // whether this theme is the dark one
+    Int hints;          // the platform's hints it was made under
+};
+
+/// Platform hint bits, as RSP `Configure` carries them.
+pub Int hint_dark() { return 1; }
+pub Int hint_reduced_motion() { return 2; }
+pub Int hint_high_contrast() { return 4; }
+
+/// The default: resid-gui blue, following the platform, soft corners.
+pub ThemeSpec theme_default() {
+    return ThemeSpec { .accent = rgb(36, 87, 230), .mode = FollowSystem, .corners = SoftCorners, .contrast = StandardContrast };
+}
+
+pub ThemeSpec with_accent(ThemeSpec s, Color c) { return ThemeSpec { .accent = c, .mode = s.mode, .corners = s.corners, .contrast = s.contrast }; }
+pub ThemeSpec with_mode(ThemeSpec s, Mode m) { return ThemeSpec { .accent = s.accent, .mode = m, .corners = s.corners, .contrast = s.contrast }; }
+pub ThemeSpec with_corners(ThemeSpec s, Corners c) { return ThemeSpec { .accent = s.accent, .mode = s.mode, .corners = c, .contrast = s.contrast }; }
+pub ThemeSpec with_contrast(ThemeSpec s, Contrast c) { return ThemeSpec { .accent = s.accent, .mode = s.mode, .corners = s.corners, .contrast = c }; }
+
+// ─── Contrast ──────────────────────────────────────────────────────
+
+/// sRGB channel to linear light, times 10000.
+List(Int) linear() { return [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 37, 40, 44, 48, 52, 56, 60, 65, 70, 75, 80, 86, 91, 97, 103, 110, 116, 123, 130, 137, 144, 152, 160, 168, 176, 185, 194, 203, 212, 222, 232, 242, 252, 262, 273, 284, 296, 307, 319, 331, 343, 356, 369, 382, 395, 409, 423, 437, 452, 467, 482, 497, 513, 529, 545, 561, 578, 595, 612, 630, 648, 666, 685, 704, 723, 742, 762, 782, 802, 823, 844, 865, 887, 908, 931, 953, 976, 999, 1022, 1046, 1070, 1095, 1119, 1144, 1170, 1195, 1221, 1248, 1274, 1301, 1329, 1356, 1384, 1413, 1441, 1470, 1500, 1529, 1559, 1590, 1620, 1651, 1683, 1714, 1746, 1779, 1812, 1845, 1878, 1912, 1946, 1981, 2016, 2051, 2086, 2122, 2159, 2195, 2232, 2270, 2307, 2346, 2384, 2423, 2462, 2502, 2542, 2582, 2623, 2664, 2705, 2747, 2789, 2831, 2874, 2918, 2961, 3005, 3050, 3095, 3140, 3185, 3231, 3278, 3325, 3372, 3419, 3467, 3515, 3564, 3613, 3663, 3712, 3763, 3813, 3864, 3916, 3968, 4020, 4072, 4125, 4179, 4233, 4287, 4342, 4397, 4452, 4508, 4564, 4621, 4678, 4735, 4793, 4851, 4910, 4969, 5029, 5089, 5149, 5210, 5271, 5333, 5395, 5457, 5520, 5583, 5647, 5711, 5776, 5841, 5906, 5972, 6038, 6105, 6172, 6240, 6308, 6376, 6445, 6514, 6584, 6654, 6724, 6795, 6867, 6939, 7011, 7084, 7157, 7231, 7305, 7379, 7454, 7529, 7605, 7682, 7758, 7835, 7913, 7991, 8070, 8148, 8228, 8308, 8388, 8469, 8550, 8632, 8714, 8796, 8879, 8963, 9047, 9131, 9216, 9301, 9387, 9473, 9560, 9647, 9734, 9823, 9911, 10000]; }
+
+/// Relative luminance (WCAG 2), times 10000.
+pub Int luminance(Color c) {
+    List(Int) t = linear();
+    return (2126 * t[c.r & 255] + 7152 * t[c.g & 255] + 722 * t[c.b & 255]) / 10000;
+}
+
+/// The contrast ratio of two colours, times 100 (4.5:1 is 450).
+pub Int contrast(Color a, Color b) {
+    Int la = luminance(a);
+    Int lb = luminance(b);
+    Int hi = if (la > lb) { la } else { lb };
+    Int lo = if (la > lb) { lb } else { la };
+    return ((hi + 500) * 100) / (lo + 500);
+}
+
+/// `a` mixed with `b`, `w` percent of `a`.
+pub Color mix(Color a, Color b, Int w) {
+    return rgb((a.r * w + b.r * (100 - w)) / 100, (a.g * w + b.g * (100 - w)) / 100, (a.b * w + b.b * (100 - w)) / 100);
+}
+
+// ─── Deriving ──────────────────────────────────────────────────────
+
+Bool is_dark(Mode m, Int hints) {
+    return match (m) { Light => false, Dark => true, FollowSystem => (hints & hint_dark()) != 0 };
+}
+
+/// The theme a spec gives under the platform's `hints`.
+pub Theme theme_from(ThemeSpec s, Int hints) {
+    Bool dark = is_dark(s.mode, hints);
+    Bool high = match (s.contrast) { HighContrast => true, StandardContrast => (hints & hint_high_contrast()) != 0 };
+    Color ground = if (dark) { rgb(18, 20, 24) } else { rgb(245, 246, 247) };
+    Color surface = if (dark) { rgb(28, 31, 36) } else { rgb(255, 255, 255) };
+    Color ink = if (high) { if (dark) { rgb(255, 255, 255) } else { rgb(0, 0, 0) } } else { if (dark) { rgb(230, 232, 235) } else { rgb(21, 23, 26) } };
+    Color muted = if (high) { if (dark) { rgb(205, 210, 216) } else { rgb(55, 60, 68) } } else { if (dark) { rgb(154, 162, 173) } else { rgb(90, 97, 107) } };
+    Color rule = if (dark) { rgb(42, 46, 53) } else { rgb(213, 217, 222) };
+    Color strong = if (high) { if (dark) { rgb(150, 158, 170) } else { rgb(110, 117, 128) } } else { if (dark) { rgb(64, 70, 79) } else { rgb(201, 206, 212) } };
+    Color accent = readable_accent(s.accent, surface, ground, dark, 0);
+    Color on_accent = if (contrast(rgb(255, 255, 255), accent) >= contrast(rgb(18, 20, 24), accent)) { rgb(255, 255, 255) } else { rgb(18, 20, 24) };
+    Int rad = match (s.corners) { SquareCorners => 2, SoftCorners => 6, RoundCorners => 999 };
+    Int small = match (s.corners) { SquareCorners => 1, SoftCorners => 4, RoundCorners => 999 };
+    return Theme {
+        .ground = ground, .surface = surface, .surface_down = if (dark) { rgb(42, 46, 53) } else { rgb(233, 236, 239) },
+        .ink = ink, .muted = muted, .rule = rule, .rule_strong = strong,
+        .accent = accent, .accent_ink = on_accent, .selection = readable_selection(accent, surface, ink, if (dark) { 35 } else { 15 }),
+        .radius = rad, .small_radius = small, .dark = dark, .hints = hints
+    };
+}
+
+/// The accent, moved toward black (light themes) or white (dark ones) in
+/// 5% steps until it stands 3:1 from the surface and the ground, and white
+/// or near-black text on it reaches 4.5:1.
+Color readable_accent(Color c, Color surface, Color ground, Bool dark, Int step) {
+    Color a = mix(c, if (dark) { rgb(255, 255, 255) } else { rgb(0, 0, 0) }, 100 - 5 * step);
+    Int on = max2(contrast(rgb(255, 255, 255), a), contrast(rgb(18, 20, 24), a));
+    Bool ok = contrast(a, surface) >= 300 && contrast(a, ground) >= 300 && on >= 450;
+    if (ok || step >= 20) { return a; }
+    return readable_accent(c, surface, ground, dark, step + 1);
+}
+
+/// A tint of the accent over the surface, as strong as `w` percent allows
+/// while the ink on it stays at 4.5:1.
+Color readable_selection(Color accent, Color surface, Color ink, Int w) {
+    Color sel = mix(accent, surface, w);
+    if (contrast(ink, sel) >= 450 || w <= 0) { return sel; }
+    return readable_selection(accent, surface, ink, w - 5);
+}
+
+Int max2(Int a, Int b) { return if (a > b) { a } else { b }; }
+
+/// What a theme fails, one line each; empty for a sound theme.
+pub List(Str) theme_check(Theme t) {
+    return need(t.ink, t.surface, 450, "ink on surface", [])
+        .concat(need(t.ink, t.ground, 450, "ink on ground", []))
+        .concat(need(t.muted, t.surface, 450, "muted text on surface", []))
+        .concat(need(t.accent, t.surface, 300, "accent against surface", []))
+        .concat(need(t.accent, t.ground, 300, "accent against ground", []))
+        .concat(need(t.accent_ink, t.accent, 450, "text on accent", []))
+        .concat(need(t.ink, t.selection, 450, "ink on selection", []))
+        .concat(if ((t.hints & hint_high_contrast()) != 0) { need(t.rule_strong, t.surface, 300, "borders in high contrast", []) } else { [] });
+}
+
+List(Str) need(Color a, Color b, Int ratio, Str what, List(Str) acc) {
+    Int c = contrast(a, b);
+    if (c >= ratio) { return acc; }
+    return acc.concat([f"{what}: {c / 100}.{(c % 100) / 10} < {ratio / 100}.{(ratio % 100) / 10}"]);
+}
+
+/// The theme painting uses when no `Themed` widget says otherwise and no
+/// platform hint is known: the default spec, light.
+pub Theme theme() { return theme_from(theme_default(), 0); }
+
+/// The light and dark themes of the default spec.
+pub Theme theme_light() { return theme_from(theme_default(), 0); }
+pub Theme theme_dark() { return theme_from(theme_default(), hint_dark()); }
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+test "contrast matches WCAG's figures" {
+    expect(contrast(rgb(0, 0, 0), rgb(255, 255, 255))).toEqual(2100);
+    expect(contrast(rgb(255, 255, 255), rgb(255, 255, 255))).toEqual(100);
+    Int grey = contrast(rgb(118, 118, 118), rgb(255, 255, 255));
+    expect(grey >= 450 && grey <= 455).toEqual(true);
+}
+
+List(Color) accents() {
+    return [rgb(36, 87, 230), rgb(255, 214, 0), rgb(200, 200, 200), rgb(255, 255, 255), rgb(0, 0, 0),
+            rgb(255, 0, 0), rgb(31, 122, 90), rgb(180, 83, 15), rgb(120, 0, 255), rgb(0, 200, 255), rgb(255, 105, 180)];
+}
+
+Int failures(List(Color) cs, Int i, Int acc) {
+    if (i >= cs.len()) { return acc; }
+    ThemeSpec s = with_accent(theme_default(), cs[i]);
+    Int n = theme_check(theme_from(s, 0)).len() + theme_check(theme_from(s, hint_dark())).len()
+          + theme_check(theme_from(s, hint_high_contrast())).len() + theme_check(theme_from(s, hint_dark() | hint_high_contrast())).len();
+    return failures(cs, i + 1, acc + n);
+}
+
+test "any accent gives a readable theme, light, dark and high contrast" {
+    expect(failures(accents(), 0, 0)).toEqual(0);
+}
+
+test "a readable accent is kept as given" {
+    expect(color_eq(theme_from(theme_default(), 0).accent, rgb(36, 87, 230))).toEqual(true);
+}
+
+test "a pale accent is darkened on light, kept on dark" {
+    ThemeSpec yellow = with_accent(theme_default(), rgb(255, 214, 0));
+    expect(luminance(theme_from(yellow, 0).accent) < luminance(rgb(255, 214, 0))).toEqual(true);
+    expect(color_eq(theme_from(yellow, hint_dark()).accent, rgb(255, 214, 0))).toEqual(true);
+    expect(color_eq(theme_from(yellow, hint_dark()).accent_ink, rgb(18, 20, 24))).toEqual(true);
+}
+
+test "follow-system takes the platform's mode; a fixed mode ignores it" {
+    expect(theme_from(theme_default(), hint_dark()).dark).toEqual(true);
+    expect(theme_from(with_mode(theme_default(), Light), hint_dark()).dark).toEqual(false);
+    expect(theme_from(with_mode(theme_default(), Dark), 0).dark).toEqual(true);
+    expect(theme_from(with_corners(theme_default(), RoundCorners), 0).radius).toEqual(999);
+}

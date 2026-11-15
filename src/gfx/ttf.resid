@@ -1,0 +1,628 @@
+// ttf.resid — TrueType fonts rasterized in pure Resid.
+//
+// The same job as the native `font` module (stb_truetype), without native
+// code: it runs on every target, including ones where a native module
+// cannot be spawned, and needs no capability beyond reading the file.
+// It produces the native module's answer format, so `font_parse` checks
+// the result exactly as it checks native output.
+//
+// What it reads: the table directory, `head` (units per em, loca format),
+// `hhea` (ascent, descent, line gap, metric count), `maxp` (glyph count),
+// `cmap` format 4 (characters to glyphs), `loca` and `glyf` (outlines:
+// simple glyphs, and composites placed by offset), `hmtx` (advances) and
+// `kern` format 0 when present. CFF outlines (`.otf` with a `CFF ` table)
+// are refused with a clear error.
+//
+// How it draws: each outline is flattened (a quadratic curve into eight
+// lines) in 1/256-pixel units, then filled by the nonzero rule, scanline by
+// scanline, four scanlines a pixel row; along each scanline the coverage of
+// every pixel is exact. Integers only, so a glyph is the same everywhere.
+//
+// The file is untrusted: every read is bounds-checked, counts are capped,
+// composites nest at most four deep, and anything malformed is an `Err`.
+
+import "color.resid";
+import "font.resid";
+
+/// A point of an outline, in font units; `on` is false for a control point.
+pub type Pt = { Int x; Int y; Bool on; };
+
+/// A glyph's outline and box, in font units.
+type Outline = { List(List(Pt)) contours; Int xmin; Int ymin; Int xmax; Int ymax; };
+
+/// The tables a font needs, as offsets into its bytes, and what they say.
+pub type Ttf = {
+    List(Int) b; Int upem; Int loca_long; Int nglyphs; Int nhm;
+    Int ascent; Int descent; Int gap;
+    Int cmap; Int loca; Int glyf; Int hmtx; Int kern;
+};
+
+// ─── Reading ───────────────────────────────────────────────────────
+
+Int u8at(List(Int) b, Int i) { return if (i >= 0 && i < b.len()) { b[i] & 255 } else { 0 }; }
+Int u16(List(Int) b, Int i) { return (u8at(b, i) << 8) | u8at(b, i + 1); }
+Int i16(List(Int) b, Int i) { Int v = u16(b, i); return if (v >= 32768) { v - 65536 } else { v }; }
+Int u32(List(Int) b, Int i) { return (u16(b, i) << 16) | u16(b, i + 2); }
+Bool has(List(Int) b, Int at, Int n) { return at >= 0 && n >= 0 && at + n <= b.len(); }
+
+/// Floor division for a positive divisor, whichever way `/` rounds.
+pub Int fdiv(Int a, Int d) {
+    Int q = a / d;
+    return if (q * d > a) { q - 1 } else { q };
+}
+
+/// Ceiling division for a positive divisor.
+pub Int cdiv(Int a, Int d) { return 0 - fdiv(0 - a, d); }
+
+/// The offset of table `tag` (four ASCII letters), or -1.
+Int table(List(Int) b, Str tag) {
+    Int n = u16(b, 4);
+    if (n > 64 || !has(b, 12, 16 * n)) { return -1; }
+    return table_at(b, tag, n, 0);
+}
+
+Int table_at(List(Int) b, Str tag, Int n, Int i) {
+    if (i >= n) { return -1; }
+    Int e = 12 + 16 * i;
+    Bool same = u8at(b, e) == str_char_at(tag, 0) && u8at(b, e + 1) == str_char_at(tag, 1)
+             && u8at(b, e + 2) == str_char_at(tag, 2) && u8at(b, e + 3) == str_char_at(tag, 3);
+    if (!same) { return table_at(b, tag, n, i + 1); }
+    Int off = u32(b, e + 8);
+    Int len = u32(b, e + 12);
+    return if (has(b, off, len)) { off } else { -1 };
+}
+
+/// The font's tables, checked.
+pub Result(Ttf, Str) ttf_open(List(Int) b) {
+    if (b.len() < 12) { return Err("ttf: too short to be a font"); }
+    Int ver = u32(b, 0);
+    if (ver != 65536 && ver != 1953658213) {
+        return Err(if (ver == 1330926671) { "ttf: CFF outlines (.otf) are not supported yet; use a TrueType-outline font" } else { "ttf: not a TrueType font" });
+    }
+    Int head = table(b, "head");
+    Int hhea = table(b, "hhea");
+    Int maxp = table(b, "maxp");
+    Int cmap = table(b, "cmap");
+    Int loca = table(b, "loca");
+    Int glyf = table(b, "glyf");
+    Int hmtx = table(b, "hmtx");
+    if (head < 0 || hhea < 0 || maxp < 0 || cmap < 0 || loca < 0 || glyf < 0 || hmtx < 0) {
+        return Err("ttf: a required table is missing or overruns the file");
+    }
+    if (!has(b, head, 54) || !has(b, hhea, 36) || !has(b, maxp, 6)) { return Err("ttf: a header table is short"); }
+    Int upem = u16(b, head + 18);
+    if (upem < 16 || upem > 16384) { return Err("ttf: units per em out of range"); }
+    Int nglyphs = u16(b, maxp + 4);
+    Int nhm = u16(b, hhea + 34);
+    if (nhm < 1 || nhm > nglyphs || !has(b, hmtx, 4 * nhm)) { return Err("ttf: bad horizontal metrics"); }
+    Int loca_long = i16(b, head + 50);
+    if (loca_long != 0 && loca_long != 1) { return Err("ttf: bad loca format"); }
+    if (!has(b, loca, (nglyphs + 1) * (if (loca_long == 1) { 4 } else { 2 }))) { return Err("ttf: loca overruns the file"); }
+    return Ok(Ttf { .b = b, .upem = upem, .loca_long = loca_long, .nglyphs = nglyphs, .nhm = nhm,
+                    .ascent = i16(b, hhea + 4), .descent = i16(b, hhea + 6), .gap = i16(b, hhea + 8),
+                    .cmap = cmap, .loca = loca, .glyf = glyf, .hmtx = hmtx, .kern = table(b, "kern") });
+}
+
+/// The glyph for character `c`, from a format 4 `cmap` subtable; 0 when
+/// the font has none.
+pub Int glyph_of(Ttf t, Int c) {
+    Int sub = cmap_sub(t.b, t.cmap, u16(t.b, t.cmap + 2), 0, -1);
+    if (sub < 0) { return 0; }
+    Int segx2 = u16(t.b, sub + 6);
+    if (segx2 == 0 || !has(t.b, sub + 16, 4 * segx2)) { return 0; }
+    return seg_find(t, sub, segx2, c, 0);
+}
+
+/// A format 4 subtable for Unicode (platform 3 encoding 1, or platform 0),
+/// or -1.
+Int cmap_sub(List(Int) b, Int cmap, Int n, Int i, Int found) {
+    if (i >= n || i > 64) { return found; }
+    Int e = cmap + 4 + 8 * i;
+    Int plat = u16(b, e);
+    Int enc = u16(b, e + 2);
+    Int off = cmap + u32(b, e + 4);
+    Bool unicode = (plat == 3 && enc == 1) || plat == 0;
+    Bool fmt4 = has(b, off, 16) && u16(b, off) == 4;
+    return cmap_sub(b, cmap, n, i + 1, if (unicode && fmt4) { off } else { found });
+}
+
+Int seg_find(Ttf t, Int sub, Int segx2, Int c, Int i) {
+    if (2 * i >= segx2) { return 0; }
+    List(Int) b = t.b;
+    Int end_at = sub + 14 + 2 * i;
+    Int end = u16(b, end_at);
+    if (end < c) { return seg_find(t, sub, segx2, c, i + 1); }
+    Int start = u16(b, sub + 16 + segx2 + 2 * i);
+    if (start > c) { return 0; }
+    Int delta = u16(b, sub + 16 + 2 * segx2 + 2 * i);
+    Int ro_at = sub + 16 + 3 * segx2 + 2 * i;
+    Int ro = u16(b, ro_at);
+    if (ro == 0) { return (c + delta) & 65535; }
+    Int at = ro_at + ro + 2 * (c - start);
+    if (!has(b, at, 2)) { return 0; }
+    Int g = u16(b, at);
+    return if (g == 0) { 0 } else { (g + delta) & 65535 };
+}
+
+/// The advance of glyph `g`, in font units.
+pub Int advance_of(Ttf t, Int g) {
+    Int k = if (g < t.nhm) { g } else { t.nhm - 1 };
+    return u16(t.b, t.hmtx + 4 * k);
+}
+
+/// Where glyph `g`'s outline lies in `glyf`, and how long it is.
+type Span = { Int at; Int len; };
+
+Span glyph_span(Ttf t, Int g) {
+    if (g < 0 || g >= t.nglyphs) { return Span { .at = 0, .len = 0 }; }
+    Int a = if (t.loca_long == 1) { u32(t.b, t.loca + 4 * g) } else { 2 * u16(t.b, t.loca + 2 * g) };
+    Int z = if (t.loca_long == 1) { u32(t.b, t.loca + 4 * g + 4) } else { 2 * u16(t.b, t.loca + 2 * g + 2) };
+    if (z <= a || !has(t.b, t.glyf + a, z - a)) { return Span { .at = 0, .len = 0 }; }
+    return Span { .at = t.glyf + a, .len = z - a };
+}
+
+Outline no_outline() { return Outline { .contours = [], .xmin = 0, .ymin = 0, .xmax = 0, .ymax = 0 }; }
+
+/// Glyph `g`'s outline: contours of points in font units.
+pub Result(Outline, Str) outline_of(Ttf t, Int g) { return outline_at(t, g, 0); }
+
+Result(Outline, Str) outline_at(Ttf t, Int g, Int depth) {
+    if (depth > 4) { return Err("ttf: composite glyphs nest too deep"); }
+    Span s = glyph_span(t, g);
+    if (s.len == 0) { return Ok(no_outline()); }
+    if (s.len < 10) { return Err("ttf: glyph header is short"); }
+    Int nc = i16(t.b, s.at);
+    Outline box = Outline { .contours = [], .xmin = i16(t.b, s.at + 2), .ymin = i16(t.b, s.at + 4), .xmax = i16(t.b, s.at + 6), .ymax = i16(t.b, s.at + 8) };
+    if (nc >= 0) { return simple(t.b, s, nc, box); }
+    return composite(t, s.at + 10, s.at + s.len, box, depth, []);
+}
+
+/// A simple glyph: contour ends, instructions (skipped), flags, x and y.
+Result(Outline, Str) simple(List(Int) b, Span s, Int nc, Outline box) {
+    if (nc == 0) { return Ok(box); }
+    Int stop = s.at + s.len;
+    Int ends_at = s.at + 10;
+    if (ends_at + 2 * nc + 2 > stop) { return Err("ttf: contour ends overrun the glyph"); }
+    List(Int) ends = u16s(b, ends_at, nc, ListBuf());
+    Int npts = ends[nc - 1] + 1;
+    if (npts > 10000 || !ascending(ends, 0)) { return Err("ttf: bad contour ends"); }
+    Int ilen = u16(b, ends_at + 2 * nc);
+    Int flags_at = ends_at + 2 * nc + 2 + ilen;
+    if (flags_at > stop) { return Err("ttf: instructions overrun the glyph"); }
+    FlagRun fr = read_flags(b, flags_at, stop, npts, ListBuf());
+    if (fr.at < 0) { return Err("ttf: flags overrun the glyph"); }
+    CoordRun xs = read_coords(b, fr.at, stop, fr.flags, 2, 16, 0, 0, ListBuf());
+    if (xs.at < 0) { return Err("ttf: x coordinates overrun the glyph"); }
+    CoordRun ys = read_coords(b, xs.at, stop, fr.flags, 4, 32, 0, 0, ListBuf());
+    if (ys.at < 0) { return Err("ttf: y coordinates overrun the glyph"); }
+    return Ok(Outline { .contours = split(fr.flags, xs.vs, ys.vs, ends, 0, 0, []), .xmin = box.xmin, .ymin = box.ymin, .xmax = box.xmax, .ymax = box.ymax });
+}
+
+List(Int) u16s(List(Int) b, Int at, Int n, ListBuf(Int) acc) {
+    if (n <= 0) { return acc.finish(); }
+    return u16s(b, at + 2, n - 1, acc.push(u16(b, at)));
+}
+
+Bool ascending(List(Int) xs, Int i) {
+    if (i + 1 >= xs.len()) { return true; }
+    return xs[i] < xs[i + 1] && ascending(xs, i + 1);
+}
+
+type FlagRun = { List(Int) flags; Int at; };
+
+FlagRun read_flags(List(Int) b, Int at, Int stop, Int left, ListBuf(Int) acc) {
+    if (left <= 0) { return FlagRun { .flags = acc.finish(), .at = at }; }
+    if (at >= stop) {
+        _ = acc.finish();
+        return FlagRun { .flags = [], .at = -1 };
+    }
+    Int f = u8at(b, at);
+    if ((f & 8) == 0) { return read_flags(b, at + 1, stop, left - 1, acc.push(f)); }
+    if (at + 1 >= stop) {
+        _ = acc.finish();
+        return FlagRun { .flags = [], .at = -1 };
+    }
+    Int rep = u8at(b, at + 1);
+    return read_flags(b, at + 2, stop, left - 1 - rep, push_n(acc, f, rep + 1));
+}
+
+ListBuf(Int) push_n(ListBuf(Int) b, Int v, Int n) { return if (n <= 0) { b } else { push_n(b.push(v), v, n - 1) }; }
+
+type CoordRun = { List(Int) vs; Int at; };
+
+/// Coordinates for every flag: a byte when `short` is set (positive when
+/// `same` is set too), else unchanged when `same` is set, else a word.
+CoordRun read_coords(List(Int) b, Int at, Int stop, List(Int) flags, Int short, Int same, Int i, Int v, ListBuf(Int) acc) {
+    if (i >= flags.len()) { return CoordRun { .vs = acc.finish(), .at = at }; }
+    Int f = flags[i];
+    Bool is_short = (f & short) != 0;
+    Bool is_same = (f & same) != 0;
+    Int need = if (is_short) { 1 } else { if (is_same) { 0 } else { 2 } };
+    if (at + need > stop) {
+        _ = acc.finish();
+        return CoordRun { .vs = [], .at = -1 };
+    }
+    Int d = if (is_short) { if (is_same) { u8at(b, at) } else { 0 - u8at(b, at) } } else { if (is_same) { 0 } else { i16(b, at) } };
+    return read_coords(b, at + need, stop, flags, short, same, i + 1, v + d, acc.push(v + d));
+}
+
+List(List(Pt)) split(List(Int) flags, List(Int) xs, List(Int) ys, List(Int) ends, Int c, Int start, List(List(Pt)) acc) {
+    if (c >= ends.len()) { return acc; }
+    Int stop = ends[c] + 1;
+    return split(flags, xs, ys, ends, c + 1, stop, acc.concat([pts(flags, xs, ys, start, stop, ListBuf())]));
+}
+
+List(Pt) pts(List(Int) flags, List(Int) xs, List(Int) ys, Int i, Int stop, ListBuf(Pt) acc) {
+    if (i >= stop || i >= flags.len()) { return acc.finish(); }
+    return pts(flags, xs, ys, i + 1, stop, acc.push(Pt { .x = xs[i], .y = ys[i], .on = (flags[i] & 1) != 0 }));
+}
+
+/// A composite glyph: its components' outlines, each moved by its offset.
+/// Scales are read past and not applied (rare in the ASCII range).
+Result(Outline, Str) composite(Ttf t, Int at, Int stop, Outline box, Int depth, List(List(Pt)) acc) {
+    if (at + 4 > stop) { return Err("ttf: composite overruns the glyph"); }
+    Int flags = u16(t.b, at);
+    Int g = u16(t.b, at + 2);
+    Bool words = (flags & 1) != 0;
+    Int argsz = if (words) { 4 } else { 2 };
+    if (at + 4 + argsz > stop) { return Err("ttf: composite overruns the glyph"); }
+    Int dx = if ((flags & 2) == 0) { 0 } else { if (words) { i16(t.b, at + 4) } else { sbyte(u8at(t.b, at + 4)) } };
+    Int dy = if ((flags & 2) == 0) { 0 } else { if (words) { i16(t.b, at + 6) } else { sbyte(u8at(t.b, at + 5)) } };
+    Int scale = if ((flags & 8) != 0) { 2 } else { if ((flags & 64) != 0) { 4 } else { if ((flags & 128) != 0) { 8 } else { 0 } } };
+    Int next = at + 4 + argsz + scale;
+    return match (outline_at(t, g, depth + 1)) {
+        Ok(o) => if ((flags & 32) != 0) { composite(t, next, stop, box, depth, acc.concat(moved(o.contours, dx, dy, 0, []))) }
+                 else { Ok(Outline { .contours = acc.concat(moved(o.contours, dx, dy, 0, [])), .xmin = box.xmin, .ymin = box.ymin, .xmax = box.xmax, .ymax = box.ymax }) },
+        Err(e) => Err(e)
+    };
+}
+
+Int sbyte(Int v) { return if (v >= 128) { v - 256 } else { v }; }
+
+List(List(Pt)) moved(List(List(Pt)) cs, Int dx, Int dy, Int i, List(List(Pt)) acc) {
+    if (i >= cs.len()) { return acc; }
+    return moved(cs, dx, dy, i + 1, acc.concat([move_pts(cs[i], dx, dy, 0, ListBuf())]));
+}
+
+List(Pt) move_pts(List(Pt) ps, Int dx, Int dy, Int i, ListBuf(Pt) acc) {
+    if (i >= ps.len()) { return acc.finish(); }
+    return move_pts(ps, dx, dy, i + 1, acc.push(Pt { .x = ps[i].x + dx, .y = ps[i].y + dy, .on = ps[i].on }));
+}
+
+// ─── Flattening ────────────────────────────────────────────────────
+
+/// A line from (`x0`, `y0`) to (`x1`, `y1`), in 1/256 pixel units.
+pub type Seg = { Int x0; Int y0; Int x1; Int y1; };
+
+/// How a glyph maps into its bitmap: font units times `ppem` over `upem`,
+/// in 1/256 pixels, shifted so the bitmap's corner is the origin, y down.
+type Xf = { Int ppem; Int upem; Int bx; Int by; };
+
+Int tx(Xf f, Int x) { return fdiv(x * f.ppem * 256, f.upem) - f.bx * 256; }
+Int ty(Xf f, Int y) { return f.by * 256 - fdiv(y * f.ppem * 256, f.upem); }
+
+/// Every contour as lines: curves in eight steps, implied on-curve points
+/// halfway between two control points.
+List(Seg) flatten(List(List(Pt)) cs, Xf f) { return flatten_at(cs, f, 0, ListBuf()).finish(); }
+
+ListBuf(Seg) flatten_at(List(List(Pt)) cs, Xf f, Int i, ListBuf(Seg) acc) {
+    if (i >= cs.len()) { return acc; }
+    List(Pt) c = cs[i];
+    if (c.len() < 2) { return flatten_at(cs, f, i + 1, acc); }
+    Int s = first_on(c, 0);
+    Pt start = if (s >= 0) { c[s] } else { mid(c[c.len() - 1], c[0]) };
+    Int from = if (s >= 0) { s + 1 } else { 0 };
+    Int count = if (s >= 0) { c.len() - 1 } else { c.len() };
+    return flatten_at(cs, f, i + 1, walk(c, f, from, count, start, start, false, start, acc));
+}
+
+Int first_on(List(Pt) c, Int i) { return if (i >= c.len()) { -1 } else { if (c[i].on) { i } else { first_on(c, i + 1) } }; }
+
+Pt mid(Pt a, Pt b) { return Pt { .x = fdiv(a.x + b.x, 2), .y = fdiv(a.y + b.y, 2), .on = true }; }
+
+/// Walk `left` points from `i` (cyclically); `cur` is the pen, `ctrl` the
+/// pending control point when `has_ctrl`. Closes back to `start`.
+ListBuf(Seg) walk(List(Pt) c, Xf f, Int i, Int left, Pt start, Pt cur, Bool has_ctrl, Pt ctrl, ListBuf(Seg) acc) {
+    if (left <= 0) {
+        return if (has_ctrl) { quad(acc, f, cur, ctrl, start, 1) } else { acc.push(line(f, cur, start)) };
+    }
+    Pt p = c[i % c.len()];
+    if (p.on) {
+        ListBuf(Seg) a = if (has_ctrl) { quad(acc, f, cur, ctrl, p, 1) } else { acc.push(line(f, cur, p)) };
+        return walk(c, f, i + 1, left - 1, start, p, false, p, a);
+    }
+    if (has_ctrl) {
+        Pt m = mid(ctrl, p);
+        return walk(c, f, i + 1, left - 1, start, m, true, p, quad(acc, f, cur, ctrl, m, 1));
+    }
+    return walk(c, f, i + 1, left - 1, start, cur, true, p, acc);
+}
+
+Seg line(Xf f, Pt a, Pt b) { return Seg { .x0 = tx(f, a.x), .y0 = ty(f, a.y), .x1 = tx(f, b.x), .y1 = ty(f, b.y) }; }
+
+/// A quadratic curve as eight lines, evaluated in device units.
+ListBuf(Seg) quad(ListBuf(Seg) acc, Xf f, Pt p0, Pt p1, Pt p2, Int k) {
+    if (k > 8) { return acc; }
+    Int ax = tx(f, p0.x);
+    Int ay = ty(f, p0.y);
+    Int bx = tx(f, p1.x);
+    Int by = ty(f, p1.y);
+    Int cx = tx(f, p2.x);
+    Int cy = ty(f, p2.y);
+    Int j = k - 1;
+    Seg s = Seg { .x0 = bez(ax, bx, cx, j), .y0 = bez(ay, by, cy, j), .x1 = bez(ax, bx, cx, k), .y1 = bez(ay, by, cy, k) };
+    return quad(acc.push(s), f, p0, p1, p2, k + 1);
+}
+
+/// The quadratic Bézier through a, b, c at t = k/8.
+Int bez(Int a, Int b, Int c, Int k) { return fdiv((8 - k) * (8 - k) * a + 2 * k * (8 - k) * b + k * k * c, 64); }
+
+// ─── Filling ───────────────────────────────────────────────────────
+
+/// Scanlines per pixel row.
+pub Int subscan() { return 4; }
+
+/// The coverage (0 to 255) of each pixel of a `w` x `h` bitmap inside the
+/// lines `segs` by the nonzero rule.
+pub List(Int) fill(List(Seg) segs, Int w, Int h) { return fill_rows(segs, w, h, 0, ListBuf()).finish(); }
+
+ListBuf(Int) fill_rows(List(Seg) segs, Int w, Int h, Int y, ListBuf(Int) acc) {
+    if (y >= h) { return acc; }
+    List(Int) row = row_cover(segs, w, y, 0, zeros(w, ListBuf()));
+    return fill_rows(segs, w, h, y + 1, push_cover(acc, row, 0));
+}
+
+List(Int) zeros(Int n, ListBuf(Int) b) { return if (n <= 0) { b.finish() } else { zeros(n - 1, b.push(0)) }; }
+
+ListBuf(Int) push_cover(ListBuf(Int) acc, List(Int) row, Int i) {
+    if (i >= row.len()) { return acc; }
+    Int v = (row[i] * 255) / (subscan() * 256);
+    return push_cover(acc.push(if (v > 255) { 255 } else { v }), row, i + 1);
+}
+
+/// One pixel row's coverage, in 1/256 of a pixel per scanline.
+List(Int) row_cover(List(Seg) segs, Int w, Int y, Int k, List(Int) row) {
+    if (k >= subscan()) { return row; }
+    Int yc = y * 256 + ((2 * k + 1) * 128) / subscan();
+    List(Int) xs = sort(crossings(segs, yc, 0, ListBuf()));
+    return row_cover(segs, w, y, k + 1, spans(xs, 0, 0, 0, row, w));
+}
+
+/// Where the scanline at `yc` crosses each line, as `(x + 2^20) * 4 + dir
+/// + 1` so that sorting orders by x and keeps the direction.
+List(Int) crossings(List(Seg) segs, Int yc, Int i, ListBuf(Int) acc) {
+    if (i >= segs.len()) { return acc.finish(); }
+    Seg s = segs[i];
+    Bool down = s.y0 < s.y1;
+    Int ya = if (down) { s.y0 } else { s.y1 };
+    Int yb = if (down) { s.y1 } else { s.y0 };
+    if (ya == yb || yc < ya || yc >= yb) { return crossings(segs, yc, i + 1, acc); }
+    Int x = s.x0 + ((yc - s.y0) * (s.x1 - s.x0)) / (s.y1 - s.y0);
+    Int dir = if (down) { 1 } else { -1 };
+    Int key = (clamp(x, -1048576, 1048575) + 1048576) * 4 + dir + 1;
+    return crossings(segs, yc, i + 1, acc.push(key));
+}
+
+Int clamp(Int v, Int lo, Int hi) { return if (v < lo) { lo } else { if (v > hi) { hi } else { v } }; }
+
+/// Fill between crossings where the winding number is not zero.
+List(Int) spans(List(Int) xs, Int i, Int wind, Int from, List(Int) row, Int w) {
+    if (i >= xs.len()) { return row; }
+    Int x = xs[i] / 4 - 1048576;
+    Int dir = xs[i] % 4 - 1;
+    Int nw = wind + dir;
+    if (wind == 0 && nw != 0) { return spans(xs, i + 1, nw, x, row, w); }
+    if (wind != 0 && nw == 0) { return spans(xs, i + 1, nw, x, add_span(row, from, x, w), w); }
+    return spans(xs, i + 1, nw, from, row, w);
+}
+
+/// Add the coverage of [xa, xb), in 1/256 pixels, to a row of `w` pixels.
+pub List(Int) add_span(List(Int) row, Int xa0, Int xb0, Int w) {
+    Int xa = clamp(xa0, 0, w * 256);
+    Int xb = clamp(xb0, 0, w * 256);
+    if (xb <= xa) { return row; }
+    Int pa = xa / 256;
+    Int pb = (xb - 1) / 256;
+    if (pa == pb) { return bump(row, pa, xb - xa); }
+    List(Int) r1 = bump(row, pa, 256 - (xa - pa * 256));
+    List(Int) r2 = bump_run(r1, pa + 1, pb, 256);
+    return bump(r2, pb, xb - pb * 256);
+}
+
+List(Int) bump(List(Int) row, Int i, Int v) { return if (i >= 0 && i < row.len()) { row.with(i, row[i] + v) } else { row }; }
+
+List(Int) bump_run(List(Int) row, Int i, Int stop, Int v) {
+    if (i >= stop) { return row; }
+    return bump_run(bump(row, i, v), i + 1, stop, v);
+}
+
+// ─── Atlas ─────────────────────────────────────────────────────────
+
+/// One glyph drawn: its record and its bitmap.
+type Drawn = { Int adv; Int xoff; Int yoff; Int w; Int h; List(Int) cover; };
+
+/// Draw character `c` at `ppem` pixels per em, with the line's top
+/// `ascent_px` above the baseline.
+Result(Drawn, Str) draw_char(Ttf t, Int c, Int ppem, Int ascent_px) {
+    Int g = glyph_of(t, c);
+    Int adv = fdiv(advance_of(t, g) * ppem + t.upem / 2, t.upem);
+    return match (outline_of(t, g)) {
+        Ok(o) => draw_outline(o, ppem, t.upem, ascent_px, adv),
+        Err(e) => Err(e)
+    };
+}
+
+Result(Drawn, Str) draw_outline(Outline o, Int ppem, Int upem, Int ascent_px, Int adv) {
+    if (o.contours.len() == 0 || o.xmax <= o.xmin || o.ymax <= o.ymin) {
+        return Ok(Drawn { .adv = adv, .xoff = 0, .yoff = 0, .w = 0, .h = 0, .cover = [] });
+    }
+    Int bx = fdiv(o.xmin * ppem, upem);
+    Int bt = cdiv(o.ymax * ppem, upem);
+    Int w = cdiv(o.xmax * ppem, upem) - bx + 1;
+    Int h = bt - fdiv(o.ymin * ppem, upem) + 1;
+    if (w > 512 || h > 512) { return Err("ttf: glyph too large for the atlas"); }
+    Xf f = Xf { .ppem = ppem, .upem = upem, .bx = bx, .by = bt };
+    return Ok(Drawn { .adv = adv, .xoff = bx, .yoff = ascent_px - bt, .w = w, .h = h, .cover = fill(flatten(o.contours, f), w, h) });
+}
+
+/// The printable ASCII characters drawn at `ppem` pixels per em, packed in
+/// shelves into an atlas, as the native font module's answer (font.c's
+/// layout), ready for `font_parse`.
+pub Result(List(Int), Str) ttf_answer(List(Int) bytes, Int ppem) {
+    if (ppem < 4 || ppem > 256) { return Err("ttf: pixel size out of range"); }
+    return match (ttf_open(bytes)) {
+        Ok(t) => answer_for(t, ppem),
+        Err(e) => Err(e)
+    };
+}
+
+Result(List(Int), Str) answer_for(Ttf t, Int ppem) {
+    Int ascent = cdiv(t.ascent * ppem, t.upem);
+    Int line = ascent + cdiv((0 - t.descent + t.gap) * ppem, t.upem);
+    return match (draw_all(t, ppem, ascent, 32, [])) {
+        Ok(ds) => Ok(pack(ds, ascent, line, kerns(t, ppem))),
+        Err(e) => Err(e)
+    };
+}
+
+Result(List(Drawn), Str) draw_all(Ttf t, Int ppem, Int ascent, Int c, List(Drawn) acc) {
+    if (c > 126) { return Ok(acc); }
+    return match (draw_char(t, c, ppem, ascent)) {
+        Ok(d) => draw_all(t, ppem, ascent, c + 1, acc.concat([d])),
+        Err(e) => Err(e)
+    };
+}
+
+/// Kerning pairs between printable ASCII characters from a format 0 `kern`
+/// table, scaled; at most 1024. Fonts that kern only through GPOS get none.
+List(Int) kerns(Ttf t, Int ppem) {
+    if (t.kern < 0 || !has(t.b, t.kern, 18) || u16(t.b, t.kern + 4 + 4) != 0) { return []; }
+    Int sub = t.kern + 4;
+    Int n = u16(t.b, sub + 6);
+    if (!has(t.b, sub + 14, 6 * n)) { return []; }
+    Map(Int, Int) want = ascii_glyphs(t, 32, {});
+    return kern_pairs(t, sub + 14, n, 0, want, ppem, []);
+}
+
+Map(Int, Int) ascii_glyphs(Ttf t, Int c, Map(Int, Int) m) {
+    if (c > 126) { return m; }
+    Int g = glyph_of(t, c);
+    return ascii_glyphs(t, c + 1, if (g == 0 || m.contains(g)) { m } else { m.insert(g, c) });
+}
+
+List(Int) kern_pairs(Ttf t, Int at, Int n, Int i, Map(Int, Int) want, Int ppem, List(Int) acc) {
+    if (i >= n || acc.len() >= 3 * 1024) { return acc; }
+    Int l = u16(t.b, at + 6 * i);
+    Int r = u16(t.b, at + 6 * i + 2);
+    Int v = fdiv(i16(t.b, at + 6 * i + 4) * ppem, t.upem);
+    if (v == 0 || !want.contains(l) || !want.contains(r)) { return kern_pairs(t, at, n, i + 1, want, ppem, acc); }
+    Int a = want.get(l) else { 0 };
+    Int b = want.get(r) else { 0 };
+    return kern_pairs(t, at, n, i + 1, want, ppem, acc.concat([a, b, v]));
+}
+
+/// Shelf-pack the glyphs into an atlas `aw` wide and lay out the answer.
+List(Int) pack(List(Drawn) ds, Int ascent, Int line, List(Int) ks) {
+    Int aw = 512;
+    Placed p = place(ds, aw, 0, 0, 0, 0, []);
+    Int ah = if (p.y + p.shelf > 0) { p.y + p.shelf } else { 1 };
+    List(Int) atlas = blit_all(ds, p.at, aw, 0, zeros(aw * ah, ListBuf()));
+    ListBuf(Int) h = le(le(le(le(le(le(le(le(ListBuf(), 826689362), 0), ascent), line), aw), ah), 95), ks.len() / 3);
+    ListBuf(Int) g = records(h, ds, p.at, 0);
+    ListBuf(Int) k = kern_slots(g, ks, 0);
+    return push_all(k, atlas, 0).finish();
+}
+
+/// Where each glyph went: two integers each.
+type Placed = { List(Int) at; Int y; Int shelf; };
+
+Placed place(List(Drawn) ds, Int aw, Int i, Int x, Int y, Int shelf, List(Int) at) {
+    if (i >= ds.len()) { return Placed { .at = at, .y = y, .shelf = shelf }; }
+    Drawn d = ds[i];
+    Bool wrap = x + d.w > aw;
+    Int nx = if (wrap) { 0 } else { x };
+    Int ny = if (wrap) { y + shelf } else { y };
+    Int ns = if (wrap) { d.h } else { if (d.h > shelf) { d.h } else { shelf } };
+    return place(ds, aw, i + 1, nx + d.w + 1, ny, ns, at.concat([nx, ny]));
+}
+
+List(Int) blit_all(List(Drawn) ds, List(Int) at, Int aw, Int i, List(Int) atlas) {
+    if (i >= ds.len()) { return atlas; }
+    return blit_all(ds, at, aw, i + 1, blit(atlas, ds[i], at[2 * i], at[2 * i + 1], aw, 0));
+}
+
+List(Int) blit(List(Int) atlas, Drawn d, Int x, Int y, Int aw, Int k) {
+    if (k >= d.w * d.h) { return atlas; }
+    Int v = d.cover[k];
+    Int i = (y + k / d.w) * aw + x + k % d.w;
+    return blit(if (v == 0) { atlas } else { atlas.with(i, v) }, d, x, y, aw, k + 1);
+}
+
+ListBuf(Int) le(ListBuf(Int) b, Int v) { return b.push(v & 255).push((v >> 8) & 255).push((v >> 16) & 255).push((v >> 24) & 255); }
+
+ListBuf(Int) records(ListBuf(Int) b, List(Drawn) ds, List(Int) at, Int i) {
+    if (i >= ds.len()) { return b; }
+    Drawn d = ds[i];
+    return records(le(le(le(le(le(le(le(b, d.adv), d.xoff), d.yoff), d.w), d.h), at[2 * i]), at[2 * i + 1]), ds, at, i + 1);
+}
+
+ListBuf(Int) kern_slots(ListBuf(Int) b, List(Int) ks, Int i) {
+    if (i >= 1024) { return b; }
+    if (3 * i + 2 >= ks.len()) { return kern_slots(b.push(0).push(0).push(0).push(0), ks, i + 1); }
+    Int v = ks[3 * i + 2] & 65535;
+    return kern_slots(b.push(ks[3 * i]).push(ks[3 * i + 1]).push(v & 255).push((v >> 8) & 255), ks, i + 1);
+}
+
+ListBuf(Int) push_all(ListBuf(Int) b, List(Int) xs, Int i) { return if (i >= xs.len()) { b } else { push_all(b.push(xs[i]), xs, i + 1) }; }
+
+/// A font from TrueType bytes: `size` logical pixels per em, made for
+/// device `scale`.
+pub Result(Font, Str) ttf_font(List(Int) bytes, Int size, Int scale) {
+    Int s = if (scale < 1) { 1 } else { scale };
+    return match (ttf_answer(bytes, size * s)) {
+        Ok(a) => font_parse(a, s),
+        Err(e) => Err(e)
+    };
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+test "floor and ceiling division round the right way for negatives" {
+    expect(fdiv(-1, 4)).toEqual(-1);
+    expect(fdiv(7, 4)).toEqual(1);
+    expect(cdiv(-1, 4)).toEqual(0);
+    expect(cdiv(5, 4)).toEqual(2);
+}
+
+test "a span covers whole pixels fully and its ends in part" {
+    List(Int) r = add_span([0, 0, 0, 0], 128, 3 * 256 + 64, 4);
+    expect(r[0]).toEqual(128);
+    expect(r[1]).toEqual(256);
+    expect(r[2]).toEqual(256);
+    expect(r[3]).toEqual(64);
+}
+
+test "a square fills by the nonzero rule, both windings" {
+    // a 2x2 pixel square at (1,1), clockwise and counter-clockwise
+    List(Seg) cw = [Seg { .x0 = 256, .y0 = 256, .x1 = 768, .y1 = 256 }, Seg { .x0 = 768, .y0 = 256, .x1 = 768, .y1 = 768 },
+                    Seg { .x0 = 768, .y0 = 768, .x1 = 256, .y1 = 768 }, Seg { .x0 = 256, .y0 = 768, .x1 = 256, .y1 = 256 }];
+    List(Int) a = fill(cw, 4, 4);
+    expect(a[5]).toEqual(255);
+    expect(a[6]).toEqual(255);
+    expect(a[0]).toEqual(0);
+    expect(a[15]).toEqual(0);
+    List(Seg) ccw = [Seg { .x0 = 256, .y0 = 256, .x1 = 256, .y1 = 768 }, Seg { .x0 = 256, .y0 = 768, .x1 = 768, .y1 = 768 },
+                     Seg { .x0 = 768, .y0 = 768, .x1 = 768, .y1 = 256 }, Seg { .x0 = 768, .y0 = 256, .x1 = 256, .y1 = 256 }];
+    expect(fill(ccw, 4, 4)[10]).toEqual(255);
+}
+
+test "garbage and truncated fonts are errors, never a crash" {
+    Bool e1 = match (ttf_open([1, 2, 3])) { Ok(t) => false, Err(e) => true };
+    expect(e1).toEqual(true);
+    Bool e2 = match (ttf_open([0, 1, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0])) { Ok(t) => false, Err(e) => true };
+    expect(e2).toEqual(true);
+    Bool otf = match (ttf_open([79, 84, 84, 79, 0, 0, 0, 0, 0, 0, 0, 0])) { Ok(t) => false, Err(e) => str_contains(e, "CFF") };
+    expect(otf).toEqual(true);
+    Bool e3 = match (ttf_answer([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 3)) { Ok(t) => false, Err(e) => true };
+    expect(e3).toEqual(true);
+}

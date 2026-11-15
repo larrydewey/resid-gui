@@ -93,6 +93,50 @@ redraws only its damaged rectangles, typically well under a millisecond
 | `src/ui/` | layout, painting, hit testing, focus, damage, timers |
 | `native/` | the optional `font` (stb_truetype) and `image` (stb_image) modules |
 
+## Host shells: every other platform
+
+On platforms where Resid cannot speak the window system, a small host
+shell in the platform's language opens the window and talks to the
+program over the Resid Surface Protocol (`docs/rsp.md`). `gui_run` uses a
+shell when `RSP_SOCKET` names one. The shell shows frames, reports input,
+and hands the semantics tree (`src/ui/semantics.resid`) to the platform's
+screen reader. `tools/rsp_shell.py` is a headless reference shell:
+
+```sh
+tools/rsp_shell.py ./counter --scale 2 --step click:+1 --step speak --step shot:frame --step close
+```
+
+For development, `gui_run_dev` (`src/dev/hot.resid`) logs every event
+`update` sees and replays the log on the next run, so a rebuilt program
+comes back where it was (`examples/dev_counter.resid`).
+`tools/caps_manifest.py` turns a program's capabilities into platform
+permission manifests. The plan is `PLAN-ui-everywhere.md`.
+
+## Themes
+
+A program never sets colours. It states a `ThemeSpec` (an accent, light,
+dark or the platform's choice, soft, square or round corners, standard or
+high contrast) and `theme_from` derives every colour from it, keeping it
+readable: an accent too pale for its surface is darkened (or lightened on
+dark surfaces) until it stands 3:1, text on the accent is whichever of
+white and near-black reaches 4.5:1. Any spec gives a theme that passes
+`theme_check`; the neutrals, rules, spacing and type stay the library's.
+
+A theme is a widget, so it can come from the model and can be local:
+
+```resid
+Widget view(Look l) {
+    ThemeSpec s = with_mode(with_accent(theme_default(), rgb(31, 122, 90)), if (l.dark) { Dark } else { FollowSystem });
+    return Themed(s, Column([
+        Text("Settings"),
+        Themed(with_accent(s, rgb(200, 30, 30)), Button("Delete account", Custom(9)))
+    ]));
+}
+```
+
+`FollowSystem` takes dark mode and high contrast from the platform (a host
+shell's `Configure`). `examples/themes.resid` shows every knob.
+
 ## Both backends are spoken on the wire
 
 A Resid program links no client library: there is no `libwayland` and no

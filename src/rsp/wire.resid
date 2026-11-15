@@ -1,0 +1,607 @@
+// wire.resid — the Resid Surface Protocol (RSP) v1, as pure functions over
+// bytes. docs/rsp.md is the specification; this file is its codec.
+//
+// A message is a header of two little-endian words, `[size][opcode]`
+// (size counts the header, opcode in the low 16 bits, the high 16 bits
+// zero), followed by its fields. A field is one of four kinds:
+//   i  a signed 32-bit integer
+//   s  a UTF-8 string: byte length, the bytes, zero padding to a word
+//   b  bytes: length, the bytes, zero padding to a word
+//   a  a word array: count, then that many signed 32-bit integers
+// Every opcode has one fixed schema (`rsp_schema`), so a message is
+// decoded by one generic, bounds-checked reader and then given its type.
+// A descriptor (a buffer, a picked file) travels beside its message,
+// never in it.
+//
+// Both directions live here: the core encodes `ToShell` and decodes
+// `FromShell`; a shell (and the test shells) does the opposite. Whatever
+// arrives is untrusted: sizes, counts and strings are checked against
+// limits and against the bytes actually present, invalid UTF-8 is
+// refused, and a malformed message is an `Err`, never a read past the end.
+
+import "../gfx/color.resid";
+import "../ui/semantics.resid";
+
+/// The protocol version this codec speaks.
+pub Int rsp_version() { return 1; }
+
+/// Limits. A message is at most 4 MiB, a string 64 KiB, a byte field
+/// 1 MiB, a word array 16384 words.
+pub Int rsp_max_message() { return 4194304; }
+pub Int rsp_max_string() { return 65536; }
+pub Int rsp_max_bytes() { return 1048576; }
+pub Int rsp_max_words() { return 16384; }
+
+/// One decoded field.
+pub type RspField = FInt(Int) | FStr(Str) | FBytes(List(Int)) | FWords(List(Int));
+
+// ─── The messages ──────────────────────────────────────────────────
+
+/// What the core sends to a shell.
+///
+/// - `Hello(version, app_id)`: first message; `app_id` is reverse-DNS.
+/// - `Window(title, w, h, resizable, min_w, min_h)`: logical pixels.
+/// - `Attach(buffer, w, h, stride)`: a shared buffer of `h` rows of
+///   `stride` bytes, its descriptor beside the message. BGRA, premultiplied.
+/// - `Present(buffer, damage)`: show the buffer; `damage` device rects.
+/// - `Detach(buffer)`: the core will not use the buffer again.
+/// - `Cursor(shape)`: see `cursor_*`.
+/// - `TextInputState(active, kind, caret, surrounding, sel_start, sel_end)`:
+///   the focused editable text, for the platform's input methods.
+/// - `SemReset`, `SemPut(node)`, `SemRemove(id)`, `SemCommit`: the
+///   semantics tree, applied atomically at commit.
+/// - `ClipboardSet(mime, bytes)`, `ClipboardGet(mime)`.
+/// - `MenuItem(id, parent, flags, label, shortcut)`, `MenuCommit`.
+/// - `Dialog(id, kind, title, filter)`: open/save/alert; see `dialog_*`.
+/// - `Bye`: the core is done; the shell closes the window.
+pub type ToShell =
+    Hello(Int, Str) |
+    Window(Str, Int, Int, Int, Int, Int) |
+    Attach(Int, Int, Int, Int) |
+    Present(Int, List(Rect)) |
+    Detach(Int) |
+    Cursor(Int) |
+    TextInputState(Int, Int, Rect, Str, Int, Int) |
+    SemReset |
+    SemPut(SemNode) |
+    SemRemove(Int) |
+    SemCommit |
+    ClipboardSet(Str, List(Int)) |
+    ClipboardGet(Str) |
+    MenuItem(Int, Int, Int, Str, Str) |
+    MenuCommit |
+    Dialog(Int, Int, Str, Str) |
+    Bye;
+
+/// What a shell sends to the core.
+///
+/// - `Welcome(version, platform, shell_name)`: answer to `Hello`.
+/// - `Configure(w, h, scale, inset_top, inset_right, inset_bottom,
+///   inset_left, theme)`: device pixels; `theme` holds `theme_*` bits.
+/// - `FrameDone`: a good time to present the next frame.
+/// - `Release(buffer)`: the shell no longer reads the buffer.
+/// - `Pointer(kind, x, y, button, pointer_id, device, pressure)`: device
+///   pixels; `kind` is `ptr_*`, `device` is `dev_*`, pressure 0 to 1000.
+/// - `ScrollBy(dx, dy, phase)`: device pixels; `phase` is `phase_*`.
+/// - `Key(code, down, mods)`: evdev code, 1 down / 0 up, `mod_*` bits.
+/// - `TextCommit(text)`, `Preedit(text, cursor)`: from input methods.
+/// - `Lifecycle(state)`: `life_*`.
+/// - `A11yAction(node, action)`: a screen reader acting on a node.
+/// - `ClipboardData(mime, bytes)`.
+/// - `DialogResult(id, status)`: a picked file's descriptor beside it.
+/// - `MenuActivated(id)`.
+pub type FromShell =
+    Welcome(Int, Int, Str) |
+    Configure(Int, Int, Int, Int, Int, Int, Int, Int) |
+    FrameDone |
+    Release(Int) |
+    Pointer(Int, Int, Int, Int, Int, Int, Int) |
+    ScrollBy(Int, Int, Int) |
+    Key(Int, Int, Int) |
+    TextCommit(Str) |
+    Preedit(Str, Int) |
+    Lifecycle(Int) |
+    A11yAction(Int, Int) |
+    ClipboardData(Str, List(Int)) |
+    DialogResult(Int, Int) |
+    MenuActivated(Int);
+
+// Constants. Each is a function so it folds at compile time.
+pub Int platform_linux() { return 1; }
+pub Int platform_macos() { return 2; }
+pub Int platform_windows() { return 3; }
+pub Int platform_android() { return 4; }
+pub Int platform_ios() { return 5; }
+pub Int platform_web() { return 6; }
+
+pub Int ptr_move() { return 0; }
+pub Int ptr_down() { return 1; }
+pub Int ptr_up() { return 2; }
+pub Int ptr_leave() { return 3; }
+pub Int dev_mouse() { return 0; }
+pub Int dev_touch() { return 1; }
+pub Int dev_pen() { return 2; }
+
+pub Int phase_none() { return 0; }
+pub Int phase_begin() { return 1; }
+pub Int phase_update() { return 2; }
+pub Int phase_end() { return 3; }
+pub Int phase_momentum() { return 4; }
+
+pub Int mod_shift() { return 1; }
+pub Int mod_ctrl() { return 2; }
+pub Int mod_alt() { return 4; }
+pub Int mod_super() { return 8; }
+
+pub Int life_visible() { return 0; }
+pub Int life_hidden() { return 1; }
+pub Int life_suspended() { return 2; }
+pub Int life_close_requested() { return 3; }
+
+pub Int theme_dark() { return 1; }
+pub Int theme_reduced_motion() { return 2; }
+pub Int theme_high_contrast() { return 4; }
+
+pub Int cursor_default() { return 0; }
+pub Int cursor_pointer() { return 1; }
+pub Int cursor_text() { return 2; }
+pub Int cursor_grab() { return 3; }
+
+pub Int input_plain() { return 0; }
+pub Int input_password() { return 1; }
+pub Int input_number() { return 2; }
+pub Int input_email() { return 3; }
+
+pub Int dialog_open() { return 0; }
+pub Int dialog_save() { return 1; }
+pub Int dialog_alert() { return 2; }
+pub Int dialog_ok() { return 0; }
+pub Int dialog_cancelled() { return 1; }
+
+// ─── Opcodes and schemas ───────────────────────────────────────────
+
+/// The opcode of a message to the shell (1 to 17).
+pub Int to_shell_op(ToShell m) {
+    return match (m) {
+        Hello(v, a) => 1, Window(t, w, h, r, mw, mh) => 2, Attach(b, w, h, s) => 3,
+        Present(b, d) => 4, Detach(b) => 5, Cursor(c) => 6,
+        TextInputState(a, k, r, s, x, y) => 7, SemReset => 8, SemPut(n) => 9,
+        SemRemove(i) => 10, SemCommit => 11, ClipboardSet(m, b) => 12,
+        ClipboardGet(m) => 13, MenuItem(i, p, f, l, s) => 14, MenuCommit => 15,
+        Dialog(i, k, t, f) => 16, Bye => 17
+    };
+}
+
+/// The opcode of a message from the shell (129 to 142).
+pub Int from_shell_op(FromShell m) {
+    return match (m) {
+        Welcome(v, p, n) => 129, Configure(w, h, s, t, r, b, l, th) => 130, FrameDone => 131,
+        Release(b) => 132, Pointer(k, x, y, b, i, d, p) => 133, ScrollBy(x, y, p) => 134,
+        Key(c, d, m) => 135, TextCommit(t) => 136, Preedit(t, c) => 137,
+        Lifecycle(s) => 138, A11yAction(n, a) => 139, ClipboardData(m, b) => 140,
+        DialogResult(i, s) => 141, MenuActivated(i) => 142
+    };
+}
+
+/// The field kinds an opcode carries, one letter per field; "" for an
+/// opcode this version does not know.
+pub Str rsp_schema(Int op) {
+    List(Str) to = ["", "is", "siiiii", "iiii", "ia", "i", "i", "iiiiiisii", "-", "iiiiiiiiiss", "i", "-",
+                    "sb", "s", "iiiss", "-", "iiss", "-"];
+    List(Str) from = ["iis", "iiiiiiii", "-", "i", "iiiiiii", "iii", "iii", "s", "si", "i", "ii", "sb", "ii", "i"];
+    if (op >= 1 && op < to.len()) { return to[op]; }
+    if (op >= 129 && op - 129 < from.len()) { return from[op - 129]; }
+    return "";
+}
+
+// ─── Encoding ──────────────────────────────────────────────────────
+
+/// A message from its opcode and fields.
+pub List(Int) rsp_msg(Int op, List(RspField) fs) {
+    List(Int) body = rsp_fields(ListBuf(), fs, 0).finish();
+    ListBuf(Int) h = rsp_put(rsp_put(ListBuf(), 8 + body.len()), op & 65535);
+    return rsp_put_bytes(h, body, 0).finish();
+}
+
+/// Append a 32-bit little-endian word (negative values as two's complement).
+pub ListBuf(Int) rsp_put(ListBuf(Int) b, Int v) {
+    return b.push(v & 255).push((v >> 8) & 255).push((v >> 16) & 255).push((v >> 24) & 255);
+}
+
+ListBuf(Int) rsp_put_bytes(ListBuf(Int) b, List(Int) v, Int i) {
+    if (i >= v.len()) { return b; }
+    return rsp_put_bytes(b.push(v[i] & 255), v, i + 1);
+}
+
+ListBuf(Int) rsp_put_words(ListBuf(Int) b, List(Int) v, Int i) {
+    if (i >= v.len()) { return b; }
+    return rsp_put_words(rsp_put(b, v[i]), v, i + 1);
+}
+
+ListBuf(Int) rsp_pad(ListBuf(Int) b, Int n) {
+    if ((n & 3) == 0) { return b; }
+    return rsp_pad(b.push(0), n + 1);
+}
+
+ListBuf(Int) rsp_fields(ListBuf(Int) b, List(RspField) fs, Int i) {
+    if (i >= fs.len()) { return b; }
+    ListBuf(Int) n = match (fs[i]) {
+        FInt(v) => rsp_put(b, v),
+        FStr(s) => rsp_blob(b, rsp_utf8(s)),
+        FBytes(v) => rsp_blob(b, v),
+        FWords(v) => rsp_put_words(rsp_put(b, v.len()), v, 0)
+    };
+    return rsp_fields(n, fs, i + 1);
+}
+
+ListBuf(Int) rsp_blob(ListBuf(Int) b, List(Int) v) {
+    return rsp_pad(rsp_put_bytes(rsp_put(b, v.len()), v, 0), v.len());
+}
+
+/// The UTF-8 encoding of `s`.
+pub List(Int) rsp_utf8(Str s) { return rsp_utf8_at(ListBuf(), s, 0).finish(); }
+
+ListBuf(Int) rsp_utf8_at(ListBuf(Int) b, Str s, Int i) {
+    if (i >= str_len(s)) { return b; }
+    Int c = str_char_at(s, i);
+    ListBuf(Int) n = if (c < 128) { b.push(c) }
+        else { if (c < 2048) { b.push(192 | (c >> 6)).push(128 | (c & 63)) }
+        else { if (c < 65536) { b.push(224 | (c >> 12)).push(128 | ((c >> 6) & 63)).push(128 | (c & 63)) }
+        else { b.push(240 | (c >> 18)).push(128 | ((c >> 12) & 63)).push(128 | ((c >> 6) & 63)).push(128 | (c & 63)) } } };
+    return rsp_utf8_at(n, s, i + 1);
+}
+
+List(Int) rect_words(List(Rect) rs) { return rect_words_at(ListBuf(), rs, 0).finish(); }
+
+ListBuf(Int) rect_words_at(ListBuf(Int) b, List(Rect) rs, Int i) {
+    if (i >= rs.len()) { return b; }
+    Rect r = rs[i];
+    return rect_words_at(b.push(r.x).push(r.y).push(r.w).push(r.h), rs, i + 1);
+}
+
+/// The fields of a message to the shell.
+pub List(RspField) to_shell_fields(ToShell m) {
+    return match (m) {
+        Hello(v, a) => [FInt(v), FStr(a)],
+        Window(t, w, h, r, mw, mh) => [FStr(t), FInt(w), FInt(h), FInt(r), FInt(mw), FInt(mh)],
+        Attach(b, w, h, s) => [FInt(b), FInt(w), FInt(h), FInt(s)],
+        Present(b, d) => [FInt(b), FWords(rect_words(d))],
+        Detach(b) => [FInt(b)],
+        Cursor(c) => [FInt(c)],
+        TextInputState(a, k, r, s, x, y) => [FInt(a), FInt(k), FInt(r.x), FInt(r.y), FInt(r.w), FInt(r.h), FStr(s), FInt(x), FInt(y)],
+        SemReset => [],
+        SemPut(n) => [FInt(n.id), FInt(n.parent), FInt(n.role), FInt(n.flags), FInt(n.bounds.x), FInt(n.bounds.y),
+                      FInt(n.bounds.w), FInt(n.bounds.h), FInt(n.actions), FStr(n.label), FStr(n.value)],
+        SemRemove(i) => [FInt(i)],
+        SemCommit => [],
+        ClipboardSet(t, b) => [FStr(t), FBytes(b)],
+        ClipboardGet(t) => [FStr(t)],
+        MenuItem(i, p, f, l, s) => [FInt(i), FInt(p), FInt(f), FStr(l), FStr(s)],
+        MenuCommit => [],
+        Dialog(i, k, t, f) => [FInt(i), FInt(k), FStr(t), FStr(f)],
+        Bye => []
+    };
+}
+
+/// The fields of a message from the shell.
+pub List(RspField) from_shell_fields(FromShell m) {
+    return match (m) {
+        Welcome(v, p, n) => [FInt(v), FInt(p), FStr(n)],
+        Configure(w, h, s, t, r, b, l, th) => [FInt(w), FInt(h), FInt(s), FInt(t), FInt(r), FInt(b), FInt(l), FInt(th)],
+        FrameDone => [],
+        Release(b) => [FInt(b)],
+        Pointer(k, x, y, b, i, d, p) => [FInt(k), FInt(x), FInt(y), FInt(b), FInt(i), FInt(d), FInt(p)],
+        ScrollBy(x, y, p) => [FInt(x), FInt(y), FInt(p)],
+        Key(c, d, md) => [FInt(c), FInt(d), FInt(md)],
+        TextCommit(t) => [FStr(t)],
+        Preedit(t, c) => [FStr(t), FInt(c)],
+        Lifecycle(s) => [FInt(s)],
+        A11yAction(n, a) => [FInt(n), FInt(a)],
+        ClipboardData(t, b) => [FStr(t), FBytes(b)],
+        DialogResult(i, s) => [FInt(i), FInt(s)],
+        MenuActivated(i) => [FInt(i)]
+    };
+}
+
+/// A message to the shell, encoded.
+pub List(Int) to_shell_bytes(ToShell m) { return rsp_msg(to_shell_op(m), to_shell_fields(m)); }
+
+/// A message from the shell, encoded (for shells and test shells).
+pub List(Int) from_shell_bytes(FromShell m) { return rsp_msg(from_shell_op(m), from_shell_fields(m)); }
+
+// ─── Decoding ──────────────────────────────────────────────────────
+
+/// The unsigned 32-bit word at `i`, or -1 when the bytes run out.
+pub Int rsp_u32(List(Int) m, Int i) {
+    if (i < 0 || i + 4 > m.len()) { return -1; }
+    return (m[i] & 255) | ((m[i + 1] & 255) << 8) | ((m[i + 2] & 255) << 16) | ((m[i + 3] & 255) << 24);
+}
+
+Int as_i32(Int v) { return if (v >= 2147483648) { v - 4294967296 } else { v }; }
+
+/// One message off the front of a stream. `ok` false and `bad` false: more
+/// bytes are needed. `bad`: the stream is corrupt and must be closed.
+pub type RspIn = { Bool ok; Bool bad; Int op; List(Int) msg; List(Int) rest; };
+
+pub RspIn rsp_take(List(Int) buf) {
+    if (buf.len() < 8) { return RspIn { .ok = false, .bad = false, .op = 0, .msg = [], .rest = buf }; }
+    Int size = rsp_u32(buf, 0);
+    Int head = rsp_u32(buf, 4);
+    if (size < 8 || (size & 3) != 0 || size > rsp_max_message() || (head >> 16) != 0) {
+        return RspIn { .ok = false, .bad = true, .op = 0, .msg = [], .rest = buf };
+    }
+    if (buf.len() < size) { return RspIn { .ok = false, .bad = false, .op = 0, .msg = [], .rest = buf }; }
+    return RspIn { .ok = true, .bad = false, .op = head, .msg = buf[0..size], .rest = buf[size..buf.len()] };
+}
+
+/// The fields of a whole message, read against its opcode's schema. The
+/// fields must fill the message exactly.
+pub Result(List(RspField), Str) rsp_fields_of(List(Int) msg) {
+    Int op = rsp_u32(msg, 4);
+    Str schema = rsp_schema(op);
+    if (str_len(schema) == 0) { return Err(f"rsp: unknown opcode {op}"); }
+    if (rsp_u32(msg, 0) != msg.len()) { return Err("rsp: size does not match the message"); }
+    if (schema == "-") {
+        if (msg.len() != 8) { return Err("rsp: bytes after a message with no fields"); }
+        return Ok([]);
+    }
+    return read_fields(msg, schema, 0, 8, []);
+}
+
+Result(List(RspField), Str) read_fields(List(Int) m, Str schema, Int k, Int at, List(RspField) acc) {
+    if (k >= str_len(schema)) {
+        if (at != m.len()) { return Err("rsp: bytes after the last field"); }
+        return Ok(acc);
+    }
+    Int kind = str_char_at(schema, k);
+    Int w = rsp_u32(m, at);
+    if (w < 0) { return Err("rsp: message ends inside a field"); }
+    if (kind == 105) { return read_fields(m, schema, k + 1, at + 4, acc.concat([FInt(as_i32(w))])); }
+    if (kind == 97) {
+        if (w > rsp_max_words()) { return Err("rsp: word array too long"); }
+        if (at + 4 + 4 * w > m.len()) { return Err("rsp: word array overruns the message"); }
+        return read_fields(m, schema, k + 1, at + 4 + 4 * w, acc.concat([FWords(words_at(m, at + 4, w, ListBuf()))]));
+    }
+    Int limit = if (kind == 115) { rsp_max_string() } else { rsp_max_bytes() };
+    if (w > limit) { return Err("rsp: field too long"); }
+    Int padded = ((w + 3) / 4) * 4;
+    if (at + 4 + padded > m.len()) { return Err("rsp: field overruns the message"); }
+    List(Int) bytes = m[(at + 4)..(at + 4 + w)];
+    if (!zeros(m, at + 4 + w, at + 4 + padded)) { return Err("rsp: padding is not zero"); }
+    if (kind == 98) { return read_fields(m, schema, k + 1, at + 4 + padded, acc.concat([FBytes(bytes)])); }
+    return match (utf8_decode(bytes)) {
+        Ok(s) => read_fields(m, schema, k + 1, at + 4 + padded, acc.concat([FStr(s)])),
+        Err(e) => Err("rsp: string is not valid UTF-8")
+    };
+}
+
+List(Int) words_at(List(Int) m, Int at, Int n, ListBuf(Int) b) {
+    if (n <= 0) { return b.finish(); }
+    return words_at(m, at + 4, n - 1, b.push(as_i32(rsp_u32(m, at))));
+}
+
+Bool zeros(List(Int) m, Int i, Int stop) {
+    if (i >= stop) { return true; }
+    return (m[i] & 255) == 0 && zeros(m, i + 1, stop);
+}
+
+/// Strict UTF-8: no overlong forms, no surrogates, nothing above U+10FFFF.
+pub Result(Str, Str) utf8_decode(List(Int) b) {
+    Str why = utf8_check(b, 0);
+    if (str_len(why) > 0) { return Err(why); }
+    return Ok(utf8_build(b, 0, StrBuf()));
+}
+
+/// The length of the sequence a lead byte starts, 0 when it starts none.
+Int utf8_seq(Int c) {
+    if (c < 128) { return 1; }
+    if (c >= 194 && c <= 223) { return 2; }
+    if (c >= 224 && c <= 239) { return 3; }
+    if (c >= 240 && c <= 244) { return 4; }
+    return 0;
+}
+
+Int utf8_cp(List(Int) b, Int i, Int n) {
+    Int c = b[i] & 255;
+    if (n == 1) { return c; }
+    return cont(b, i + 1, n - 1, c & (if (n == 2) { 31 } else { if (n == 3) { 15 } else { 7 } }));
+}
+
+/// Why `b` is not strict UTF-8 from `i` on, or "".
+Str utf8_check(List(Int) b, Int i) {
+    if (i >= b.len()) { return ""; }
+    Int n = utf8_seq(b[i] & 255);
+    if (n == 0) { return "utf8: bad lead byte"; }
+    if (i + n > b.len()) { return "utf8: truncated sequence"; }
+    Int cp = utf8_cp(b, i, n);
+    if (cp < 0) { return "utf8: bad continuation byte"; }
+    Int least = if (n == 1) { 0 } else { if (n == 2) { 128 } else { if (n == 3) { 2048 } else { 65536 } } };
+    if (cp < least || cp > 1114111 || (cp >= 55296 && cp <= 57343)) { return "utf8: overlong, surrogate or out of range"; }
+    return utf8_check(b, i + n);
+}
+
+Str utf8_build(List(Int) b, Int i, StrBuf acc) {
+    if (i >= b.len()) { return acc.finish(); }
+    Int n = utf8_seq(b[i] & 255);
+    return utf8_build(b, i + n, acc.push_char(utf8_cp(b, i, n)));
+}
+
+Int cont(List(Int) b, Int i, Int n, Int acc) {
+    if (n <= 0) { return acc; }
+    Int c = b[i] & 255;
+    if ((c & 192) != 128) { return -1; }
+    return cont(b, i + 1, n - 1, (acc << 6) | (c & 63));
+}
+
+Int fi(List(RspField) fs, Int i) { return match (fs[i]) { FInt(v) => v, _ => 0 }; }
+Str fstr(List(RspField) fs, Int i) { return match (fs[i]) { FStr(s) => s, _ => "" }; }
+List(Int) fb(List(RspField) fs, Int i) { return match (fs[i]) { FBytes(v) => v, _ => [] }; }
+List(Int) fw(List(RspField) fs, Int i) { return match (fs[i]) { FWords(v) => v, _ => [] }; }
+
+List(Rect) rects_of(List(Int) ws, Int i, List(Rect) acc) {
+    if (i + 4 > ws.len()) { return acc; }
+    return rects_of(ws, i + 4, acc.concat([Rect { .x = ws[i], .y = ws[i + 1], .w = ws[i + 2], .h = ws[i + 3] }]));
+}
+
+/// A message from the shell, decoded and typed.
+pub Result(FromShell, Str) from_shell_decode(List(Int) msg) {
+    return match (rsp_fields_of(msg)) { Ok(f) => from_shell_typed(rsp_u32(msg, 4), f), Err(e) => Err(e) };
+}
+
+Result(FromShell, Str) from_shell_typed(Int op, List(RspField) f) {
+    if (op < 129) { return Err(f"rsp: opcode {op} goes to the shell, not from it"); }
+    if (op == 129) { return Ok(Welcome(fi(f, 0), fi(f, 1), fstr(f, 2))); }
+    if (op == 130) { return Ok(Configure(fi(f, 0), fi(f, 1), fi(f, 2), fi(f, 3), fi(f, 4), fi(f, 5), fi(f, 6), fi(f, 7))); }
+    if (op == 131) { return Ok(FrameDone); }
+    if (op == 132) { return Ok(Release(fi(f, 0))); }
+    if (op == 133) { return Ok(Pointer(fi(f, 0), fi(f, 1), fi(f, 2), fi(f, 3), fi(f, 4), fi(f, 5), fi(f, 6))); }
+    if (op == 134) { return Ok(ScrollBy(fi(f, 0), fi(f, 1), fi(f, 2))); }
+    if (op == 135) { return Ok(Key(fi(f, 0), fi(f, 1), fi(f, 2))); }
+    if (op == 136) { return Ok(TextCommit(fstr(f, 0))); }
+    if (op == 137) { return Ok(Preedit(fstr(f, 0), fi(f, 1))); }
+    if (op == 138) { return Ok(Lifecycle(fi(f, 0))); }
+    if (op == 139) { return Ok(A11yAction(fi(f, 0), fi(f, 1))); }
+    if (op == 140) { return Ok(ClipboardData(fstr(f, 0), fb(f, 1))); }
+    if (op == 141) { return Ok(DialogResult(fi(f, 0), fi(f, 1))); }
+    return Ok(MenuActivated(fi(f, 0)));
+}
+
+/// A message to the shell, decoded and typed (for shells and test shells).
+pub Result(ToShell, Str) to_shell_decode(List(Int) msg) {
+    return match (rsp_fields_of(msg)) { Ok(f) => to_shell_typed(rsp_u32(msg, 4), f), Err(e) => Err(e) };
+}
+
+Result(ToShell, Str) to_shell_typed(Int op, List(RspField) f) {
+    if (op >= 129) { return Err(f"rsp: opcode {op} comes from the shell, not to it"); }
+    if (op == 1) { return Ok(Hello(fi(f, 0), fstr(f, 1))); }
+    if (op == 2) { return Ok(Window(fstr(f, 0), fi(f, 1), fi(f, 2), fi(f, 3), fi(f, 4), fi(f, 5))); }
+    if (op == 3) { return Ok(Attach(fi(f, 0), fi(f, 1), fi(f, 2), fi(f, 3))); }
+    if (op == 4) { return present_of(fi(f, 0), fw(f, 1)); }
+    if (op == 5) { return Ok(Detach(fi(f, 0))); }
+    if (op == 6) { return Ok(Cursor(fi(f, 0))); }
+    if (op == 7) { return Ok(TextInputState(fi(f, 0), fi(f, 1), Rect { .x = fi(f, 2), .y = fi(f, 3), .w = fi(f, 4), .h = fi(f, 5) }, fstr(f, 6), fi(f, 7), fi(f, 8))); }
+    if (op == 8) { return Ok(SemReset); }
+    if (op == 9) { return Ok(SemPut(SemNode { .id = fi(f, 0), .parent = fi(f, 1), .role = fi(f, 2), .flags = fi(f, 3), .bounds = Rect { .x = fi(f, 4), .y = fi(f, 5), .w = fi(f, 6), .h = fi(f, 7) }, .actions = fi(f, 8), .label = fstr(f, 9), .value = fstr(f, 10) })); }
+    if (op == 10) { return Ok(SemRemove(fi(f, 0))); }
+    if (op == 11) { return Ok(SemCommit); }
+    if (op == 12) { return Ok(ClipboardSet(fstr(f, 0), fb(f, 1))); }
+    if (op == 13) { return Ok(ClipboardGet(fstr(f, 0))); }
+    if (op == 14) { return Ok(MenuItem(fi(f, 0), fi(f, 1), fi(f, 2), fstr(f, 3), fstr(f, 4))); }
+    if (op == 15) { return Ok(MenuCommit); }
+    if (op == 16) { return Ok(Dialog(fi(f, 0), fi(f, 1), fstr(f, 2), fstr(f, 3))); }
+    return Ok(Bye);
+}
+
+Result(ToShell, Str) present_of(Int b, List(Int) ws) {
+    if (ws.len() % 4 != 0) { return Err("rsp: damage is not whole rectangles"); }
+    return Ok(Present(b, rects_of(ws, 0, [])));
+}
+
+/// Why a message does not decode, or "" when it does.
+pub Str rsp_why(List(Int) msg) {
+    if (msg.len() < 8) { return "rsp: message shorter than its header"; }
+    return match (rsp_fields_of(msg)) { Ok(v) => "", Err(e) => e };
+}
+
+/// Whether two byte lists are equal.
+pub Bool same_bytes(List(Int) a, List(Int) b, Int i) {
+    if (a.len() != b.len()) { return false; }
+    if (i >= a.len()) { return true; }
+    return a[i] == b[i] && same_bytes(a, b, i + 1);
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+test "a message carries its size and opcode" {
+    List(Int) m = from_shell_bytes(Release(7));
+    expect(m.len()).toEqual(12);
+    expect(rsp_u32(m, 0)).toEqual(12);
+    expect(rsp_u32(m, 4)).toEqual(132);
+    expect(rsp_u32(m, 8)).toEqual(7);
+}
+
+test "every message to the shell survives a round trip" {
+    SemNode n = SemNode { .id = 3, .parent = 1, .role = 2, .flags = 5, .bounds = Rect { .x = -4, .y = 5, .w = 60, .h = 20 },
+                          .actions = 1, .label = "Save", .value = "é€" };
+    List(ToShell) all = [
+        Hello(1, "dev.resid.todo"), Window("Tâches", 640, 480, 1, 200, 100), Attach(1, 640, 480, 2560),
+        Present(1, [Rect { .x = 0, .y = 0, .w = 10, .h = 10 }, Rect { .x = 5, .y = 6, .w = 7, .h = 8 }]),
+        Detach(1), Cursor(cursor_text()), TextInputState(1, input_email(), Rect { .x = 1, .y = 2, .w = 1, .h = 16 }, "a@b", 1, 3),
+        SemReset, SemPut(n), SemRemove(4), SemCommit, ClipboardSet("text/plain", [104, 105]), ClipboardGet("text/plain"),
+        MenuItem(10, 0, 0, "File", ""), MenuCommit, Dialog(2, dialog_open(), "Open", "*.png"), Bye
+    ];
+    expect(round_trips_to(all, 0)).toEqual(all.len());
+}
+
+Int round_trips_to(List(ToShell) ms, Int i) {
+    if (i >= ms.len()) { return i; }
+    List(Int) b = to_shell_bytes(ms[i]);
+    ToShell back = to_shell_decode(b) else { Bye };
+    if (!same_bytes(to_shell_bytes(back), b, 0)) { return i; }
+    if (str_len(rsp_why(b)) > 0) { return i; }
+    return round_trips_to(ms, i + 1);
+}
+
+test "every message from the shell survives a round trip" {
+    List(FromShell) all = [
+        Welcome(1, platform_linux(), "reference"), Configure(1280, 800, 2, 0, 0, 0, 0, theme_dark()), FrameDone, Release(1),
+        Pointer(ptr_down(), 10, -20, 1, 0, dev_touch(), 500), ScrollBy(0, -120, phase_momentum()), Key(30, 1, mod_shift()),
+        TextCommit("日本"), Preedit("にほ", 2), Lifecycle(life_close_requested()), A11yAction(3, 1),
+        ClipboardData("text/plain", [1, 2, 3]), DialogResult(2, dialog_ok()), MenuActivated(10)
+    ];
+    expect(from_trips_to(all, 0)).toEqual(all.len());
+}
+
+Int from_trips_to(List(FromShell) ms, Int i) {
+    if (i >= ms.len()) { return i; }
+    List(Int) b = from_shell_bytes(ms[i]);
+    FromShell back = from_shell_decode(b) else { FrameDone };
+    if (!same_bytes(from_shell_bytes(back), b, 0)) { return i; }
+    return from_trips_to(ms, i + 1);
+}
+
+test "framing waits for whole messages and refuses impossible sizes" {
+    List(Int) a = from_shell_bytes(Key(30, 1, 0));
+    RspIn t = rsp_take(a.concat([1, 2]));
+    expect(t.ok).toEqual(true);
+    expect(t.op).toEqual(135);
+    expect(t.rest.len()).toEqual(2);
+    expect(rsp_take(a[0..10]).ok).toEqual(false);
+    expect(rsp_take(a[0..10]).bad).toEqual(false);
+    expect(rsp_take([4, 0, 0, 0, 131, 0, 0, 0]).bad).toEqual(true);
+    expect(rsp_take([9, 0, 0, 0, 131, 0, 0, 0]).bad).toEqual(true);
+    expect(rsp_take([0, 0, 0, 1, 131, 0, 0, 0]).bad).toEqual(true);
+    expect(rsp_take([8, 0, 0, 0, 131, 0, 1, 0]).bad).toEqual(true);
+}
+
+test "hostile messages are refused, never read past" {
+    // a string whose length runs past the message
+    expect(str_len(rsp_why([16, 0, 0, 0, 136, 0, 0, 0, 200, 0, 0, 0, 97, 98, 0, 0])) > 0).toEqual(true);
+    // a string that is not UTF-8 (a lone continuation byte, an overlong slash, a surrogate)
+    expect(str_len(rsp_why([16, 0, 0, 0, 136, 0, 0, 0, 1, 0, 0, 0, 128, 0, 0, 0])) > 0).toEqual(true);
+    expect(str_len(rsp_why([16, 0, 0, 0, 136, 0, 0, 0, 2, 0, 0, 0, 192, 175, 0, 0])) > 0).toEqual(true);
+    expect(str_len(rsp_why([16, 0, 0, 0, 136, 0, 0, 0, 3, 0, 0, 0, 237, 160, 128, 0])) > 0).toEqual(true);
+    // a truncated three-byte sequence at the end of the string
+    expect(str_len(rsp_why([16, 0, 0, 0, 136, 0, 0, 0, 2, 0, 0, 0, 226, 130, 0, 0])) > 0).toEqual(true);
+    // non-zero padding
+    expect(str_len(rsp_why([16, 0, 0, 0, 136, 0, 0, 0, 1, 0, 0, 0, 97, 1, 0, 0])) > 0).toEqual(true);
+    // an unknown opcode, a missing field, a field too many
+    expect(str_len(rsp_why([8, 0, 0, 0, 200, 0, 0, 0])) > 0).toEqual(true);
+    expect(str_len(rsp_why([8, 0, 0, 0, 132, 0, 0, 0])) > 0).toEqual(true);
+    expect(str_len(rsp_why([16, 0, 0, 0, 132, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0])) > 0).toEqual(true);
+    // a word array claiming more words than the limit, and more than arrived
+    expect(str_len(rsp_why([16, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 255, 255, 255, 127])) > 0).toEqual(true);
+    expect(str_len(rsp_why([16, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0])) > 0).toEqual(true);
+    // damage that is not whole rectangles
+    Bool refused = match (to_shell_decode([20, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0])) { Ok(m) => false, Err(e) => true };
+    expect(refused).toEqual(true);
+    // a message from the wrong direction
+    Bool wrong = match (from_shell_decode(to_shell_bytes(Bye))) { Ok(m) => false, Err(e) => true };
+    expect(wrong).toEqual(true);
+}
+
+test "strings are UTF-8 on the wire" {
+    expect(rsp_utf8("aé€😀").len()).toEqual(10);
+    Str back = utf8_decode(rsp_utf8("aé€😀")) else { "" };
+    expect(back).toEqual("aé€😀");
+}

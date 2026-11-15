@@ -32,11 +32,11 @@ pub Png golden_png(Widget w, Int lw, Int lh, Int scale) {
 pub Str golden_hash(Png p) { return hex_encode(hash_bytes(Sha256, p.bytes)); }
 
 test "widgets at scale 1" {
-    expect(golden_hash(golden_png(widgets(), 200, 200, 1))).toEqual("0bdfb3be58ae9947e7dea2c64bddf467693577abd16dd467d33fd017e3320879");
+    expect(golden_hash(golden_png(widgets(), 200, 200, 1))).toEqual("9f9e0ca1fe3d67dc15863927d8a5f689c389a2ff6aa1ef90c4348f8a0dcf235e");
 }
 
 test "widgets at scale 2" {
-    expect(golden_hash(golden_png(widgets(), 200, 200, 2))).toEqual("846c9d5c7bc6598d07b411f1fe21eb1e1996c81d9492a42292dc7dfc9060db6b");
+    expect(golden_hash(golden_png(widgets(), 200, 200, 2))).toEqual("1ad82f8b49a8242f7b4071574a80929ad811ee7a4865ac0590ab586a210c33d0");
 }
 
 test "damage redraw equals a full redraw" {

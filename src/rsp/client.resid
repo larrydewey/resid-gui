@@ -1,0 +1,360 @@
+// client.resid — the core's side of RSP: a `Backend(B)` instance whose
+// window server is a host shell (docs/rsp.md).
+//
+// On macOS, Windows and later platforms a small shell written in the
+// platform's language opens the real window; this backend draws frames
+// into shared buffers, tells the shell to show them, and turns what the
+// shell reports into the same `Event`s the Wayland and X11 backends
+// produce. It also sends the semantics tree, so the shell can hand it to
+// the platform's screen reader, and turns the screen reader's actions back
+// into `Assist` events.
+//
+// Everything the shell sends is untrusted: decoding is `wire.resid`'s
+// bounds-checked reader, a size or scale past its limit is refused, and a
+// malformed message ends the connection with an error, never a crash.
+
+import "../app.resid";
+import "../backend/backend.resid";
+import "../gfx/color.resid";
+import "../gfx/draw.resid";
+import "../gfx/raster.resid";
+import "../ui/semantics.resid";
+import "wire.resid";
+
+/// The window as the shell configured it, in device pixels.
+pub type RspWin = { Int w; Int h; Int scale; Int theme; Int platform; Str shell; };
+
+/// The two shared buffers. Their ids on the wire are `2 * gen` and
+/// `2 * gen + 1`; a resize starts a new generation, so a late `Release` of
+/// an old buffer cannot free a new one.
+pub type RspBufs = { Int h0; Int h1; Slot s0; Slot s1; Int gen; };
+
+/// The connection.
+pub type Rsp = {
+    Int fd; Bool alive; Str err; List(Int) buf;
+    RspWin win; RspBufs bufs; Bool frame_ok;
+    List(SemNode) sem; Int sent;
+};
+
+/// The largest window a shell may configure, a side and in pixels.
+pub Int rsp_max_side() { return 16384; }
+pub Int rsp_max_pixels() { return 67108864; }
+
+RspBufs bufs_none() { return RspBufs { .h0 = 0, .h1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0), .gen = 0 }; }
+
+pub Rsp rsp_failed(Str why) {
+    return Rsp { .fd = -1, .alive = false, .err = why, .buf = [],
+                 .win = RspWin { .w = 0, .h = 0, .scale = 1, .theme = 0, .platform = 0, .shell = "" },
+                 .bufs = bufs_none(), .frame_ok = false, .sem = [], .sent = 0 };
+}
+
+Rsp dead(Rsp r, Str why) {
+    return Rsp { .fd = r.fd, .alive = false, .err = if (str_len(r.err) > 0) { r.err } else { why }, .buf = [],
+                 .win = r.win, .bufs = r.bufs, .frame_ok = false, .sem = r.sem, .sent = r.sent };
+}
+
+Rsp with_buf(Rsp r, List(Int) b) {
+    return Rsp { .fd = r.fd, .alive = r.alive, .err = r.err, .buf = b, .win = r.win, .bufs = r.bufs, .frame_ok = r.frame_ok, .sem = r.sem, .sent = r.sent };
+}
+
+Rsp with_win(Rsp r, RspWin w) {
+    return Rsp { .fd = r.fd, .alive = r.alive, .err = r.err, .buf = r.buf, .win = w, .bufs = r.bufs, .frame_ok = r.frame_ok, .sem = r.sem, .sent = r.sent };
+}
+
+Rsp with_bufs(Rsp r, RspBufs b) {
+    return Rsp { .fd = r.fd, .alive = r.alive, .err = r.err, .buf = r.buf, .win = r.win, .bufs = b, .frame_ok = r.frame_ok, .sem = r.sem, .sent = r.sent };
+}
+
+Rsp with_frame(Rsp r, Bool ok) {
+    return Rsp { .fd = r.fd, .alive = r.alive, .err = r.err, .buf = r.buf, .win = r.win, .bufs = r.bufs, .frame_ok = ok, .sem = r.sem, .sent = r.sent };
+}
+
+Rsp with_sem(Rsp r, List(SemNode) s) {
+    return Rsp { .fd = r.fd, .alive = r.alive, .err = r.err, .buf = r.buf, .win = r.win, .bufs = r.bufs, .frame_ok = r.frame_ok, .sem = s, .sent = r.sent + 1 };
+}
+
+/// Send messages in order; a failed send ends the connection.
+@requires(display)
+Rsp send(Rsp r, List(ToShell) ms) { return send_at(r, ms, 0); }
+
+@requires(display)
+Rsp send_at(Rsp r, List(ToShell) ms, Int i) {
+    if (i >= ms.len() || !r.alive) { return r; }
+    if (!resid_disp_send(r.fd, to_shell_bytes(ms[i]), -1)) { return dead(r, "rsp: the shell stopped reading"); }
+    return send_at(r, ms, i + 1);
+}
+
+// ─── Starting ──────────────────────────────────────────────────────
+
+/// One decoded message, or none yet.
+type RspGot = { Rsp r; Bool got; FromShell m; };
+
+/// The next whole message, waiting up to `ms` for bytes.
+@requires(display)
+RspGot next_msg(Rsp r, Int ms) {
+    if (!r.alive) { return RspGot { .r = r, .got = false, .m = FrameDone }; }
+    RspIn t = rsp_take(r.buf);
+    if (t.bad) { return RspGot { .r = dead(r, "rsp: corrupt stream from the shell"), .got = false, .m = FrameDone }; }
+    if (t.ok) {
+        Rsp rest = with_buf(r, t.rest);
+        return match (from_shell_decode(t.msg)) {
+            Ok(m) => RspGot { .r = rest, .got = true, .m = m },
+            Err(e) => RspGot { .r = dead(rest, e), .got = false, .m = FrameDone }
+        };
+    }
+    List(Int) ready = resid_disp_poll([r.fd], [1], ms);
+    Int bits = if (ready.len() > 0) { ready[0] } else { 0 };
+    if ((bits & 8) != 0) { return RspGot { .r = dead(r, "rsp: the connection failed"), .got = false, .m = FrameDone }; }
+    if ((bits & 1) == 0) { return RspGot { .r = r, .got = false, .m = FrameDone }; }
+    List(Int) got = resid_disp_recv(r.fd, 65536);
+    if (got.len() == 0) { return RspGot { .r = dead(r, "rsp: the shell closed the connection"), .got = false, .m = FrameDone }; }
+    return next_msg(with_buf(r, r.buf.concat(got)), 0);
+}
+
+/// Greet the shell over a connected socket and open the window: `Hello`,
+/// then `Welcome`; `Window`, then `Configure`; then two buffers attached.
+/// Five seconds without an answer is a dead shell.
+@requires(display)
+pub Rsp rsp_start_on(Int fd, WindowOptions opts) {
+    Rsp r0 = Rsp { .fd = fd, .alive = true, .err = "", .buf = [],
+                   .win = RspWin { .w = 0, .h = 0, .scale = 1, .theme = 0, .platform = 0, .shell = "" },
+                   .bufs = bufs_none(), .frame_ok = false, .sem = [], .sent = 0 };
+    Rsp r1 = send(r0, [Hello(rsp_version(), "dev.resid.app")]);
+    RspGot w = next_msg(r1, 5000);
+    if (!w.got) { return closed(w.r, "rsp: the shell did not welcome the core"); }
+    Rsp r2 = match (w.m) {
+        Welcome(v, p, name) => if (v == rsp_version()) {
+            with_win(w.r, RspWin { .w = 0, .h = 0, .scale = 1, .theme = 0, .platform = p, .shell = name })
+        } else { dead(w.r, f"rsp: the shell speaks version {v}, the core {rsp_version()}") },
+        _ => dead(w.r, "rsp: the shell's first message was not Welcome")
+    };
+    Rsp r3 = send(r2, [Window(opts.title, max1(opts.width), max1(opts.height), if (opts.resizable) { 1 } else { 0 }, 0, 0)]);
+    RspGot c = next_msg(r3, 5000);
+    if (!c.got) { return closed(c.r, "rsp: the shell did not configure the window"); }
+    Rsp r4 = match (c.m) {
+        Configure(cw, ch, cs, t, rt, bt, lt, th) => configure(c.r, cw, ch, cs, th),
+        _ => dead(c.r, "rsp: the shell's answer to Window was not Configure")
+    };
+    if (!r4.alive) { return closed(r4, r4.err); }
+    return with_frame(r4, true);
+}
+
+@requires(display)
+Rsp closed(Rsp r, Str why) {
+    _ = if (r.fd >= 0) { resid_disp_close(r.fd) } else { false };
+    return rsp_failed(if (str_len(r.err) > 0) { r.err } else { why });
+}
+
+Int max1(Int v) { return if (v < 1) { 1 } else { v }; }
+
+/// Take a configuration: refuse impossible sizes, and when the size or
+/// scale changed, detach the old buffers and attach two new ones.
+@requires(display)
+Rsp configure(Rsp r, Int w, Int h, Int scale, Int theme) {
+    if (w < 1 || h < 1 || w > rsp_max_side() || h > rsp_max_side() || w * h > rsp_max_pixels()) {
+        return dead(r, f"rsp: the shell configured an impossible size {w}x{h}");
+    }
+    if (scale < 1 || scale > 8) { return dead(r, f"rsp: the shell configured an impossible scale {scale}"); }
+    RspWin win = RspWin { .w = w, .h = h, .scale = scale, .theme = theme, .platform = r.win.platform, .shell = r.win.shell };
+    if (w == r.win.w && h == r.win.h && scale == r.win.scale && r.bufs.h0 != 0) { return with_win(r, win); }
+    return attach(with_win(free_bufs(r), win));
+}
+
+@requires(display)
+Rsp free_bufs(Rsp r) {
+    if (r.bufs.h0 == 0) { return r; }
+    Int g = r.bufs.gen;
+    Rsp r2 = send(r, [Detach(2 * g), Detach(2 * g + 1)]);
+    _ = resid_disp_shm_free(r.bufs.h0);
+    _ = resid_disp_shm_free(r.bufs.h1);
+    return with_bufs(r2, RspBufs { .h0 = 0, .h1 = 0, .s0 = slot_new(0, 0, 0), .s1 = slot_new(0, 0, 0), .gen = g + 1 });
+}
+
+@requires(display)
+Rsp attach(Rsp r) {
+    Int w = r.win.w;
+    Int h = r.win.h;
+    Int h0 = resid_disp_shm_new(w * h * 4);
+    Int h1 = if (h0 == 0) { 0 } else { resid_disp_shm_new(w * h * 4) };
+    if (h0 == 0 || h1 == 0) {
+        _ = if (h0 != 0) { resid_disp_shm_free(h0) } else { false };
+        return dead(r, "rsp: no memory for the window's buffers");
+    }
+    Int g = r.bufs.gen;
+    Bool ok = r.alive && resid_disp_send(r.fd, to_shell_bytes(Attach(2 * g, w, h, w * 4)), resid_disp_shm_fd(h0))
+                      && resid_disp_send(r.fd, to_shell_bytes(Attach(2 * g + 1, w, h, w * 4)), resid_disp_shm_fd(h1));
+    Rsp r2 = with_bufs(r, RspBufs { .h0 = h0, .h1 = h1, .s0 = slot_new(h0, w, h), .s1 = slot_new(h1, w, h), .gen = g });
+    return if (ok) { r2 } else { dead(r2, "rsp: could not hand the buffers to the shell") };
+}
+
+// ─── Running ───────────────────────────────────────────────────────
+
+type RspStep = { Rsp r; List(Event) events; };
+
+/// Wait up to `ms` for the shell, then decode every whole message.
+@requires(display)
+pub Pumped(Rsp) rsp_pump(Rsp r, Int ms) {
+    if (!r.alive) { return Pumped { .b = r, .events = [] }; }
+    RspStep s = drain(r, ms, []);
+    return Pumped { .b = s.r, .events = s.events };
+}
+
+@requires(display)
+RspStep drain(Rsp r, Int ms, List(Event) acc) {
+    RspGot g = next_msg(r, ms);
+    if (!g.r.alive) { return RspStep { .r = g.r, .events = acc.concat([Closed]) }; }
+    if (!g.got) { return RspStep { .r = g.r, .events = acc }; }
+    RspStep s = dispatch(g.r, g.m);
+    return drain(s.r, 0, acc.concat(s.events));
+}
+
+RspStep quiet(Rsp r) { return RspStep { .r = r, .events = [] }; }
+
+/// Scroll distance in device pixels as wheel notches: one notch per 24
+/// logical pixels, and at least one for any movement.
+pub Int notches(Int d, Int scale) {
+    if (d == 0) { return 0; }
+    Int n = d / (24 * scale);
+    if (n == 0) { return if (d > 0) { 1 } else { -1 }; }
+    return n;
+}
+
+/// One message from the shell, as events.
+@requires(display)
+RspStep dispatch(Rsp r, FromShell m) {
+    return match (m) {
+        Configure(w, h, s, t, rt, b, l, th) => resized(r, configure(r, w, h, s, th)),
+        FrameDone => quiet(with_frame(r, true)),
+        Release(id) => quiet(released(r, id)),
+        Pointer(kind, x, y, button, pid, dev, pr) => RspStep { .r = r, .events = pointer(kind, x, y, button) },
+        ScrollBy(dx, dy, phase) => RspStep { .r = r, .events = [Wheel(notches(dx, r.win.scale), notches(dy, r.win.scale))] },
+        Key(code, down, mods) => RspStep { .r = r, .events = [if (down != 0) { KeyDown(code, "") } else { KeyUp(code) }] },
+        TextCommit(t) => RspStep { .r = r, .events = if (str_len(t) > 0) { [KeyDown(0, t)] } else { [] } },
+        Lifecycle(state) => RspStep { .r = r, .events = lifecycle(state) },
+        A11yAction(node, act) => RspStep { .r = r, .events = [Assist(node, act)] },
+        Welcome(v, p, n) => quiet(dead(r, "rsp: Welcome after the session started")),
+        _ => quiet(r)
+    };
+}
+
+RspStep resized(Rsp before, Rsp after) {
+    Bool changed = after.win.w != before.win.w || after.win.h != before.win.h;
+    return RspStep { .r = after, .events = if (changed && after.alive) { [Resized(after.win.w, after.win.h)] } else { [] } };
+}
+
+List(Event) pointer(Int kind, Int x, Int y, Int button) {
+    if (kind == ptr_move()) { return [PointerMoved(x, y)]; }
+    if (kind == ptr_down()) { return [PointerDown(x, y, button)]; }
+    if (kind == ptr_up()) { return [PointerUp(x, y, button)]; }
+    return [];
+}
+
+List(Event) lifecycle(Int state) {
+    if (state == life_close_requested()) { return [Closed]; }
+    if (state == life_visible()) { return [Focused]; }
+    if (state == life_hidden()) { return [Blurred]; }
+    return [];
+}
+
+/// The shell let a buffer go; one from an older generation is ignored.
+Rsp released(Rsp r, Int id) {
+    RspBufs b = r.bufs;
+    if (id == 2 * b.gen) { return with_bufs(r, RspBufs { .h0 = b.h0, .h1 = b.h1, .s0 = slot_released(b.s0), .s1 = b.s1, .gen = b.gen }); }
+    if (id == 2 * b.gen + 1) { return with_bufs(r, RspBufs { .h0 = b.h0, .h1 = b.h1, .s0 = b.s0, .s1 = slot_released(b.s1), .gen = b.gen }); }
+    return r;
+}
+
+pub Bool rsp_ready(Rsp r) {
+    return r.alive && r.frame_ok && r.bufs.h0 != 0 && (!r.bufs.s0.busy || !r.bufs.s1.busy);
+}
+
+/// Draw the damaged rectangles into a free buffer and present it.
+@requires(display)
+pub Rsp rsp_present(Rsp r, Frame fr, List(Rect) damage) {
+    if (!rsp_ready(r)) { return r; }
+    RspBufs b = r.bufs;
+    Bool first = !b.s0.busy;
+    Slot s = if (first) { b.s0 } else { b.s1 };
+    List(Rect) rs = slot_need(s, damage, Rect { .x = 0, .y = 0, .w = r.win.w, .h = r.win.h });
+    if (rs.len() == 0) { return r; }
+    _ = slot_paint(s, r.win.w, fr, rs);
+    Int id = if (first) { 2 * b.gen } else { 2 * b.gen + 1 };
+    Rsp r2 = send(r, [Present(id, rs)]);
+    Slot sent = slot_sent(s);
+    return with_frame(with_bufs(r2, RspBufs { .h0 = b.h0, .h1 = b.h1,
+                                              .s0 = if (first) { sent } else { slot_dirty(b.s0, rs) },
+                                              .s1 = if (first) { slot_dirty(b.s1, rs) } else { sent }, .gen = b.gen }), false);
+}
+
+/// Send what changed in the semantics tree, atomically, scaled to device
+/// pixels; nothing when nothing changed.
+@requires(display)
+pub Rsp rsp_semantics(Rsp r, List(SemNode) nodes) {
+    if (!r.alive) { return r; }
+    List(SemNode) dev = to_device(nodes, r.win.scale, 0, ListBuf());
+    SemDiff d = sem_diff(r.sem, dev);
+    if (d.put.len() == 0 && d.removed.len() == 0) { return r; }
+    List(ToShell) ms = puts(d.put, 0, ListBuf()).concat(removes(d.removed, 0, ListBuf())).concat([SemCommit]);
+    return with_sem(send(r, ms), dev);
+}
+
+List(SemNode) to_device(List(SemNode) ns, Int s, Int i, ListBuf(SemNode) acc) {
+    if (i >= ns.len()) { return acc.finish(); }
+    SemNode n = ns[i];
+    Rect b = n.bounds;
+    return to_device(ns, s, i + 1, acc.push(SemNode { .id = n.id, .parent = n.parent, .role = n.role, .flags = n.flags,
+        .bounds = Rect { .x = b.x * s, .y = b.y * s, .w = b.w * s, .h = b.h * s }, .actions = n.actions, .label = n.label, .value = n.value }));
+}
+
+List(ToShell) puts(List(SemNode) ns, Int i, ListBuf(ToShell) acc) {
+    if (i >= ns.len()) { return acc.finish(); }
+    return puts(ns, i + 1, acc.push(SemPut(ns[i])));
+}
+
+List(ToShell) removes(List(Int) ids, Int i, ListBuf(ToShell) acc) {
+    if (i >= ids.len()) { return acc.finish(); }
+    return removes(ids, i + 1, acc.push(SemRemove(ids[i])));
+}
+
+/// Say goodbye, free the buffers and close the connection.
+@requires(display)
+pub Bool rsp_close(Rsp r) {
+    if (r.fd < 0) { return false; }
+    Rsp r2 = send(free_bufs(r), [Bye]);
+    return resid_disp_close(r2.fd);
+}
+
+pub Bool rsp_alive(Rsp r) { return r.alive; }
+/// The theme bits of the shell's last `Configure`: dark, reduced motion,
+/// high contrast, as the platform reports them.
+pub Int rsp_hints(Rsp r) { return r.win.theme; }
+pub Int rsp_width(Rsp r) { return r.win.w; }
+pub Int rsp_height(Rsp r) { return r.win.h; }
+pub Int rsp_scale(Rsp r) { return r.win.scale; }
+
+Backend(Rsp) = {
+    .be_pump = rsp_pump, .be_alive = rsp_alive, .be_width = rsp_width, .be_height = rsp_height,
+    .be_scale = rsp_scale, .be_ready = rsp_ready, .be_present = rsp_present, .be_close = rsp_close,
+    .be_semantics = rsp_semantics, .be_hints = rsp_hints
+};
+
+test "scrolling becomes notches, at least one for any movement" {
+    expect(notches(0, 1)).toEqual(0);
+    expect(notches(5, 1)).toEqual(1);
+    expect(notches(-5, 2)).toEqual(-1);
+    expect(notches(96, 2)).toEqual(2);
+}
+
+test "pointer kinds and lifecycle states map to events" {
+    Bool down = match (pointer(ptr_down(), 3, 4, 1)[0]) { PointerDown(x, y, b) => x == 3 && y == 4 && b == 1, _ => false };
+    expect(down).toEqual(true);
+    expect(pointer(ptr_leave(), 0, 0, 0).len()).toEqual(0);
+    Bool close = match (lifecycle(life_close_requested())[0]) { Closed => true, _ => false };
+    expect(close).toEqual(true);
+}
+
+test "a late release of an older buffer frees nothing" {
+    Rsp r = with_bufs(rsp_failed(""), RspBufs { .h0 = 1, .h1 = 2, .s0 = slot_sent(slot_new(1, 4, 4)), .s1 = slot_new(2, 4, 4), .gen = 3 });
+    expect(released(r, 0).bufs.s0.busy).toEqual(true);
+    expect(released(r, 6).bufs.s0.busy).toEqual(false);
+}

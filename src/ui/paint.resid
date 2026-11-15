@@ -11,14 +11,16 @@ import "../gfx/draw.resid";
 import "../gfx/font.resid";
 import "layout.resid";
 import "state.resid";
+import "theme.resid";
 
-pub Color ink() { return rgb(20, 20, 20); }
-pub Color face() { return rgb(225, 225, 225); }
-pub Color face_down() { return rgb(190, 190, 190); }
-pub Color edge() { return rgb(150, 150, 150); }
-pub Color accent() { return rgb(60, 120, 220); }
-pub Color paper() { return rgb(255, 255, 255); }
-pub Color selection() { return rgb(180, 205, 245); }
+// The colours painting uses, from the theme (theme.resid).
+pub Color ink() { return theme().ink; }
+pub Color face() { return theme().surface; }
+pub Color face_down() { return theme().surface_down; }
+pub Color edge() { return theme().rule_strong; }
+pub Color accent() { return theme().accent; }
+pub Color paper() { return theme().surface; }
+pub Color selection() { return theme().selection; }
 
 /// What painting a subtree produced, and the number of the next widget.
 type Painted = { List(DrawOp) ops; Int next; };
@@ -27,18 +29,31 @@ type Painted = { List(DrawOp) ops; Int next; };
 pub List(DrawOp) paint(Widget w, Rect r, UiState ui) { return paint_in(w, r, ui, font_builtin()); }
 
 /// The display list for `w` occupying `r`, with text in font `f`.
-pub List(DrawOp) paint_in(Widget w, Rect r, UiState ui, Font f) { return paint_node(w, r, ui, 0, f).ops; }
+pub List(DrawOp) paint_in(Widget w, Rect r, UiState ui, Font f) { return paint_with(w, r, ui, f, theme()); }
+
+/// The display list for `w` occupying `r` in theme `t`. When the theme's
+/// ground is not the rasterizer's background, the box is filled with it
+/// first.
+pub List(DrawOp) paint_with(Widget w, Rect r, UiState ui, Font f, Theme t) {
+    List(DrawOp) ground = if (color_eq(t.ground, background_of_light())) { [] } else { [OpFill(r, t.ground)] };
+    return ground.concat(paint_node(w, r, ui, 0, f, t).ops);
+}
+
+/// The ground the rasterizer clears to (gfx/raster.resid `background`).
+Color background_of_light() { return rgb(245, 246, 247); }
 
 /// `paint` with no focus and nothing pressed.
 pub List(DrawOp) paint_widget(Widget w, Rect r) { return paint(w, r, ui_new()); }
 
-Painted paint_node(Widget w, Rect r, UiState ui, Int id, Font f) {
-    Painted rows = match (w) { Rows(o, rh, xs) => paint_rows(o, rh, xs, r, ui, id, f), _ => Painted { .ops = [], .next = -1 } };
+Painted paint_node(Widget w, Rect r, UiState ui, Int id, Font f, Theme t) {
+    Painted themed = match (w) { Themed(spec, c) => paint_themed(spec, c, r, ui, id, f, t), _ => Painted { .ops = [], .next = -1 } };
+    if (themed.next >= 0) { return themed; }
+    Painted rows = match (w) { Rows(o, rh, xs) => paint_rows(o, rh, xs, r, ui, id, f, t), _ => Painted { .ops = [], .next = -1 } };
     if (rows.next >= 0) { return rows; }
-    List(DrawOp) own = paint_self(w, r, ui, id, f);
+    List(DrawOp) own = paint_self(w, r, ui, id, f, t);
     List(Widget) kids = children(w);
     if (kids.len() == 0) { return Painted { .ops = own, .next = id + 1 }; }
-    Painted inner = paint_kids(kids, child_rects_in(w, r, f), ui, 0, id + 1, [], f);
+    Painted inner = paint_kids(kids, child_rects_in(w, r, f), ui, 0, id + 1, [], f, t);
     List(DrawOp) body = match (w) {
         Scroll(o, c) => [OpClipPush(r)].concat(inner.ops).concat([OpClipPop]),
         _ => inner.ops
@@ -46,19 +61,28 @@ Painted paint_node(Widget w, Rect r, UiState ui, Int id, Font f) {
     return Painted { .ops = own.concat(body), .next = inner.next };
 }
 
+/// A `Themed` subtree: its child painted in the theme its spec derives
+/// under the same platform hints, on that theme's ground when it differs.
+Painted paint_themed(ThemeSpec spec, Widget c, Rect r, UiState ui, Int id, Font f, Theme t) {
+    Theme inner = theme_from(spec, t.hints);
+    Painted p = paint_node(c, r, ui, id + 1, f, inner);
+    List(DrawOp) ground = if (color_eq(inner.ground, t.ground)) { [] } else { [OpFill(r, inner.ground)] };
+    return Painted { .ops = ground.concat(p.ops), .next = p.next };
+}
+
 /// A `Rows`: only the rows in view are painted; the others only count
 /// towards the numbers of the widgets after them.
-Painted paint_rows(Int o, Int rh, List(Widget) xs, Rect r, UiState ui, Int id, Font f) {
+Painted paint_rows(Int o, Int rh, List(Widget) xs, Rect r, UiState ui, Int id, Font f, Theme t) {
     RowSpan v = rows_in_view(r, o, rh, xs.len());
     Int first_id = id + 1 + count_nodes(xs, 0, v.first, 0);
-    Painted inner = paint_row_range(xs, r, o, rh, v.first, v.last, ui, first_id, [], f);
+    Painted inner = paint_row_range(xs, r, o, rh, v.first, v.last, ui, first_id, [], f, t);
     return Painted { .ops = [OpClipPush(r)].concat(inner.ops).concat([OpClipPop]), .next = inner.next + count_nodes(xs, v.last, xs.len(), 0) };
 }
 
-Painted paint_row_range(List(Widget) xs, Rect r, Int o, Int rh, Int i, Int end, UiState ui, Int id, List(DrawOp) acc, Font f) {
+Painted paint_row_range(List(Widget) xs, Rect r, Int o, Int rh, Int i, Int end, UiState ui, Int id, List(DrawOp) acc, Font f, Theme t) {
     if (i >= end) { return Painted { .ops = acc, .next = id }; }
-    Painted p = paint_node(xs[i], row_rect(r, o, rh, i), ui, id, f);
-    return paint_row_range(xs, r, o, rh, i + 1, end, ui, p.next, acc.concat(p.ops), f);
+    Painted p = paint_node(xs[i], row_rect(r, o, rh, i), ui, id, f, t);
+    return paint_row_range(xs, r, o, rh, i + 1, end, ui, p.next, acc.concat(p.ops), f, t);
 }
 
 /// The widgets in `xs[i]` to `xs[end - 1]`, nested ones included.
@@ -67,37 +91,53 @@ pub Int count_nodes(List(Widget) xs, Int i, Int end, Int acc) {
     return count_nodes(xs, i + 1, end, acc + node_count(xs[i]));
 }
 
-Painted paint_kids(List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, List(DrawOp) acc, Font f) {
+Painted paint_kids(List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, List(DrawOp) acc, Font f, Theme t) {
     if (i >= xs.len() || i >= rs.len()) { return Painted { .ops = acc, .next = id }; }
-    Painted p = paint_node(xs[i], rs[i], ui, id, f);
-    return paint_kids(xs, rs, ui, i + 1, p.next, acc.concat(p.ops), f);
+    Painted p = paint_node(xs[i], rs[i], ui, id, f, t);
+    return paint_kids(xs, rs, ui, i + 1, p.next, acc.concat(p.ops), f, t);
 }
 
 /// Text centred vertically in `r`, `dx` pixels in from its left edge.
 DrawOp label(Rect r, Int dx, Str s, Color c, Font f) { return OpText(r.x + dx, r.y + (r.h - text_height_in(f)) / 2, s, c); }
 
-/// A one-pixel frame of colour `e` around a fill of colour `f`.
-List(DrawOp) framed(Rect r, Color e, Color f) {
-    return [OpFill(r, e), OpFill(Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 }, f)];
+/// A one-pixel frame of colour `e` around a fill of colour `f`, with
+/// corners of radius `rad`: the outer shape, then the inner one inset by a
+/// pixel with a radius a pixel smaller.
+List(DrawOp) framed_round(Rect r, Int rad, Color e, Color f) {
+    return [OpRound(r, rad, e), OpRound(Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 }, max_int(rad - 1, 0), f)];
 }
 
-List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id, Font f) {
+/// `framed_round` with the theme's control radius.
+List(DrawOp) framed(Rect r, Color e, Color f) { return framed_round(r, theme().radius, e, f); }
+
+List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id, Font f, Theme t) {
     return match (w) {
-        Text(s) => [label(r, 4, s, ink(), f)],
-        Button(s, m) => framed(r, edge(), if (ui.pressed == id) { face_down() } else { face() }).concat([label(r, (r.w - text_width_in(f, s)) / 2, s, ink(), f)]),
-        Checkbox(s, on, m) => paint_check(r, s, on, ui.pressed == id, f),
-        TextInput(s, caret, m) => paint_input(r, s, caret, ui.focus == id, ui.caret_on, if (ui.focus == id) { ui.anchor } else { -1 }, f),
-        Slider(v, m) => paint_slider(r, v),
+        Text(s) => [label(r, 4, s, t.ink, f)],
+        Button(s, m) => framed_round(r, t.radius, t.rule_strong, if (ui.pressed == id) { t.surface_down } else { t.surface }).concat([label(r, (r.w - text_width_in(f, s)) / 2, s, t.ink, f)]),
+        Checkbox(s, on, m) => paint_check(r, s, on, ui.pressed == id, f, t),
+        TextInput(s, caret, m) => paint_input(r, s, caret, ui.focus == id, ui.caret_on, if (ui.focus == id) { ui.anchor } else { -1 }, f, t),
+        Slider(v, m) => paint_slider(r, v, t),
         Bitmap(bw, bh, px) => [OpImage(r.x, r.y, bw, bh, px)],
         _ => []
     };
 }
 
-List(DrawOp) paint_check(Rect r, Str s, Bool on, Bool down, Font f) {
+List(DrawOp) paint_check(Rect r, Str s, Bool on, Bool down, Font f, Theme t) {
     Rect b = Rect { .x = r.x + 4, .y = r.y + (r.h - 16) / 2, .w = 16, .h = 16 };
-    List(DrawOp) box = framed(b, if (down) { accent() } else { edge() }, paper());
-    List(DrawOp) mark = if (on) { [OpFill(Rect { .x = b.x + 4, .y = b.y + 4, .w = 8, .h = 8 }, accent())] } else { [] };
-    return box.concat(mark).concat([label(r, 26, s, ink(), f)]);
+    List(DrawOp) box = if (on) { [OpRound(b, t.small_radius, if (down) { t.ink } else { t.accent })].concat(check_mark(b.x, b.y, t.accent_ink)) }
+                       else { framed_round(b, t.small_radius, if (down) { t.accent } else { t.rule_strong }, t.surface) };
+    return box.concat([label(r, 26, s, t.ink, f)]);
+}
+
+/// A tick in a 16-pixel box: two strokes of 2-pixel dots, down from the
+/// left to the bottom, then up to the right.
+List(DrawOp) check_mark(Int x, Int y, Color c) {
+    return dots(x + 3, y + 8, 1, 1, 4, c, ListBuf()).concat(dots(x + 6, y + 11, 1, -1, 7, c, ListBuf()));
+}
+
+List(DrawOp) dots(Int x, Int y, Int dx, Int dy, Int n, Color c, ListBuf(DrawOp) acc) {
+    if (n <= 0) { return acc.finish(); }
+    return dots(x + dx, y + dy, dx, dy, n - 1, c, acc.push(OpRound(Rect { .x = x, .y = y, .w = 2, .h = 2 }, 1, c)));
 }
 
 /// How far an input's text is shifted left so the caret, `caret_x`
@@ -107,18 +147,18 @@ pub Int input_scroll(Int caret_x, Int inner_w) { Int room = max_int(inner_w - 8,
 /// The caret's offset into the text of an input, in logical pixels.
 pub Int caret_offset(Str s, Int caret, Font f) { return text_width_in(f, str_slice(s, 0, clamp_int(caret, 0, str_len(s)))); }
 
-List(DrawOp) paint_input(Rect r, Str s, Int caret0, Bool focused, Bool caret_on, Int anchor, Font f) {
+List(DrawOp) paint_input(Rect r, Str s, Int caret0, Bool focused, Bool caret_on, Int anchor, Font f, Theme t) {
     Rect inner = Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 };
     Int cx = caret_offset(s, caret0, f);
     Int tx = inner.x + 4 - input_scroll(cx, inner.w);
     Int th = text_height_in(f);
     Int ty = r.y + (r.h - th) / 2;
-    List(DrawOp) caret_op = if (focused && caret_on) { [OpFill(Rect { .x = tx + cx, .y = ty, .w = 1, .h = th }, ink())] } else { [] };
+    List(DrawOp) caret_op = if (focused && caret_on) { [OpFill(Rect { .x = tx + cx, .y = ty, .w = 1, .h = th }, t.ink)] } else { [] };
     // The selection, from the anchor to the caret, is shaded under the text.
     Int ax = if (anchor >= 0) { caret_offset(s, anchor, f) } else { cx };
-    List(DrawOp) sel_op = if (ax != cx) { [OpFill(Rect { .x = tx + min_int(ax, cx), .y = ty, .w = max_int(ax, cx) - min_int(ax, cx), .h = th }, selection())] } else { [] };
-    return framed(r, if (focused) { accent() } else { edge() }, paper())
-        .concat([OpClipPush(inner)]).concat(sel_op).concat([OpText(tx, ty, s, ink())])
+    List(DrawOp) sel_op = if (ax != cx) { [OpFill(Rect { .x = tx + min_int(ax, cx), .y = ty, .w = max_int(ax, cx) - min_int(ax, cx), .h = th }, t.selection)] } else { [] };
+    return framed_round(r, t.radius, if (focused) { t.accent } else { t.rule_strong }, t.surface)
+        .concat([OpClipPush(inner)]).concat(sel_op).concat([OpText(tx, ty, s, t.ink)])
         .concat(caret_op)
         .concat([OpClipPop]);
 }
@@ -130,15 +170,15 @@ pub Int slider_value_at(Rect r, Int x) {
     return clamp_int(((x - r.x - 6) * 100) / track, 0, 100);
 }
 
-List(DrawOp) paint_slider(Rect r, Int v0) {
+List(DrawOp) paint_slider(Rect r, Int v0, Theme t) {
     Int v = clamp_int(v0, 0, 100);
     Int track = max_int(r.w - 12, 0);
     Int cy = r.y + r.h / 2;
     Int kx = r.x + (track * v) / 100;
     return [
-        OpFill(Rect { .x = r.x + 6, .y = cy - 2, .w = track, .h = 4 }, edge()),
-        OpFill(Rect { .x = r.x + 6, .y = cy - 2, .w = (track * v) / 100, .h = 4 }, accent())
-    ].concat(framed(Rect { .x = kx, .y = cy - 8, .w = 12, .h = 16 }, edge(), face()));
+        OpRound(Rect { .x = r.x + 6, .y = cy - 2, .w = track, .h = 4 }, 2, t.rule),
+        OpRound(Rect { .x = r.x + 6, .y = cy - 2, .w = (track * v) / 100, .h = 4 }, 2, t.accent)
+    ].concat(framed_round(Rect { .x = kx, .y = cy - 7, .w = 14, .h = 14 }, 7, t.rule_strong, t.surface));
 }
 
 test "a button paints a frame and a centred label" {
@@ -196,4 +236,29 @@ test "a selection is shaded under the text" {
     // frame, fill, clip, selection, text, caret, pop
     expect(ops.len()).toEqual(7);
     expect(draw_op_eq(ops[3], OpFill(Rect { .x = 5 + 8, .y = 6, .w = 16, .h = 16 }, selection()))).toEqual(true);
+}
+
+test "a themed subtree paints in its own theme, on its own ground" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 60, .h = 28 };
+    ThemeSpec green = with_accent(theme_default(), rgb(31, 122, 90));
+    List(DrawOp) ops = paint(Themed(with_mode(green, Dark), Checkbox("x", true, Clicked)), r, ui_new());
+    Theme t = theme_from(with_mode(green, Dark), 0);
+    // the dark ground behind the subtree, then the checked box in the accent
+    expect(draw_op_eq(ops[0], OpFill(r, t.ground))).toEqual(true);
+    Bool box = match (ops[1]) { OpRound(b, rad, c) => color_eq(c, t.accent), _ => false };
+    expect(box).toEqual(true);
+}
+
+test "the platform's dark hint reaches painting through paint_with" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 40, .h = 28 };
+    Theme dark = theme_from(theme_default(), hint_dark());
+    List(DrawOp) ops = paint_with(Text("hi"), r, ui_new(), font_builtin(), dark);
+    expect(draw_op_eq(ops[0], OpFill(r, dark.ground))).toEqual(true);
+    expect(draw_op_eq(ops[1], OpText(4, 6, "hi", dark.ink))).toEqual(true);
+}
+
+test "a themed widget is a node, and lays out as its child" {
+    Widget w = Column([Themed(theme_default(), Button("a", Clicked)), Button("b", Clicked)]);
+    expect(node_count(w)).toEqual(4);
+    expect(pref_size(Themed(theme_default(), Button("a", Clicked))).h).toEqual(pref_size(Button("a", Clicked)).h);
 }

@@ -36,6 +36,9 @@ import "ui/damage.resid";
 import "ui/input.resid";
 import "ui/state.resid";
 import "ui/timer.resid";
+import "ui/semantics.resid";
+import "ui/theme.resid";
+import "rsp/client.resid";
 
 /// The caret blinks, and `FrameTick` arrives, this often.
 pub Int blink_ms() { return 500; }
@@ -48,6 +51,7 @@ type Loop(M) = {
     List(DrawOp) ops; Int w; Int h; Int scale;
     List(Rect) pending; Timer blink; Bool done;
     List(Font) fonts; Font font;
+    Bool rec; List(Event) log;
 };
 
 /// The font to draw at `scale`: the atlas made for that scale, else one
@@ -92,6 +96,13 @@ pub Int gui_run_with(WindowOptions opts, List(Font) fonts) {
 @needs(App(M))
 @requires(display, clock(readonly))
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts) {
+    Int rfd = resid_disp_connect_rsp();
+    if (rfd >= 0) {
+        Rsp r = rsp_start_on(rfd, opts);
+        if (r.alive) { return gui_run_on(r, m0, fonts); }
+        eprintln(r.err);
+        return 1;
+    }
     Wl w = wl_start(opts);
     if (w.alive) { return gui_run_on(w, m0, fonts); }
     Bool wl_tried = str_len(w.err) > 0;
@@ -100,6 +111,27 @@ pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts) {
     if (wl_tried) { eprintln(w.err); }
     eprintln(if (str_len(x.err) > 0) { x.err } else { "resid-gui: no display" });
     return 1;
+}
+
+/// `gui_run_model`, recording: on whichever display opens (a host shell,
+/// Wayland, X11), with the events `update` saw kept. `opened` is false
+/// when no display could be opened.
+@needs(App(M))
+@requires(display, clock(readonly))
+pub Recorded(M) gui_run_model_recorded(WindowOptions opts, M m0, List(Font) fonts) {
+    Int rfd = resid_disp_connect_rsp();
+    if (rfd >= 0) {
+        Rsp r = rsp_start_on(rfd, opts);
+        if (r.alive) { return gui_run_recorded(r, m0, fonts); }
+        eprintln(r.err);
+        return Recorded { .opened = false, .model = m0, .log = [] };
+    }
+    Wl w = wl_start(opts);
+    if (w.alive) { return gui_run_recorded(w, m0, fonts); }
+    X11 x = x11_start(opts);
+    if (x.alive) { return gui_run_recorded(x, m0, fonts); }
+    eprintln(if (str_len(x.err) > 0) { x.err } else { "resid-gui: no display" });
+    return Recorded { .opened = false, .model = m0, .log = [] };
 }
 
 /// `gui_run` over X11 only, for testing the X11 backend on a Wayland
@@ -123,7 +155,7 @@ pub Int gui_run_on(B b, M m0, List(Font) fonts) {
     Loop(M) st = Loop {
         .model = m0, .ui = ui_new(), .view = v0, .ops = [], .w = 0, .h = 0, .scale = 0,
         .pending = [], .blink = timer_start(0, blink_ms(), now_ms()), .done = false,
-        .fonts = fonts, .font = pick_font(fonts, be_scale(b))
+        .fonts = fonts, .font = pick_font(fonts, be_scale(b)), .rec = false, .log = []
     };
     return gui_loop(b, st);
 }
@@ -131,19 +163,47 @@ pub Int gui_run_on(B b, M m0, List(Font) fonts) {
 @needs(App(M), Backend(B))
 @requires(display, clock(readonly))
 Int gui_loop(B b, Loop(M) st0) {
+    Loop(M) end = run_loop(b, st0);
+    return 0;
+}
+
+/// What a recorded run leaves: the last model, and every event `update`
+/// saw, in order (`Closed` and the caret's `FrameTick`s left out), for
+/// src/dev/timeline.resid.
+pub type Recorded(M) = { Bool opened; M model; List(Event) log; };
+
+/// `gui_run_on`, keeping the events `update` saw.
+@needs(App(M), Backend(B))
+@requires(display, clock(readonly))
+pub Recorded(M) gui_run_recorded(B b, M m0, List(Font) fonts) {
+    Widget v0 = view(m0);
+    Loop(M) st = Loop {
+        .model = m0, .ui = ui_new(), .view = v0, .ops = [], .w = 0, .h = 0, .scale = 0,
+        .pending = [], .blink = timer_start(0, blink_ms(), now_ms()), .done = false,
+        .fonts = fonts, .font = pick_font(fonts, be_scale(b)), .rec = true, .log = []
+    };
+    Loop(M) end = run_loop(b, st);
+    return Recorded { .opened = true, .model = end.model, .log = end.log };
+}
+
+@needs(App(M), Backend(B))
+@requires(display, clock(readonly))
+Loop(M) run_loop(B b, Loop(M) st0) {
     if (st0.done || !be_alive(b)) {
         _ = be_close(b);
-        return 0;
+        return st0;
     }
     Loop(M) st = render(b, st0);
-    Bool show = st.pending.len() > 0 && be_ready(b);
-    B b2 = if (show) { be_present(b, Frame { .ops = st.ops, .scale = st.scale, .font = st.font }, st.pending) } else { b };
+    Int s = be_scale(b);
+    B bs = be_semantics(b, semantics_in(st.view, Rect { .x = 0, .y = 0, .w = be_width(b) / s, .h = be_height(b) / s }, st.ui, st.font));
+    Bool show = st.pending.len() > 0 && be_ready(bs);
+    B b2 = if (show) { be_present(bs, Frame { .ops = st.ops, .scale = st.scale, .font = st.font }, st.pending) } else { bs };
     Loop(M) st2 = if (show) { with_pending(st, []) } else { st };
     Int wait = timer_wait(st2.blink, now_ms());
     Pumped(B) p = be_pump(b2, if (wait < 0) { 1000 } else { wait });
     Loop(M) st3 = fold_events(p.events, 0, st2, be_scale(p.b), be_width(p.b), be_height(p.b));
     Loop(M) st4 = tick(st3, now_ms());
-    return gui_loop(p.b, st4);
+    return run_loop(p.b, st4);
 }
 
 /// Paint the current view and add what changed to the pending damage. A
@@ -154,14 +214,14 @@ Loop(M) render(B b, Loop(M) st) {
     Int h = be_height(b);
     Int s = be_scale(b);
     Font f = if (s == st.scale) { st.font } else { pick_font(st.fonts, s) };
-    List(DrawOp) ops = paint_in(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui, f);
+    List(DrawOp) ops = paint_with(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui, f, theme_from(theme_default(), be_hints(b)));
     Bool fresh = st.w != w || st.h != h || st.scale != s;
     Rect all = Rect { .x = 0, .y = 0, .w = w, .h = h };
     List(Rect) dmg = if (fresh) { [all] } else { scale_all(damage_rects_in(st.ops, ops, f), s, 0, []) };
     return Loop {
         .model = st.model, .ui = st.ui, .view = st.view, .ops = ops, .w = w, .h = h, .scale = s,
         .pending = rects_clip(if (fresh) { dmg } else { rects_merge(st.pending, dmg) }, all), .blink = st.blink, .done = st.done,
-        .fonts = st.fonts, .font = f
+        .fonts = st.fonts, .font = f, .rec = st.rec, .log = st.log
     };
 }
 
@@ -173,7 +233,7 @@ List(Rect) scale_all(List(Rect) rs, Int s, Int i, List(Rect) acc) {
 @needs(App(M))
 Loop(M) with_pending(Loop(M) st, List(Rect) p) {
     return Loop { .model = st.model, .ui = st.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-                  .pending = p, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font };
+                  .pending = p, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log };
 }
 
 /// A device-pixel event in the program's logical pixels.
@@ -196,7 +256,7 @@ Loop(M) fold_events(List(Event) es, Int i, Loop(M) st, Int s, Int w, Int h) {
     UiStep u = ui_event_in(st.ui, st.view, area, to_logical(es[i], s), st.font);
     Loop(M) next = apply(u.out, 0, Loop {
         .model = st.model, .ui = u.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-        .pending = st.pending, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font
+        .pending = st.pending, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log
     });
     return fold_events(es, i + 1, next, s, w, h);
 }
@@ -211,7 +271,8 @@ Loop(M) apply(List(Event) es, Int i, Loop(M) st) {
     Bool closed = match (es[i]) { Closed => true, _ => false };
     return apply(es, i + 1, Loop {
         .model = m, .ui = st.ui, .view = view(m), .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-        .pending = st.pending, .blink = st.blink, .done = st.done || closed, .fonts = st.fonts, .font = st.font
+        .pending = st.pending, .blink = st.blink, .done = st.done || closed, .fonts = st.fonts, .font = st.font,
+        .rec = st.rec, .log = if (st.rec && !closed) { st.log.concat([es[i]]) } else { st.log }
     });
 }
 
@@ -223,7 +284,7 @@ Loop(M) tick(Loop(M) st, Int now) {
     return Loop {
         .model = m, .ui = ui_with_caret(st.ui, !st.ui.caret_on), .view = view(m), .ops = st.ops, .w = st.w, .h = st.h,
         .scale = st.scale, .pending = st.pending, .blink = timer_reset(st.blink, now), .done = st.done,
-        .fonts = st.fonts, .font = st.font
+        .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log
     };
 }
 

@@ -306,12 +306,12 @@ Rect demo_area() { return Rect { .x = 0, .y = 0, .w = 200, .h = 200 }; }
 Bool is_msg(Event e, Msg want) { return match (e) { AppMsg(m) => msg_eq(m, want), _ => false }; }
 
 test "hit finds the control under the pointer" {
-    // Column children: Text 0-24, Button 28-56, TextInput 60-88, Slider 92-116.
+    // Column children: Text 0-24, Button 28-60, TextInput 64-96, Slider 100-124.
     expect(hit(demo(), demo_area(), 5, 5).id).toEqual(-1);
     expect(hit(demo(), demo_area(), 5, 30).id).toEqual(2);
     expect(hit(demo(), demo_area(), 5, 70).id).toEqual(3);
     expect(hit(demo(), demo_area(), 5, 100).id).toEqual(4);
-    expect(find(demo(), demo_area(), 3).r.y).toEqual(60);
+    expect(find(demo(), demo_area(), 3).r.y).toEqual(64);
     expect(inputs(demo()).len()).toEqual(2);
     expect(next_input(inputs(demo()), 3)).toEqual(5);
     expect(next_input(inputs(demo()), 5)).toEqual(3);

@@ -362,6 +362,7 @@ macOS port in `../Resid`.
 | U2 | `src/rsp/client.resid`, `Backend(Rsp)`; `gui_run` prefers a shell when `RSP_SOCKET` names one; `tools/rsp_shell.py`, a headless reference shell written from the spec alone | `tests/fake_shell.resid`: a counter driven by pointer and by screen reader through the whole loop, and a hostile shell; the compiled counter under the Python shell, frames read back from the shared buffers |
 | U3 core | `src/ui/semantics.resid` (`semantics`, `sem_diff`); `Assist(node, action)` events; `be_semantics` on every backend (a no-op on Wayland and X11 until AT-SPI) | 5 tests; the Python shell's screen-reader readout |
 | U8 part | `src/dev/timeline.resid` (event log as Resid expressions, `replay`, `models`, `test_source`); `src/dev/hot.resid` (`gui_run_dev`); `examples/dev_counter.resid` | 5 tests; three clicks, restart: count 3; rebuilt with "+1" adding 10, the same log: count 30 |
+| U5 part (visual pass) | `src/gfx/shapes.resid` (antialiased rounded fills, `OpRound`); `src/ui/theme.resid` (light and dark themes with the mockups' tokens; light in use); widgets restyled; `src/gfx/ttf.resid` + `src/gfx/fontfile.resid`, TrueType (`glyf`) rasterized in pure Resid into the native module's atlas format; `examples/tasks.resid` | shapes and TrueType unit tests; goldens regenerated and inspected; `tests/ttf_fonts.resid`: 4 installed fonts, 300 corrupted fonts never crash; the to-do example under the Python shell |
 | §5.2 part | `tools/caps_manifest.py`: macOS, Windows and Android manifests from `main`'s capabilities | self-test; reports `filesystem` as having no store entitlement |
 
 Changes in Resid (branch `ccr-dabcdde2-4pf7mc`):
@@ -382,6 +383,9 @@ Deviations from this plan, on purpose:
   needs no `Serial(M)` instance and recomputes the state with the new
   code. The cost: timers (`FrameTick`) are not logged, and a change to
   what an event means changes the restored state.
+- **TrueType in pure Resid instead of the native module.** Native
+  modules fork per call (impossible on iOS) and their committed IR needs
+  a matching LLVM. CFF outlines (`.otf`, e.g. Inter) are refused for now.
 - **U1's directory split is not done.** The seam it aims for is
   `Backend(B)`, which already exists; moving files would only churn
   imports.

@@ -11,13 +11,14 @@ import "draw.resid";
 import "text.resid";
 import "image.resid";
 import "font.resid";
+import "shapes.resid";
 
 /// A frame as a backend draws it: the display list in logical pixels,
 /// the device pixels per logical pixel, and the font its text is in.
 pub type Frame = { List(DrawOp) ops; Int scale; Font font; };
 
 /// The window background every frame starts from.
-pub Color background() { return rgb(240, 240, 240); }
+pub Color background() { return rgb(245, 246, 247); }
 
 /// Redraw `region` of `c` from `ops`: clear it to `bg`, then apply each op
 /// clipped to the region and to the clip stack in force. The ops are in
@@ -67,6 +68,7 @@ Canvas raster_ops(Canvas c, List(DrawOp) ops, Int i, List(Rect) clips, Int s, In
     Rect clip = clips[clips.len() - 1];
     return match (ops[i]) {
         OpFill(r, col) => raster_ops(fill_rect_clip(c, place(r, s, ox, oy), col, clip), ops, i + 1, clips, s, ox, oy, f),
+        OpRound(r, rad, col) => raster_ops(fill_round_clip(c, place(r, s, ox, oy), rad * s, col, clip), ops, i + 1, clips, s, ox, oy, f),
         OpText(x, y, t, col) => raster_ops(render_text_font(c, x * s - ox, y * s - oy, t, col, clip, s, f), ops, i + 1, clips, s, ox, oy, f),
         OpImage(x, y, w, h, px) => raster_ops(blit_scaled(c, Image { .w = w, .h = h, .px = px }, x * s - ox, y * s - oy, clip, s), ops, i + 1, clips, s, ox, oy, f),
         OpClipPush(r) => raster_ops(c, ops, i + 1, clips.concat([rect_intersect(clip, place(r, s, ox, oy))]), s, ox, oy, f),
@@ -90,7 +92,7 @@ test "a fill lands where it says" {
     List(Int) px = rasterize_ops(ops, 2, 2);
     expect(px.len()).toEqual(16);
     expect(px[0]).toEqual(1);
-    expect(px[4]).toEqual(240);
+    expect(px[4]).toEqual(247);
 }
 
 test "clips nest and pop" {
@@ -105,23 +107,23 @@ test "clips nest and pop" {
         OpFill(Rect { .x = 0, .y = 2, .w = 4, .h = 1 }, red)
     ];
     Canvas c = rasterize_frame(ops, 4, 4);
-    expect(pixel_at(c, 0, 0).r).toEqual(240);
+    expect(pixel_at(c, 0, 0).r).toEqual(245);
     expect(pixel_at(c, 1, 0).r).toEqual(255);
-    expect(pixel_at(c, 2, 0).r).toEqual(240);
+    expect(pixel_at(c, 2, 0).r).toEqual(245);
     expect(pixel_at(c, 0, 1).r).toEqual(255);
-    expect(pixel_at(c, 2, 1).r).toEqual(240);
+    expect(pixel_at(c, 2, 1).r).toEqual(245);
     expect(pixel_at(c, 3, 2).r).toEqual(255);
 }
 
 test "scale doubles every op" {
     Color red = rgb(255, 0, 0);
     Canvas c = raster_region_scaled(canvas_new(4, 4), [OpFill(Rect { .x = 1, .y = 1, .w = 1, .h = 1 }, red)], Rect { .x = 0, .y = 0, .w = 4, .h = 4 }, background(), 2);
-    expect(pixel_at(c, 1, 1).r).toEqual(240);
+    expect(pixel_at(c, 1, 1).r).toEqual(245);
     expect(pixel_at(c, 2, 2).r).toEqual(255);
     expect(pixel_at(c, 3, 3).r).toEqual(255);
     Canvas d = raster_region_scaled(canvas_new(4, 4), [OpImage(0, 0, 1, 1, [0, 0, 255, 255])], Rect { .x = 0, .y = 0, .w = 4, .h = 4 }, background(), 2);
     expect(pixel_at(d, 1, 1).r).toEqual(255);
-    expect(pixel_at(d, 2, 2).r).toEqual(240);
+    expect(pixel_at(d, 2, 2).r).toEqual(245);
 }
 
 test "a rectangle rasterizes on its own, at its own origin" {
@@ -132,7 +134,7 @@ test "a rectangle rasterizes on its own, at its own origin" {
     expect(pixel_at(c, 0, 0).r).toEqual(255);
     expect(pixel_at(c, 1, 1).r).toEqual(255);
     Canvas d = raster_rect(ops, Rect { .x = 0, .y = 0, .w = 2, .h = 2 }, background(), 2);
-    expect(pixel_at(d, 0, 0).r).toEqual(240);
+    expect(pixel_at(d, 0, 0).r).toEqual(245);
 }
 
 test "a region redraw leaves the rest alone" {

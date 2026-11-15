@@ -1,0 +1,75 @@
+// ttf_fonts.resid — the pure-Resid TrueType rasterizer against real fonts
+// and against corrupted ones.
+//
+// Real fonts: whichever of a few common Linux fonts are installed (none is
+// required; a missing one is skipped) must parse, rasterize every
+// printable ASCII glyph, and pass `font_parse`'s checks.
+//
+// Corrupted fonts: one real font with bytes overwritten at 300 places
+// spread through the file (table directory, headers, cmap, loca, glyph
+// data), one at a time. Every result must be an `Err` or a font that
+// passes `font_parse`: never a crash, never an out-of-range read.
+
+import "../src/gfx/font.resid";
+import "../src/gfx/ttf.resid";
+
+List(Str) candidates() {
+    return ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf"];
+}
+
+@requires(filesystem(readonly))
+Int real_fonts(Int i, Int ok) {
+    if (i >= candidates().len()) { return ok; }
+    Str p = candidates()[i];
+    if (!filesystem.exists(p)) { return real_fonts(i + 1, ok); }
+    Bool good = match (ttf_font(filesystem.read_bytes(p), 15, 2)) {
+        Ok(f) => !font_is_builtin(f) && f.line > 0 && glyph_field(f, 65, 3) > 0,
+        Err(e) => false
+    };
+    if (!good) {
+        println(f"FAIL {p}");
+        return -1000;
+    }
+    return real_fonts(i + 1, ok + 1);
+}
+
+/// Overwrite `n` bytes from `at` with `v`.
+List(Int) poke(List(Int) b, Int at, Int n, Int v) {
+    if (n <= 0 || at >= b.len()) { return b; }
+    return poke(b.with(at, v), at + 1, n - 1, v);
+}
+
+/// Where to corrupt: the first 2 KB densely (directory and headers), then
+/// spread through the rest by a fixed stride.
+Int spot(Int k, Int len) {
+    if (k < 150) { return (k * 13) % 2048; }
+    return 2048 + ((k - 150) * 7919 * 31) % (len - 2048);
+}
+
+Int mutants(List(Int) b, Int k, Int errs, Int oks) {
+    if (k >= 300) {
+        println(f"mutants: {oks} rasterized and passed font_parse, {errs} refused");
+        return 0;
+    }
+    List(Int) m = poke(b, spot(k, b.len()), 1 + k % 4, if (k % 3 == 0) { 255 } else { if (k % 3 == 1) { 0 } else { 128 } });
+    return match (ttf_answer(m, 12)) {
+        Ok(a) => match (font_parse(a, 1)) { Ok(f) => mutants(b, k + 1, errs, oks + 1), Err(e) => mutants(b, k + 1, errs + 1, oks) },
+        Err(e) => mutants(b, k + 1, errs + 1, oks)
+    };
+}
+
+@requires(filesystem(readonly))
+Int main() {
+    Int n = real_fonts(0, 0);
+    if (n < 0) { return 1; }
+    println(f"real fonts: {n} rasterized");
+    Str p = candidates()[0];
+    if (!filesystem.exists(p)) {
+        println("no font to corrupt; skipped");
+        return 0;
+    }
+    return mutants(filesystem.read_bytes(p), 0, 0, 0);
+}

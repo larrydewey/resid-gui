@@ -42,8 +42,8 @@ Todo on_msg(Todo t, Msg m) {
     };
 }
 
-/// One item's row: a 28-pixel button and the gap below it.
-Int row_h() { return 32; }
+/// One item's row: a 32-pixel button and the gap below it.
+Int row_h() { return 36; }
 
 Int clamp_scroll(Todo t, Int v) {
     Int most = t.items.len() * row_h();

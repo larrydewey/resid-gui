@@ -11,14 +11,16 @@ import "../gfx/draw.resid";
 import "../gfx/font.resid";
 import "layout.resid";
 import "state.resid";
+import "theme.resid";
 
-pub Color ink() { return rgb(20, 20, 20); }
-pub Color face() { return rgb(225, 225, 225); }
-pub Color face_down() { return rgb(190, 190, 190); }
-pub Color edge() { return rgb(150, 150, 150); }
-pub Color accent() { return rgb(60, 120, 220); }
-pub Color paper() { return rgb(255, 255, 255); }
-pub Color selection() { return rgb(180, 205, 245); }
+// The colours painting uses, from the theme (theme.resid).
+pub Color ink() { return theme().ink; }
+pub Color face() { return theme().surface; }
+pub Color face_down() { return theme().surface_down; }
+pub Color edge() { return theme().rule_strong; }
+pub Color accent() { return theme().accent; }
+pub Color paper() { return theme().surface; }
+pub Color selection() { return theme().selection; }
 
 /// What painting a subtree produced, and the number of the next widget.
 type Painted = { List(DrawOp) ops; Int next; };
@@ -76,10 +78,15 @@ Painted paint_kids(List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, Li
 /// Text centred vertically in `r`, `dx` pixels in from its left edge.
 DrawOp label(Rect r, Int dx, Str s, Color c, Font f) { return OpText(r.x + dx, r.y + (r.h - text_height_in(f)) / 2, s, c); }
 
-/// A one-pixel frame of colour `e` around a fill of colour `f`.
-List(DrawOp) framed(Rect r, Color e, Color f) {
-    return [OpFill(r, e), OpFill(Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 }, f)];
+/// A one-pixel frame of colour `e` around a fill of colour `f`, with
+/// corners of radius `rad`: the outer shape, then the inner one inset by a
+/// pixel with a radius a pixel smaller.
+List(DrawOp) framed_round(Rect r, Int rad, Color e, Color f) {
+    return [OpRound(r, rad, e), OpRound(Rect { .x = r.x + 1, .y = r.y + 1, .w = r.w - 2, .h = r.h - 2 }, max_int(rad - 1, 0), f)];
 }
+
+/// `framed_round` with the theme's control radius.
+List(DrawOp) framed(Rect r, Color e, Color f) { return framed_round(r, theme().radius, e, f); }
 
 List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id, Font f) {
     return match (w) {
@@ -95,9 +102,21 @@ List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id, Font f) {
 
 List(DrawOp) paint_check(Rect r, Str s, Bool on, Bool down, Font f) {
     Rect b = Rect { .x = r.x + 4, .y = r.y + (r.h - 16) / 2, .w = 16, .h = 16 };
-    List(DrawOp) box = framed(b, if (down) { accent() } else { edge() }, paper());
-    List(DrawOp) mark = if (on) { [OpFill(Rect { .x = b.x + 4, .y = b.y + 4, .w = 8, .h = 8 }, accent())] } else { [] };
-    return box.concat(mark).concat([label(r, 26, s, ink(), f)]);
+    Theme t = theme();
+    List(DrawOp) box = if (on) { [OpRound(b, t.small_radius, if (down) { t.ink } else { t.accent })].concat(check_mark(b.x, b.y, t.accent_ink)) }
+                       else { framed_round(b, t.small_radius, if (down) { t.accent } else { t.rule_strong }, t.surface) };
+    return box.concat([label(r, 26, s, ink(), f)]);
+}
+
+/// A tick in a 16-pixel box: two strokes of 2-pixel dots, down from the
+/// left to the bottom, then up to the right.
+List(DrawOp) check_mark(Int x, Int y, Color c) {
+    return dots(x + 3, y + 8, 1, 1, 4, c, ListBuf()).concat(dots(x + 6, y + 11, 1, -1, 7, c, ListBuf()));
+}
+
+List(DrawOp) dots(Int x, Int y, Int dx, Int dy, Int n, Color c, ListBuf(DrawOp) acc) {
+    if (n <= 0) { return acc.finish(); }
+    return dots(x + dx, y + dy, dx, dy, n - 1, c, acc.push(OpRound(Rect { .x = x, .y = y, .w = 2, .h = 2 }, 1, c)));
 }
 
 /// How far an input's text is shifted left so the caret, `caret_x`
@@ -135,10 +154,11 @@ List(DrawOp) paint_slider(Rect r, Int v0) {
     Int track = max_int(r.w - 12, 0);
     Int cy = r.y + r.h / 2;
     Int kx = r.x + (track * v) / 100;
+    Theme t = theme();
     return [
-        OpFill(Rect { .x = r.x + 6, .y = cy - 2, .w = track, .h = 4 }, edge()),
-        OpFill(Rect { .x = r.x + 6, .y = cy - 2, .w = (track * v) / 100, .h = 4 }, accent())
-    ].concat(framed(Rect { .x = kx, .y = cy - 8, .w = 12, .h = 16 }, edge(), face()));
+        OpRound(Rect { .x = r.x + 6, .y = cy - 2, .w = track, .h = 4 }, 2, t.rule),
+        OpRound(Rect { .x = r.x + 6, .y = cy - 2, .w = (track * v) / 100, .h = 4 }, 2, t.accent)
+    ].concat(framed_round(Rect { .x = kx, .y = cy - 7, .w = 14, .h = 14 }, 7, t.rule_strong, t.surface));
 }
 
 test "a button paints a frame and a centred label" {

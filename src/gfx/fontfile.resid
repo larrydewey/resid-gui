@@ -1,0 +1,46 @@
+// fontfile.resid — TrueType fonts from files, rasterized in pure Resid.
+//
+// `load_ttf` reads a font and makes an atlas for each device scale a
+// program may meet (1 and 2; 3 is made from 1 by repetition, see
+// `pick_font`). It needs only `filesystem(readonly)`: no native module,
+// no other capability. A font that is missing or does not parse leaves
+// the built-in bitmap font in charge, with the reason on stderr.
+
+import "font.resid";
+import "ttf.resid";
+
+/// Atlases of the TrueType font at `path`, `size` logical pixels per em,
+/// for scales 1 and 2; none when the file is missing or malformed.
+@requires(filesystem(readonly))
+pub List(Font) load_ttf(Str path, Int size) {
+    if (!filesystem.exists(path)) { return []; }
+    List(Int) bytes = filesystem.read_bytes(path);
+    return match (ttf_font(bytes, size, 1)) {
+        Ok(one) => match (ttf_font(bytes, size, 2)) { Ok(two) => [one, two], Err(e) => [one] },
+        Err(e) => warn_none(f"resid-gui: {path}: {e}")
+    };
+}
+
+List(Font) warn_none(Str why) {
+    eprintln(why);
+    return [];
+}
+
+/// The first of `paths` that loads.
+@requires(filesystem(readonly))
+pub List(Font) load_first(List(Str) paths, Int size) { return first_at(paths, size, 0); }
+
+@requires(filesystem(readonly))
+List(Font) first_at(List(Str) paths, Int size, Int i) {
+    if (i >= paths.len()) { return []; }
+    List(Font) fs = load_ttf(paths[i], size);
+    return if (fs.len() > 0) { fs } else { first_at(paths, size, i + 1) };
+}
+
+/// Where Linux distributions keep a neutral sans-serif.
+pub List(Str) sans_paths() {
+    return ["/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf"];
+}

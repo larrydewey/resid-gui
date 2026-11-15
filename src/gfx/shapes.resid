@@ -1,0 +1,90 @@
+// shapes.resid — antialiased rounded rectangles.
+//
+// A rounded rectangle is mostly straight: its middle band and the strips
+// between its corners are whole pixels, filled a row at a time. Only the
+// four corner squares need coverage, and there each pixel is sampled at
+// 4x4 points against the corner's circle, in integer eighths of a pixel,
+// so edges are smooth without floating point and the result is the same
+// on every machine (golden images compare by hash).
+//
+// A border is two fills: the outer shape in the border colour, then the
+// inner shape, inset by the border width with a radius that much smaller,
+// in the fill colour. `paint` emits it that way.
+
+import "canvas.resid";
+import "color.resid";
+
+/// The radius `r` can have in a `w` x `h` box: at most half the shorter side.
+pub Int radius_in(Int r, Int w, Int h) {
+    Int half = if (w < h) { w / 2 } else { h / 2 };
+    if (r < 0) { return 0; }
+    return if (r > half) { half } else { r };
+}
+
+/// Fill `r` with corners of radius `rad`, clipped to `clip` and the canvas.
+pub Canvas fill_round_clip(Canvas c, Rect r, Int rad0, Color col, Rect clip) {
+    if (rect_is_empty(r)) { return c; }
+    Int rad = radius_in(rad0, r.w, r.h);
+    if (rad == 0) { return fill_rect_clip(c, r, col, clip); }
+    // the middle band, full width, and the strips between the corners
+    Canvas c1 = fill_rect_clip(c, Rect { .x = r.x, .y = r.y + rad, .w = r.w, .h = r.h - 2 * rad }, col, clip);
+    Canvas c2 = fill_rect_clip(c1, Rect { .x = r.x + rad, .y = r.y, .w = r.w - 2 * rad, .h = rad }, col, clip);
+    Canvas c3 = fill_rect_clip(c2, Rect { .x = r.x + rad, .y = r.y + r.h - rad, .w = r.w - 2 * rad, .h = rad }, col, clip);
+    // the corners: each a rad x rad square around its circle's centre
+    Canvas c4 = corner(c3, r.x, r.y, r.x + rad, r.y + rad, rad, col, clip, 0);
+    Canvas c5 = corner(c4, r.x + r.w - rad, r.y, r.x + r.w - rad, r.y + rad, rad, col, clip, 0);
+    Canvas c6 = corner(c5, r.x, r.y + r.h - rad, r.x + rad, r.y + r.h - rad, rad, col, clip, 0);
+    return corner(c6, r.x + r.w - rad, r.y + r.h - rad, r.x + r.w - rad, r.y + r.h - rad, rad, col, clip, 0);
+}
+
+/// The square of `rad` x `rad` pixels at (`x0`, `y0`), each pixel blended
+/// by how much of it lies within `rad` of the point (`cx`, `cy`).
+Canvas corner(Canvas c, Int x0, Int y0, Int cx, Int cy, Int rad, Color col, Rect clip, Int i) {
+    if (i >= rad * rad) { return c; }
+    Int px = x0 + i % rad;
+    Int py = y0 + i / rad;
+    Int a = coverage(px, py, cx, cy, rad);
+    Canvas next = if (a == 0) { c } else { blend_pixel_clip(c, px, py, col, a, clip) };
+    return corner(next, x0, y0, cx, cy, rad, col, clip, i + 1);
+}
+
+/// How much of pixel (`px`, `py`) lies within `rad` of (`cx`, `cy`), from 0
+/// to 255: 16 samples at the centres of a 4x4 grid, in eighths of a pixel.
+pub Int coverage(Int px, Int py, Int cx, Int cy, Int rad) {
+    Int rr = (8 * rad) * (8 * rad);
+    Int n = samples(8 * px - 8 * cx, 8 * py - 8 * cy, rr, 0, 0);
+    return if (n >= 16) { 255 } else { (n * 255) / 16 };
+}
+
+Int samples(Int dx0, Int dy0, Int rr, Int k, Int acc) {
+    if (k >= 16) { return acc; }
+    Int dx = dx0 + 2 * (k % 4) + 1;
+    Int dy = dy0 + 2 * (k / 4) + 1;
+    return samples(dx0, dy0, rr, k + 1, if (dx * dx + dy * dy <= rr) { acc + 1 } else { acc });
+}
+
+test "a radius never exceeds half the shorter side" {
+    expect(radius_in(8, 40, 10)).toEqual(5);
+    expect(radius_in(-3, 40, 10)).toEqual(0);
+    expect(radius_in(4, 40, 10)).toEqual(4);
+}
+
+test "corner pixels are covered by how much lies inside the circle" {
+    // the pixel at the circle's centre, and one far outside
+    expect(coverage(10, 10, 10, 10, 6)).toEqual(255);
+    expect(coverage(0, 0, 10, 10, 6)).toEqual(0);
+    // a pixel the edge passes through is partly covered
+    Int edge = coverage(5, 5, 10, 10, 6);
+    expect(edge > 0 && edge < 255).toEqual(true);
+}
+
+test "a rounded fill leaves its corners partly painted and its middle solid" {
+    Color white = rgb(255, 255, 255);
+    Color ink = rgb(0, 0, 0);
+    Canvas c = fill_round_clip(canvas_filled(20, 20, white), Rect { .x = 0, .y = 0, .w = 20, .h = 20 }, 6, ink, Rect { .x = 0, .y = 0, .w = 20, .h = 20 });
+    expect(color_eq(pixel_at(c, 10, 10), ink)).toEqual(true);
+    expect(color_eq(pixel_at(c, 0, 10), ink)).toEqual(true);
+    expect(color_eq(pixel_at(c, 0, 0), white)).toEqual(true);
+    Color mid = pixel_at(c, 1, 2);
+    expect(mid.r > 0 && mid.r < 255).toEqual(true);
+}

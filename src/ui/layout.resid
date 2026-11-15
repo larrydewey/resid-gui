@@ -33,9 +33,9 @@ pub Size pref_size_in(Widget w, Font f) {
     Int lh = line_h_in(f);
     return match (w) {
         Text(s) => Size { .w = text_width_in(f, s) + 8, .h = lh },
-        Button(s, m) => Size { .w = text_width_in(f, s) + 20, .h = lh + 4 },
+        Button(s, m) => Size { .w = text_width_in(f, s) + 28, .h = lh + 8 },
         Checkbox(s, c, m) => Size { .w = text_width_in(f, s) + 30, .h = lh },
-        TextInput(s, k, m) => Size { .w = max_int(text_width_in(f, s) + 12, 120), .h = lh + 4 },
+        TextInput(s, k, m) => Size { .w = max_int(text_width_in(f, s) + 12, 120), .h = lh + 8 },
         Row(xs) => Size { .w = sum_w(xs, 0, 0, f) + gaps(xs), .h = max_h(xs, 0, 0, f) },
         Column(xs) => Size { .w = max_w(xs, 0, 0, f), .h = sum_h(xs, 0, 0, f) + gaps(xs) },
         Stack(xs) => Size { .w = max_w(xs, 0, 0, f), .h = max_h(xs, 0, 0, f) },
@@ -200,7 +200,7 @@ test "a column stacks natural heights and gives the rest to its spacer" {
     expect(rs[0].y).toEqual(0);
     expect(rs[0].h).toEqual(24);
     expect(rs[1].y).toEqual(28);
-    expect(rs[2].h).toEqual(28);
+    expect(rs[2].h).toEqual(32);
     expect(rs[2].y + rs[2].h).toEqual(100);
     expect(rs[2].w).toEqual(100);
 }

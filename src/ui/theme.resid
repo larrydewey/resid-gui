@@ -1,0 +1,46 @@
+// theme.resid — resid-gui's own design language, as a value.
+//
+// One look on every platform (PLAN-ui-everywhere.md §5.3): cool neutral
+// grounds, one blue accent, ink that passes 4.5:1 on every surface, 6-pixel
+// corners, 1-pixel rules. `paint` reads every colour and radius from here,
+// so a theme is data, and with a constant theme the whole palette folds at
+// compile time. `theme_dark` is the same language for dark surroundings;
+// choosing it from the platform's theme hint (RSP `Configure`) is next.
+
+import "../gfx/color.resid";
+
+pub type Theme = {
+    Color ground;       // the window behind everything
+    Color surface;      // controls, fields
+    Color surface_down; // a control held down
+    Color ink;          // text
+    Color muted;        // secondary text, placeholder
+    Color rule;         // borders at rest
+    Color rule_strong;  // borders of fields and controls
+    Color accent;       // focus, checked, filled track
+    Color accent_ink;   // text and marks on the accent
+    Color selection;    // selected text
+    Int radius;         // corners of controls
+    Int small_radius;   // corners of checkboxes, tracks
+};
+
+pub Theme theme_light() {
+    return Theme {
+        .ground = rgb(245, 246, 247), .surface = rgb(255, 255, 255), .surface_down = rgb(233, 236, 239),
+        .ink = rgb(21, 23, 26), .muted = rgb(90, 97, 107), .rule = rgb(213, 217, 222), .rule_strong = rgb(201, 206, 212),
+        .accent = rgb(36, 87, 230), .accent_ink = rgb(255, 255, 255), .selection = rgb(230, 237, 255),
+        .radius = 6, .small_radius = 4
+    };
+}
+
+pub Theme theme_dark() {
+    return Theme {
+        .ground = rgb(18, 20, 24), .surface = rgb(28, 31, 36), .surface_down = rgb(42, 46, 53),
+        .ink = rgb(230, 232, 235), .muted = rgb(154, 162, 173), .rule = rgb(42, 46, 53), .rule_strong = rgb(64, 70, 79),
+        .accent = rgb(110, 145, 255), .accent_ink = rgb(18, 20, 24), .selection = rgb(38, 52, 92),
+        .radius = 6, .small_radius = 4
+    };
+}
+
+/// The theme painting uses.
+pub Theme theme() { return theme_light(); }

@@ -20,6 +20,8 @@ message ends the session.
     tools/rsp_shell.py CORE [--size 320x120] [--scale 2] [--out DIR]
                        [--step ACTION ...]
 
+--theme sets the platform's appearance hints the shell reports.
+
 Actions: wait:TEXT  click:LABEL  assist:LABEL  type:TEXT  key:CODE
          shot:NAME  speak  close
 """
@@ -113,8 +115,8 @@ def decode(msg):
 
 
 class Shell:
-    def __init__(self, core, size, scale, out_dir):
-        self.size, self.scale, self.out_dir = size, scale, out_dir
+    def __init__(self, core, size, scale, out_dir, theme=0):
+        self.size, self.scale, self.out_dir, self.theme = size, scale, out_dir, theme
         mine, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         env = dict(os.environ, RSP_SOCKET=str(theirs.fileno()))
         for k in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY"):
@@ -160,7 +162,7 @@ class Shell:
         elif name == "Window":
             self.title = f[0]
             w, h = self.size or (f[1], f[2])
-            self.send("Configure", w * self.scale, h * self.scale, self.scale, 0, 0, 0, 0, 0)
+            self.send("Configure", w * self.scale, h * self.scale, self.scale, 0, 0, 0, 0, self.theme)
         elif name == "Attach":
             if not self.fds:
                 raise ProtocolError("Attach without a descriptor")
@@ -287,10 +289,11 @@ def main():
     ap.add_argument("--size", default="")
     ap.add_argument("--scale", type=int, default=1)
     ap.add_argument("--out", default=".")
+    ap.add_argument("--theme", type=int, default=0, help="Configure theme bits: 1 dark, 2 reduced motion, 4 high contrast")
     ap.add_argument("--step", action="append", default=[])
     a = ap.parse_args()
     size = tuple(int(v) for v in a.size.split("x")) if a.size else None
-    sh = Shell(a.core, size, a.scale, a.out)
+    sh = Shell(a.core, size, a.scale, a.out, a.theme)
     try:
         sh.run(a.step)
     except ProtocolError as e:

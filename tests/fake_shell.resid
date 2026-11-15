@@ -183,7 +183,10 @@ test "a shell drives the counter by pointer and by screen reader" {
     expect(code).toEqual(0);
     expect(s.title).toEqual("Counter");
     expect(s.attaches).toEqual(2);
-    expect(s.presents >= 3).toEqual(true);
+    // the first frame and at least one after the changes: updates that
+    // arrive before the next frame is due are drawn together, so how many
+    // frames show the two changes depends on timing
+    expect(s.presents >= 2).toEqual(true);
     expect(s.stage).toEqual(3);
     expect(find_role(s.tree, role_text(), 0).label).toEqual("count: 2");
     expect(find_role(s.tree, role_button(), 0).bounds.w > 0).toEqual(true);

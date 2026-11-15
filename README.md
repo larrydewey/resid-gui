@@ -112,6 +112,31 @@ comes back where it was (`examples/dev_counter.resid`).
 `tools/caps_manifest.py` turns a program's capabilities into platform
 permission manifests. The plan is `PLAN-ui-everywhere.md`.
 
+## Themes
+
+A program never sets colours. It states a `ThemeSpec` (an accent, light,
+dark or the platform's choice, soft, square or round corners, standard or
+high contrast) and `theme_from` derives every colour from it, keeping it
+readable: an accent too pale for its surface is darkened (or lightened on
+dark surfaces) until it stands 3:1, text on the accent is whichever of
+white and near-black reaches 4.5:1. Any spec gives a theme that passes
+`theme_check`; the neutrals, rules, spacing and type stay the library's.
+
+A theme is a widget, so it can come from the model and can be local:
+
+```resid
+Widget view(Look l) {
+    ThemeSpec s = with_mode(with_accent(theme_default(), rgb(31, 122, 90)), if (l.dark) { Dark } else { FollowSystem });
+    return Themed(s, Column([
+        Text("Settings"),
+        Themed(with_accent(s, rgb(200, 30, 30)), Button("Delete account", Custom(9)))
+    ]));
+}
+```
+
+`FollowSystem` takes dark mode and high contrast from the platform (a host
+shell's `Configure`). `examples/themes.resid` shows every knob.
+
 ## Both backends are spoken on the wire
 
 A Resid program links no client library: there is no `libwayland` and no

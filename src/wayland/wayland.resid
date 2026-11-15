@@ -593,11 +593,15 @@ pub Int wl_scale(Wl w) { return w.win.scale; }
 
 /// No accessibility bridge on this backend yet (AT-SPI is plan U3): the
 /// tree is computed but not sent.
+/// No appearance hints yet: the desktop's colour scheme comes over D-Bus
+/// (the settings portal), which this backend does not speak.
+pub Int wl_hints(Wl b) { return 0; }
+
 pub Wl wl_semantics(Wl b, List(SemNode) nodes) { return b; }
 
 Backend(Wl) = {
     .be_pump = wl_pump, .be_alive = wl_alive, .be_width = wl_width, .be_height = wl_height,
-    .be_scale = wl_scale, .be_ready = wl_ready, .be_present = wl_present, .be_close = wl_close, .be_semantics = wl_semantics
+    .be_scale = wl_scale, .be_ready = wl_ready, .be_present = wl_present, .be_close = wl_close, .be_semantics = wl_semantics, .be_hints = wl_hints
 };
 
 test "pointer buttons and versions map as the protocol says" {

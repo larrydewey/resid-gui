@@ -37,6 +37,7 @@ import "ui/input.resid";
 import "ui/state.resid";
 import "ui/timer.resid";
 import "ui/semantics.resid";
+import "ui/theme.resid";
 import "rsp/client.resid";
 
 /// The caret blinks, and `FrameTick` arrives, this often.
@@ -213,7 +214,7 @@ Loop(M) render(B b, Loop(M) st) {
     Int h = be_height(b);
     Int s = be_scale(b);
     Font f = if (s == st.scale) { st.font } else { pick_font(st.fonts, s) };
-    List(DrawOp) ops = paint_in(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui, f);
+    List(DrawOp) ops = paint_with(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui, f, theme_from(theme_default(), be_hints(b)));
     Bool fresh = st.w != w || st.h != h || st.scale != s;
     Rect all = Rect { .x = 0, .y = 0, .w = w, .h = h };
     List(Rect) dmg = if (fresh) { [all] } else { scale_all(damage_rects_in(st.ops, ops, f), s, 0, []) };

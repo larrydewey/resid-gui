@@ -41,6 +41,9 @@ behavior Backend(B) {
     /// frame on screen. A backend with no accessibility bridge yet returns
     /// `b` unchanged; one with a bridge sends only what changed.
     B be_semantics(B b, List(SemNode) nodes);
+    /// The platform's appearance hints (`hint_*` in ui/theme.resid: dark,
+    /// reduced motion, high contrast), 0 when the backend knows none.
+    Int be_hints(B b);
     /// Close the window and the connection.
     Bool be_close(B b);
 }

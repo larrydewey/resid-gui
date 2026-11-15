@@ -1,0 +1,207 @@
+// fake_shell.resid — the RSP backend and the whole loop against a fake
+// host shell over a socket pair (docs/rsp.md).
+//
+// The core is a real program: a counter `App(Int)` run by `gui_run_on`
+// over the RSP backend, in a spawned region. The shell here does what a
+// macOS or Windows shell would, and nothing it could not: it welcomes the
+// core, configures a window at scale 2, takes the two buffers' descriptors,
+// releases each presented buffer and paces frames. It never looks at a
+// pixel. It finds the button the way a screen reader would, in the
+// semantics tree the core sends, and
+//   1. clicks the button's centre with the pointer,
+//   2. waits until the tree says "count: 1",
+//   3. activates the button as an assistive tool (`A11yAction`),
+//   4. waits until the tree says "count: 2", then asks to close.
+// A second test is a hostile shell: every malformed answer ends the
+// connection with an error, never a crash.
+
+import "../src/app.resid";
+import "../src/gfx/color.resid";
+import "../src/ui/semantics.resid";
+import "../src/rsp/wire.resid";
+import "../src/rsp/client.resid";
+import "../src/backend/backend.resid";
+import "../src/gui.resid";
+
+Int counter_init() { return 0; }
+
+Int counter_update(Int m, Event e) {
+    return match (e) { AppMsg(msg) => match (msg) { Clicked => m + 1, _ => m }, _ => m };
+}
+
+Widget counter_view(Int m) { return Column([Text(f"count: {m}"), Button("+1", Clicked)]); }
+
+App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
+
+/// What the shell saw.
+type Sh = {
+    Int stage; Str title; Int attaches; Int presents; Int commits;
+    List(SemNode) tree; List(SemNode) pending; List(Int) gone;
+    Bool bye; Str why; Int platform_scale;
+};
+
+Sh sh(Sh s, Int stage, Str title, Int attaches, Int presents, Int commits, List(SemNode) tree, List(SemNode) pending, List(Int) gone, Bool bye, Str why) {
+    return Sh { .stage = stage, .title = title, .attaches = attaches, .presents = presents, .commits = commits,
+                .tree = tree, .pending = pending, .gone = gone, .bye = bye, .why = why, .platform_scale = s.platform_scale };
+}
+
+Sh fail(Sh s, Str why) { return sh(s, s.stage, s.title, s.attaches, s.presents, s.commits, s.tree, s.pending, s.gone, s.bye, why); }
+
+@requires(display)
+Bool out(Int fd, List(FromShell) ms, Int i) {
+    if (i >= ms.len()) { return true; }
+    return resid_disp_send(fd, from_shell_bytes(ms[i]), -1) && out(fd, ms, i + 1);
+}
+
+@requires(display)
+Sh serve(Int fd, List(Int) buf, Sh s) {
+    if (str_len(s.why) > 0) { return s; }
+    RspIn m = rsp_take(buf);
+    if (m.bad) { return fail(s, "corrupt stream from the core"); }
+    if (!m.ok) {
+        List(Int) got = resid_disp_recv(fd, 65536);
+        if (got.len() == 0) { return s; }
+        return serve(fd, buf.concat(got), s);
+    }
+    Sh next = match (to_shell_decode(m.msg)) {
+        Ok(msg) => answer(fd, s, msg),
+        Err(e) => fail(s, e)
+    };
+    return serve(fd, m.rest, next);
+}
+
+/// Answer one message from the core.
+@requires(display)
+Sh answer(Int fd, Sh s, ToShell m) {
+    return match (m) {
+        Hello(v, app) => if (out(fd, [Welcome(rsp_version(), platform_linux(), "fake")], 0)) { s } else { fail(s, "send") },
+        Window(t, w, h, r, mw, mh) => if (out(fd, [Configure(w * s.platform_scale, h * s.platform_scale, s.platform_scale, 0, 0, 0, 0, 0)], 0)) {
+            sh(s, s.stage, t, s.attaches, s.presents, s.commits, s.tree, s.pending, s.gone, s.bye, "")
+        } else { fail(s, "send") },
+        Attach(id, w, h, stride) => attached(s, w, h, stride),
+        Present(id, damage) => presented(fd, s, id),
+        SemPut(n) => sh(s, s.stage, s.title, s.attaches, s.presents, s.commits, s.tree, s.pending.concat([n]), s.gone, s.bye, ""),
+        SemRemove(id) => sh(s, s.stage, s.title, s.attaches, s.presents, s.commits, s.tree, s.pending, s.gone.concat([id]), s.bye, ""),
+        SemCommit => committed(fd, s),
+        Bye => sh(s, s.stage, s.title, s.attaches, s.presents, s.commits, s.tree, s.pending, s.gone, true, ""),
+        _ => s
+    };
+}
+
+@requires(display)
+Sh attached(Sh s, Int w, Int h, Int stride) {
+    Int bfd = resid_disp_recv_fd();
+    if (bfd < 0) { return fail(s, "Attach came without a descriptor"); }
+    _ = resid_disp_close(bfd);
+    if (stride != w * 4) { return fail(s, "stride is not four bytes a pixel"); }
+    return sh(s, s.stage, s.title, s.attaches + 1, s.presents, s.commits, s.tree, s.pending, s.gone, s.bye, "");
+}
+
+/// Release the buffer and pace the next frame. The first present, once
+/// the tree is known, is when the pointer clicks the button.
+@requires(display)
+Sh presented(Int fd, Sh s, Int id) {
+    Sh s1 = sh(s, s.stage, s.title, s.attaches, s.presents + 1, s.commits, s.tree, s.pending, s.gone, s.bye, "");
+    if (!out(fd, [Release(id), FrameDone], 0)) { return fail(s1, "send"); }
+    return click_if_ready(fd, s1);
+}
+
+@requires(display)
+Sh click_if_ready(Int fd, Sh s) {
+    if (s.stage != 0 || s.presents == 0) { return s; }
+    SemNode b = find_role(s.tree, role_button(), 0);
+    if (b.id < 0) { return s; }
+    Int x = b.bounds.x + b.bounds.w / 2;
+    Int y = b.bounds.y + b.bounds.h / 2;
+    if (!out(fd, [Pointer(ptr_move(), x, y, 0, 0, dev_mouse(), 0), Pointer(ptr_down(), x, y, 1, 0, dev_mouse(), 0), Pointer(ptr_up(), x, y, 1, 0, dev_mouse(), 0)], 0)) {
+        return fail(s, "send");
+    }
+    return sh(s, 1, s.title, s.attaches, s.presents, s.commits, s.tree, s.pending, s.gone, s.bye, "");
+}
+
+/// Apply the pending changes; react to what the tree now says.
+@requires(display)
+Sh committed(Int fd, Sh s) {
+    List(SemNode) t = merge(drop(s.tree, s.gone, 0, []), s.pending, 0);
+    Sh s1 = sh(s, s.stage, s.title, s.attaches, s.presents, s.commits + 1, t, [], [], s.bye, "");
+    Str label = find_role(t, role_text(), 0).label;
+    if (s1.stage == 0) { return click_if_ready(fd, s1); }
+    if (s1.stage == 1 && label == "count: 1") {
+        SemNode b = find_role(t, role_button(), 0);
+        if (!out(fd, [A11yAction(b.id, act_activate())], 0)) { return fail(s1, "send"); }
+        return sh(s1, 2, s1.title, s1.attaches, s1.presents, s1.commits, t, [], [], s1.bye, "");
+    }
+    if (s1.stage == 2 && label == "count: 2") {
+        if (!out(fd, [Lifecycle(life_close_requested())], 0)) { return fail(s1, "send"); }
+        return sh(s1, 3, s1.title, s1.attaches, s1.presents, s1.commits, t, [], [], s1.bye, "");
+    }
+    return s1;
+}
+
+List(SemNode) drop(List(SemNode) t, List(Int) gone, Int i, List(SemNode) acc) {
+    if (i >= t.len()) { return acc; }
+    return drop(t, gone, i + 1, if (has(gone, t[i].id, 0)) { acc } else { acc.concat([t[i]]) });
+}
+
+Bool has(List(Int) xs, Int v, Int i) { return if (i >= xs.len()) { false } else { xs[i] == v || has(xs, v, i + 1) }; }
+
+List(SemNode) merge(List(SemNode) t, List(SemNode) puts, Int i) {
+    if (i >= puts.len()) { return t; }
+    return merge(drop(t, [puts[i].id], 0, []).concat([puts[i]]), puts, i + 1);
+}
+
+SemNode find_role(List(SemNode) t, Int role, Int i) {
+    if (i >= t.len()) { return SemNode { .id = -1, .parent = -1, .role = 0, .flags = 0, .bounds = Rect { .x = 0, .y = 0, .w = 0, .h = 0 }, .actions = 0, .label = "", .value = "" }; }
+    if (t[i].role == role) { return t[i]; }
+    return find_role(t, role, i + 1);
+}
+
+Sh sh_new(Int scale) {
+    return Sh { .stage = 0, .title = "", .attaches = 0, .presents = 0, .commits = 0, .tree = [], .pending = [], .gone = [],
+                .bye = false, .why = "", .platform_scale = scale };
+}
+
+@requires(display, clock(readonly))
+Int core(Int fd) {
+    Rsp r = rsp_start_on(fd, WindowOptions { .title = "Counter", .width = 160, .height = 60, .resizable = true });
+    if (!r.alive) { return 100; }
+    return gui_run_on(r, counter_init(), []);
+}
+
+// ─── A hostile shell ───────────────────────────────────────────────
+
+/// Answer `Hello` with `reply`'s bytes, and `Window` with `config`.
+@requires(display)
+Bool hostile(Int fd, List(Int) reply, List(Int) config) {
+    List(Int) hello = resid_disp_recv(fd, 65536);
+    if (hello.len() == 0 || !resid_disp_send(fd, reply, -1)) { return false; }
+    if (config.len() == 0) { return true; }
+    List(Int) window = resid_disp_recv(fd, 65536);
+    return window.len() > 0 && resid_disp_send(fd, config, -1);
+}
+
+@requires(display)
+Str start_against(List(Int) reply, List(Int) config) {
+    List(Int) pair = resid_disp_pair();
+    Int sfd = pair[0];
+    Int cfd = pair[1];
+    Result(Str, RegionError) r = spawn (display) {
+        Rsp c = rsp_start_on(cfd, WindowOptions { .title = "x", .width = 10, .height = 10, .resizable = false });
+        Str why = c.err;
+        Bool was = c.alive;
+        _ = if (was) { rsp_close(c) } else { false };
+        return if (was) { "" } else { why };
+    };
+    _ = hostile(sfd, reply, config);
+    _ = resid_disp_close(sfd);
+    return r else { "crashed" };
+}
+
+List(Int) welcome() { return from_shell_bytes(Welcome(rsp_version(), platform_linux(), "evil")); }
+
+@requires(display)
+Int main() {
+    Str a = start_against(welcome(), from_shell_bytes(Configure(20, 20, 2, 0, 0, 0, 0, 0)));
+    println(f"result [{a}]");
+    return 0;
+}

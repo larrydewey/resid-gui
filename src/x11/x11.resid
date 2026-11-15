@@ -16,6 +16,7 @@ import "../gfx/canvas.resid";
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
 import "../gfx/raster.resid";
+import "../ui/semantics.resid";
 import "../ui/hidpi.resid";
 import "wire.resid";
 import "setup.resid";
@@ -432,9 +433,13 @@ pub Int x11_height(X11 x) { return x.h; }
 pub Int x11_scale_of(X11 x) { return x.scale; }
 pub Bool x11_alive(X11 x) { return x.alive; }
 
+/// No accessibility bridge on this backend yet (AT-SPI is plan U3): the
+/// tree is computed but not sent.
+pub X11 x11_semantics(X11 b, List(SemNode) nodes) { return b; }
+
 Backend(X11) = {
     .be_pump = x11_pump, .be_alive = x11_alive, .be_width = x11_width, .be_height = x11_height,
-    .be_scale = x11_scale_of, .be_ready = x11_ready, .be_present = x11_present, .be_close = x11_close
+    .be_scale = x11_scale_of, .be_ready = x11_ready, .be_present = x11_present, .be_close = x11_close, .be_semantics = x11_semantics
 };
 
 test "wheel buttons are notches, other buttons press and release" {

@@ -1,0 +1,50 @@
+// hot.resid — hot restart that keeps state, for development.
+//
+// `gui_run_dev` runs the program and, when it closes, appends every event
+// `update` saw to a log file. The next run reads the log and folds it
+// through `update` before the window opens, so after editing the code and
+// rebuilding, the program comes back where it was: the model is rebuilt by
+// the new `update` from the same events, with no serializer for the model.
+// When the change to `update` makes the old events mean something else,
+// delete the log.
+//
+// It needs `filesystem` for the log, so it is for development builds; a
+// release build calls `gui_run`.
+
+import "../app.resid";
+import "../gui.resid";
+import "timeline.resid";
+
+/// The log at `path`: its events, or none when it does not exist. A log
+/// that does not parse is reported and ignored.
+@requires(filesystem(readonly))
+pub List(Event) read_log(Str path) {
+    if (!filesystem.exists(path)) { return []; }
+    return match (log_parse(filesystem.read_all(path))) {
+        Ok(es) => es,
+        Err(why) => warn_empty(f"resid-gui: ignoring {path}: {why}")
+    };
+}
+
+List(Event) warn_empty(Str why) {
+    eprintln(why);
+    return [];
+}
+
+/// Run the program from where the log at `log_path` left it, and add this
+/// session's events to the log when the window closes. Returns 1 when no
+/// display could be opened or the log could not be written.
+@needs(App(M))
+@requires(display, clock(readonly), filesystem)
+pub Int gui_run_dev(WindowOptions opts, Str log_path) {
+    List(Event) past = read_log(log_path);
+    M m0 = replay(init(), past);
+    if (past.len() > 0) { eprintln(f"resid-gui: restored {past.len()} event(s) from {log_path}"); }
+    Recorded(M) r = gui_run_model_recorded(opts, m0, []);
+    if (!r.opened) { return 1; }
+    if (!filesystem.write_all(log_path, log_text(past.concat(r.log)))) {
+        eprintln(f"resid-gui: could not write {log_path}");
+        return 1;
+    }
+    return 0;
+}

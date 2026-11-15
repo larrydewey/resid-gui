@@ -22,7 +22,11 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
 ///   program stores the new text and caret and passes them back in `view`.
 /// - `SliderSet(m, value)`: a `Slider` was clicked or dragged to `value`
 ///   (0 to 100).
-type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int);
+/// - `Assist(node, action)`: a screen reader or other assistive tool acted
+///   on widget number `node` (see `act_*` in ui/semantics.resid). The
+///   library turns it into what a pointer or keyboard would have done
+///   (`AppMsg`, focus) and passes it on as well.
+type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int) | Assist(Int, Int);
 
 /// What the program wants on screen. A widget is a value, so two equal
 /// models give two equal display lists and therefore identical pixels.

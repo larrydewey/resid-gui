@@ -1,0 +1,196 @@
+// semantics.resid — what each widget *means*, for screen readers, tests
+// and the inspector.
+//
+// `paint` turns a widget tree into what it looks like; `semantics` turns
+// the same tree into what it is: a flat list of nodes, each with a role,
+// a label, a value, a state and the actions it accepts, in reading order.
+// It is pure and is a value, so like the display list it can be diffed:
+// only the nodes that changed travel to the platform (`sem_diff`).
+//
+// Node ids are the widget numbers `input.resid` and `UiState` already use
+// (pre-order), so an action a screen reader takes on node 7 is an action on
+// widget 7. Layout-only widgets (Row, Column, Stack, Padding, Align,
+// Spacer) have no node; their children hang off the nearest ancestor that
+// has one. A `Rows` list carries only the rows in view, as it paints only
+// those.
+
+import "../app.resid";
+import "../gfx/color.resid";
+import "../gfx/font.resid";
+import "layout.resid";
+import "state.resid";
+
+/// One node. `parent` is -1 for a node at the top. `bounds` are logical
+/// pixels. `flags` holds `sem_*` bits, `actions` holds `act_*` bits.
+pub type SemNode = { Int id; Int parent; Int role; Int flags; Rect bounds; Int actions; Str label; Str value; };
+
+pub Int role_text() { return 1; }
+pub Int role_button() { return 2; }
+pub Int role_checkbox() { return 3; }
+pub Int role_textbox() { return 4; }
+pub Int role_slider() { return 5; }
+pub Int role_image() { return 6; }
+pub Int role_scroll() { return 7; }
+pub Int role_list() { return 8; }
+
+pub Int sem_checked() { return 1; }
+pub Int sem_focused() { return 2; }
+pub Int sem_editable() { return 4; }
+pub Int sem_disabled() { return 8; }
+
+pub Int act_activate() { return 1; }
+pub Int act_focus() { return 2; }
+pub Int act_set_value() { return 4; }
+pub Int act_scroll() { return 8; }
+
+/// The semantics of `w` laid out in `r`, in the built-in font.
+pub List(SemNode) semantics(Widget w, Rect r, UiState ui) { return semantics_in(w, r, ui, font_builtin()); }
+
+/// `semantics` with text in font `f`.
+pub List(SemNode) semantics_in(Widget w, Rect r, UiState ui, Font f) {
+    return sem_node(ListBuf(), w, r, ui, f, 0, -1).finish();
+}
+
+/// The role of a widget, or 0 for one with no node of its own.
+pub Int role_of(Widget w) {
+    return match (w) {
+        Text(s) => role_text(),
+        Button(s, m) => role_button(),
+        Checkbox(s, c, m) => role_checkbox(),
+        TextInput(s, k, m) => role_textbox(),
+        Slider(v, m) => role_slider(),
+        Bitmap(bw, bh, px) => role_image(),
+        Scroll(o, c) => role_scroll(),
+        Rows(o, rh, xs) => role_list(),
+        _ => 0
+    };
+}
+
+SemNode node_of(Widget w, Rect r, UiState ui, Int id, Int parent) {
+    Int focused = if (ui.focus == id) { sem_focused() } else { 0 };
+    return match (w) {
+        Text(s) => mk(id, parent, role_text(), 0, r, 0, s, ""),
+        Button(s, m) => mk(id, parent, role_button(), 0, r, act_activate(), s, ""),
+        Checkbox(s, c, m) => mk(id, parent, role_checkbox(), if (c) { sem_checked() } else { 0 }, r, act_activate(), s, ""),
+        TextInput(s, k, m) => mk(id, parent, role_textbox(), sem_editable() | focused, r, act_focus() | act_set_value(), "", s),
+        Slider(v, m) => mk(id, parent, role_slider(), 0, r, act_set_value(), "", f"{v}"),
+        Bitmap(bw, bh, px) => mk(id, parent, role_image(), 0, r, 0, "", ""),
+        Scroll(o, c) => mk(id, parent, role_scroll(), 0, r, act_scroll(), "", f"{o}"),
+        Rows(o, rh, xs) => mk(id, parent, role_list(), 0, r, act_scroll(), "", f"{xs.len()}"),
+        _ => mk(id, parent, 0, 0, r, 0, "", "")
+    };
+}
+
+SemNode mk(Int id, Int parent, Int role, Int flags, Rect r, Int actions, Str label, Str value) {
+    return SemNode { .id = id, .parent = parent, .role = role, .flags = flags, .bounds = r, .actions = actions, .label = label, .value = value };
+}
+
+ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Font f, Int id, Int parent) {
+    Bool own = role_of(w) != 0;
+    ListBuf(SemNode) here = if (own) { acc.push(node_of(w, r, ui, id, parent)) } else { acc };
+    Int up = if (own) { id } else { parent };
+    return match (w) {
+        Rows(o, rh, xs) => sem_rows(here, xs, r, o, rh, ui, f, rows_in_view(r, o, rh, xs.len()), 0, id + 1, up),
+        _ => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up)
+    };
+}
+
+ListBuf(SemNode) sem_kids(ListBuf(SemNode) acc, List(Widget) xs, List(Rect) rs, UiState ui, Font f, Int i, Int id, Int parent) {
+    if (i >= xs.len() || i >= rs.len()) { return acc; }
+    return sem_kids(sem_node(acc, xs[i], rs[i], ui, f, id, parent), xs, rs, ui, f, i + 1, id + node_count(xs[i]), parent);
+}
+
+ListBuf(SemNode) sem_rows(ListBuf(SemNode) acc, List(Widget) xs, Rect r, Int o, Int rh, UiState ui, Font f, RowSpan span, Int i, Int id, Int parent) {
+    if (i >= xs.len() || i >= span.last) { return acc; }
+    ListBuf(SemNode) next = if (i >= span.first) { sem_node(acc, xs[i], row_rect(r, o, rh, i), ui, f, id, parent) } else { acc };
+    return sem_rows(next, xs, r, o, rh, ui, f, span, i + 1, id + node_count(xs[i]), parent);
+}
+
+/// Whether two nodes say the same thing.
+pub Bool sem_eq(SemNode a, SemNode b) {
+    return a.id == b.id && a.parent == b.parent && a.role == b.role && a.flags == b.flags && a.actions == b.actions
+        && a.bounds.x == b.bounds.x && a.bounds.y == b.bounds.y && a.bounds.w == b.bounds.w && a.bounds.h == b.bounds.h
+        && a.label == b.label && a.value == b.value;
+}
+
+/// What changed between two semantics lists: nodes that are new or
+/// different, and the ids of nodes that are gone. Both lists are in
+/// increasing id order, as `semantics` makes them.
+pub type SemDiff = { List(SemNode) put; List(Int) removed; };
+
+pub SemDiff sem_diff(List(SemNode) old, List(SemNode) now) { return diff_at(old, now, 0, 0, ListBuf(), ListBuf()); }
+
+SemDiff diff_at(List(SemNode) a, List(SemNode) b, Int i, Int j, ListBuf(SemNode) put, ListBuf(Int) gone) {
+    if (i >= a.len() && j >= b.len()) { return SemDiff { .put = put.finish(), .removed = gone.finish() }; }
+    if (i >= a.len()) { return diff_at(a, b, i, j + 1, put.push(b[j]), gone); }
+    if (j >= b.len()) { return diff_at(a, b, i + 1, j, put, gone.push(a[i].id)); }
+    if (a[i].id < b[j].id) { return diff_at(a, b, i + 1, j, put, gone.push(a[i].id)); }
+    if (a[i].id > b[j].id) { return diff_at(a, b, i, j + 1, put.push(b[j]), gone); }
+    return diff_at(a, b, i + 1, j + 1, if (sem_eq(a[i], b[j])) { put } else { put.push(b[j]) }, gone);
+}
+
+/// The text a screen reader would speak for the whole list, one node per
+/// line: role, label, value, state. For tests and the inspector.
+pub Str sem_speech(List(SemNode) ns) { return speech_at(ns, 0, StrBuf()); }
+
+Str speech_at(List(SemNode) ns, Int i, StrBuf b) {
+    if (i >= ns.len()) { return b.finish(); }
+    SemNode n = ns[i];
+    List(Str) names = ["group", "text", "button", "checkbox", "text field", "slider", "image", "scroll area", "list"];
+    Str role = if (n.role >= 0 && n.role < names.len()) { names[n.role] } else { "group" };
+    Str checked = if (n.role == role_checkbox()) { if ((n.flags & sem_checked()) != 0) { ", checked" } else { ", not checked" } } else { "" };
+    Str focused = if ((n.flags & sem_focused()) != 0) { ", focused" } else { "" };
+    Str label = if (str_len(n.label) > 0) { f" \"{n.label}\"" } else { "" };
+    Str value = if (str_len(n.value) > 0) { f" = {n.value}" } else { "" };
+    return speech_at(ns, i + 1, b.push(f"{role}{label}{value}{checked}{focused}\n"));
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+Widget form() {
+    return Column([
+        Text("Tasks"),
+        Row([TextInput("milk", 4, Custom(1)), Button("Add", Clicked)]),
+        Padding(4, Checkbox("Done", true, Toggled)),
+        Slider(40, Custom(2))
+    ]);
+}
+
+test "every meaningful widget is a node; layout-only ones are not" {
+    List(SemNode) ns = semantics(form(), Rect { .x = 0, .y = 0, .w = 300, .h = 200 }, ui_new());
+    expect(ns.len()).toEqual(5);
+    expect(sem_speech(ns)).toEqual("text \"Tasks\"\ntext field = milk\nbutton \"Add\"\ncheckbox \"Done\", checked\nslider = 40\n");
+}
+
+test "ids are the widget numbers input uses, and parents skip layout" {
+    List(SemNode) ns = semantics(form(), Rect { .x = 0, .y = 0, .w = 300, .h = 200 }, ui_with_focus(ui_new(), 3));
+    // Column 0, Text 1, Row 2, TextInput 3, Button 4, Padding 5, Checkbox 6, Slider 7
+    expect(ns[1].id).toEqual(3);
+    expect(ns[1].parent).toEqual(-1);
+    expect((ns[1].flags & sem_focused()) != 0).toEqual(true);
+    expect(ns[3].id).toEqual(6);
+    expect(ns[4].id).toEqual(7);
+}
+
+test "a list carries only the rows in view, under the list node" {
+    List(Widget) rows = [Text("a"), Text("b"), Text("c"), Text("d"), Text("e")];
+    List(SemNode) ns = semantics(Rows(24, 24, rows), Rect { .x = 0, .y = 0, .w = 100, .h = 48 }, ui_new());
+    expect(ns[0].role).toEqual(role_list());
+    expect(ns[0].value).toEqual("5");
+    expect(ns.len()).toEqual(3);
+    expect(ns[1].label).toEqual("b");
+    expect(ns[1].parent).toEqual(0);
+    expect(ns[1].id).toEqual(2);
+}
+
+test "a diff carries what changed and what went away" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 300, .h = 200 };
+    List(SemNode) a = semantics(form(), r, ui_new());
+    List(SemNode) b = semantics(Column([Text("Tasks"), Row([TextInput("milk", 4, Custom(1)), Button("Add", Clicked)]), Padding(4, Checkbox("Done", false, Toggled))]), r, ui_new());
+    SemDiff d = sem_diff(a, b);
+    expect(d.removed.len()).toEqual(1);
+    expect(d.removed[0]).toEqual(7);
+    expect(d.put.len()).toEqual(1);
+    expect(d.put[0].id).toEqual(6);
+    expect(sem_diff(a, a).put.len()).toEqual(0);
+}

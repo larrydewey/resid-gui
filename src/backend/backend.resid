@@ -11,6 +11,7 @@ import "../gfx/canvas.resid";
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
 import "../gfx/raster.resid";
+import "../ui/semantics.resid";
 
 /// What one wait on the display produced: the backend's next state and
 /// the events decoded, in order.
@@ -36,6 +37,10 @@ behavior Backend(B) {
     /// changed. The backend draws only those rectangles, plus whatever the
     /// buffer it draws into missed while the other buffer was on screen.
     B be_present(B b, Frame fr, List(Rect) damage);
+    /// Tell the platform what the window means: the semantics tree of the
+    /// frame on screen. A backend with no accessibility bridge yet returns
+    /// `b` unchanged; one with a bridge sends only what changed.
+    B be_semantics(B b, List(SemNode) nodes);
     /// Close the window and the connection.
     Bool be_close(B b);
 }

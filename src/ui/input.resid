@@ -13,6 +13,7 @@ import "../gfx/font.resid";
 import "layout.resid";
 import "paint.resid";
 import "state.resid";
+import "semantics.resid";
 
 /// A widget found in the tree: its number, itself and its box.
 type Found = { Int id; Widget w; Rect r; };
@@ -138,12 +139,27 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
         KeyDown(code, text) => key_down(ui, root, area, code, text, f),
         KeyUp(code) => none(mods_after(ui, code, false)),
         Blurred => UiStep { .ui = ui_with_mods(ui_with_pressed(ui, -1), false, false), .out = [] },
+        Assist(node, act) => assist(ui, root, area, node, act, f),
         _ => none(ui)
     };
     return UiStep { .ui = s.ui, .out = [e].concat(s.out) };
 }
 
 UiStep none(UiState ui) { return UiStep { .ui = ui, .out = [] }; }
+
+/// An assistive action on widget `node`: activating a button or checkbox
+/// raises its message as a click would; focusing a text input focuses it.
+/// Anything else, or a node that is not on screen, does nothing.
+UiStep assist(UiState ui, Widget root, Rect area, Int node, Int act, Font fo) {
+    Found f = find_in(root, area, node, fo);
+    if (f.id < 0) { return none(ui); }
+    return match (f.w) {
+        Button(s, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
+        Checkbox(s, c, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
+        TextInput(s, k, m) => if ((act & act_focus()) != 0) { none(ui_with_focus(ui, node)) } else { none(ui) },
+        _ => none(ui)
+    };
+}
 
 Bool is_shift(Int code) { return code == key_left_shift() || code == key_right_shift(); }
 Bool is_ctrl(Int code) { return code == key_left_ctrl() || code == key_right_ctrl(); }
@@ -396,4 +412,14 @@ test "dragging across an input selects" {
     UiStep b = ui_event(a.ui, w, area, PointerMoved(5 + 32, 10));
     expect(edited_caret(b.out)).toEqual(4);
     expect(b.ui.anchor).toEqual(1);
+}
+
+test "an assistive activation clicks; an assistive focus focuses" {
+    Widget v = Column([Button("ok", Clicked), TextInput("x", 1, Custom(1))]);
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    UiStep a = ui_event(ui_new(), v, r, Assist(1, act_activate()));
+    Bool clicked = a.out.len() == 2 && match (a.out[1]) { AppMsg(m) => msg_eq(m, Clicked), _ => false };
+    expect(clicked).toEqual(true);
+    expect(ui_event(ui_new(), v, r, Assist(2, act_focus())).ui.focus).toEqual(2);
+    expect(ui_event(ui_new(), v, r, Assist(9, act_activate())).out.len()).toEqual(1);
 }

@@ -38,6 +38,7 @@ import "ui/state.resid";
 import "ui/timer.resid";
 import "ui/semantics.resid";
 import "ui/theme.resid";
+import "a11y/atspi.resid";
 import "rsp/client.resid";
 
 /// The caret blinks, and `FrameTick` arrives, this often.
@@ -52,6 +53,7 @@ type Loop(M) = {
     List(Rect) pending; Timer blink; Bool done;
     List(Font) fonts; Font font;
     Bool rec; List(Event) log;
+    A11y a11y;
 };
 
 /// The font to draw at `scale`: the atlas made for that scale, else one
@@ -78,14 +80,14 @@ Int now_ms() { return clock.monotonic_ns() / 1000000; }
 /// is closed. Returns the process exit status: 0 after a clean close, 1
 /// when no display could be opened.
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run(WindowOptions opts) { return gui_run_with(opts, []); }
 
 /// `gui_run` with text in TrueType fonts: glyph atlases the program made
 /// with the native font module (native/font/font.resid), one per device
 /// scale it wants sharp. An empty list means the built-in bitmap font.
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_with(WindowOptions opts, List(Font) fonts) {
     M m0 = init();
     return gui_run_model(opts, m0, fonts);
@@ -94,7 +96,7 @@ pub Int gui_run_with(WindowOptions opts, List(Font) fonts) {
 /// `gui_run_with` starting from `m0` instead of `init()`: for a program
 /// whose first model depends on what `main` read (a file, the arguments).
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts) {
     Int rfd = resid_disp_connect_rsp();
     if (rfd >= 0) {
@@ -117,7 +119,7 @@ pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts) {
 /// Wayland, X11), with the events `update` saw kept. `opened` is false
 /// when no display could be opened.
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Recorded(M) gui_run_model_recorded(WindowOptions opts, M m0, List(Font) fonts) {
     Int rfd = resid_disp_connect_rsp();
     if (rfd >= 0) {
@@ -137,7 +139,7 @@ pub Recorded(M) gui_run_model_recorded(WindowOptions opts, M m0, List(Font) font
 /// `gui_run` over X11 only, for testing the X11 backend on a Wayland
 /// desktop (Xwayland).
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_x11(WindowOptions opts) {
     X11 x = x11_start(opts);
     M m0 = init();
@@ -149,13 +151,13 @@ pub Int gui_run_x11(WindowOptions opts) {
 /// Run the program from model `m0` on an opened backend, with text in
 /// `fonts` (see `gui_run_with`).
 @needs(App(M), Backend(B))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_on(B b, M m0, List(Font) fonts) {
     Widget v0 = view(m0);
     Loop(M) st = Loop {
         .model = m0, .ui = ui_new(), .view = v0, .ops = [], .w = 0, .h = 0, .scale = 0,
         .pending = [], .blink = timer_start(0, blink_ms(), now_ms()), .done = false,
-        .fonts = fonts, .font = pick_font(fonts, be_scale(b)), .rec = false, .log = []
+        .fonts = fonts, .font = pick_font(fonts, be_scale(b)), .rec = false, .log = [], .a11y = a11y_start("resid-gui")
     };
     return gui_loop(b, st);
 }
@@ -174,13 +176,13 @@ pub type Recorded(M) = { Bool opened; M model; List(Event) log; };
 
 /// `gui_run_on`, keeping the events `update` saw.
 @needs(App(M), Backend(B))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Recorded(M) gui_run_recorded(B b, M m0, List(Font) fonts) {
     Widget v0 = view(m0);
     Loop(M) st = Loop {
         .model = m0, .ui = ui_new(), .view = v0, .ops = [], .w = 0, .h = 0, .scale = 0,
         .pending = [], .blink = timer_start(0, blink_ms(), now_ms()), .done = false,
-        .fonts = fonts, .font = pick_font(fonts, be_scale(b)), .rec = true, .log = []
+        .fonts = fonts, .font = pick_font(fonts, be_scale(b)), .rec = true, .log = [], .a11y = a11y_start("resid-gui")
     };
     Loop(M) end = run_loop(b, st);
     return Recorded { .opened = true, .model = end.model, .log = end.log };
@@ -195,15 +197,39 @@ Loop(M) run_loop(B b, Loop(M) st0) {
     }
     Loop(M) st = render(b, st0);
     Int s = be_scale(b);
-    B bs = be_semantics(b, semantics_in(st.view, Rect { .x = 0, .y = 0, .w = be_width(b) / s, .h = be_height(b) / s }, st.ui, st.font));
+    List(SemNode) sem = semantics_in(st.view, Rect { .x = 0, .y = 0, .w = be_width(b) / s, .h = be_height(b) / s }, st.ui, st.font);
+    B bs = be_semantics(b, sem);
+    A11y a1 = a11y_tree(st.a11y, sem);
     Bool show = st.pending.len() > 0 && be_ready(bs);
     B b2 = if (show) { be_present(bs, Frame { .ops = st.ops, .scale = st.scale, .font = st.font }, st.pending) } else { bs };
-    Loop(M) st2 = if (show) { with_pending(st, []) } else { st };
-    Int wait = timer_wait(st2.blink, now_ms());
-    Pumped(B) p = be_pump(b2, if (wait < 0) { 1000 } else { wait });
-    Loop(M) st3 = fold_events(p.events, 0, st2, be_scale(p.b), be_width(p.b), be_height(p.b));
+    Loop(M) st2 = with_a11y(if (show) { with_pending(st, []) } else { st }, a1);
+    Int wait0 = timer_wait(st2.blink, now_ms());
+    Int wait = if (wait0 < 0) { 1000 } else { wait0 };
+    // With a screen reader's bus open, wait on it and the display together,
+    // then read the display without waiting: a reader's question is
+    // answered at once, not at the next caret blink.
+    Int ms = if (a11y_alive(a1)) { wait_both(be_fd(b2), a11y_fd(a1), wait) } else { wait };
+    Pumped(B) p = be_pump(b2, ms);
+    A11yStep ax = a11y_pump(a1);
+    Loop(M) st3 = fold_events(p.events.concat(ax.events), 0, with_a11y(st2, ax.a), be_scale(p.b), be_width(p.b), be_height(p.b));
     Loop(M) st4 = tick(st3, now_ms());
     return run_loop(p.b, st4);
+}
+
+/// Wait up to `ms` for either descriptor; 0 afterwards, so the backend
+/// reads what came without waiting again.
+@requires(display)
+Int wait_both(Int dfd, Int afd, Int ms) {
+    List(Int) fds = if (dfd >= 0) { [dfd, afd] } else { [afd] };
+    _ = resid_disp_poll(fds, if (dfd >= 0) { [1, 1] } else { [1] }, ms);
+    return 0;
+}
+
+@needs(App(M))
+Loop(M) with_a11y(Loop(M) st, A11y a) {
+    return Loop { .model = st.model, .ui = st.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
+                  .pending = st.pending, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font,
+                  .rec = st.rec, .log = st.log, .a11y = a };
 }
 
 /// Paint the current view and add what changed to the pending damage. A
@@ -221,7 +247,7 @@ Loop(M) render(B b, Loop(M) st) {
     return Loop {
         .model = st.model, .ui = st.ui, .view = st.view, .ops = ops, .w = w, .h = h, .scale = s,
         .pending = rects_clip(if (fresh) { dmg } else { rects_merge(st.pending, dmg) }, all), .blink = st.blink, .done = st.done,
-        .fonts = st.fonts, .font = f, .rec = st.rec, .log = st.log
+        .fonts = st.fonts, .font = f, .rec = st.rec, .log = st.log, .a11y = st.a11y
     };
 }
 
@@ -233,7 +259,7 @@ List(Rect) scale_all(List(Rect) rs, Int s, Int i, List(Rect) acc) {
 @needs(App(M))
 Loop(M) with_pending(Loop(M) st, List(Rect) p) {
     return Loop { .model = st.model, .ui = st.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-                  .pending = p, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log };
+                  .pending = p, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log, .a11y = st.a11y };
 }
 
 /// A device-pixel event in the program's logical pixels.
@@ -256,7 +282,7 @@ Loop(M) fold_events(List(Event) es, Int i, Loop(M) st, Int s, Int w, Int h) {
     UiStep u = ui_event_in(st.ui, st.view, area, to_logical(es[i], s), st.font);
     Loop(M) next = apply(u.out, 0, Loop {
         .model = st.model, .ui = u.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
-        .pending = st.pending, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log
+        .pending = st.pending, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log, .a11y = st.a11y
     });
     return fold_events(es, i + 1, next, s, w, h);
 }
@@ -272,7 +298,7 @@ Loop(M) apply(List(Event) es, Int i, Loop(M) st) {
     return apply(es, i + 1, Loop {
         .model = m, .ui = st.ui, .view = view(m), .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
         .pending = st.pending, .blink = st.blink, .done = st.done || closed, .fonts = st.fonts, .font = st.font,
-        .rec = st.rec, .log = if (st.rec && !closed) { st.log.concat([es[i]]) } else { st.log }
+        .rec = st.rec, .log = if (st.rec && !closed) { st.log.concat([es[i]]) } else { st.log }, .a11y = st.a11y
     });
 }
 
@@ -284,7 +310,7 @@ Loop(M) tick(Loop(M) st, Int now) {
     return Loop {
         .model = m, .ui = ui_with_caret(st.ui, !st.ui.caret_on), .view = view(m), .ops = st.ops, .w = st.w, .h = st.h,
         .scale = st.scale, .pending = st.pending, .blink = timer_reset(st.blink, now), .done = st.done,
-        .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log
+        .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log, .a11y = st.a11y
     };
 }
 

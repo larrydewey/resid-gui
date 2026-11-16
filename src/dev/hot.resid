@@ -35,7 +35,7 @@ List(Event) warn_empty(Str why) {
 /// session's events to the log when the window closes. Returns 1 when no
 /// display could be opened or the log could not be written.
 @needs(App(M))
-@requires(display, clock(readonly), filesystem)
+@requires(display, accessibility, clock(readonly), filesystem)
 pub Int gui_run_dev(WindowOptions opts, Str log_path) {
     List(Event) past = read_log(log_path);
     M m0 = replay(init(), past);

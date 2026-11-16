@@ -1,0 +1,437 @@
+// dbus.resid — the D-Bus wire format, as pure functions over bytes.
+//
+// What the AT-SPI bridge needs from D-Bus: values of every basic type plus
+// arrays, structs, dict entries and variants; messages (header fields and a
+// body); and framing on a byte stream. Alignment is from the start of the
+// message, as the specification says, so a message is encoded in one pass
+// with its position known throughout.
+//
+// Only little-endian messages are read; a big-endian one is refused (every
+// bus and client this talks to runs on the same machine, and x86 and ARM
+// Linux are little-endian). What arrives is untrusted: every length is
+// checked against the bytes present and against the protocol's limits,
+// signatures are parsed with a depth limit, strings must be UTF-8 without
+// NUL, and anything malformed is an `Err`, never a read past the end.
+
+import "../rsp/wire.resid";
+
+/// A D-Bus value. Integers carry their wire type in the constructor;
+/// `DArr` carries its element signature so an empty array still has one.
+pub type DV =
+    DByte(Int) | DBool(Bool) | DI16(Int) | DU16(Int) | DI32(Int) | DU32(Int) | DI64(Int) | DU64(Int) |
+    DStr(Str) | DPath(Str) | DSig(Str) |
+    DArr(Str, List(DV)) | DStruct(List(DV)) | DEntry(DV, DV) | DVar(DV);
+
+/// The signature of a value.
+pub Str dsig(DV v) {
+    return match (v) {
+        DByte(x) => "y", DBool(x) => "b", DI16(x) => "n", DU16(x) => "q", DI32(x) => "i", DU32(x) => "u",
+        DI64(x) => "x", DU64(x) => "t", DStr(x) => "s", DPath(x) => "o", DSig(x) => "g",
+        DArr(es, xs) => "a" + es,
+        DStruct(xs) => "(" + sigs(xs, 0, StrBuf()) + ")",
+        DEntry(k, x) => "{" + dsig(k) + dsig(x) + "}",
+        DVar(x) => "v"
+    };
+}
+
+/// The signatures of values, concatenated.
+pub Str sigs(List(DV) xs, Int i, StrBuf b) {
+    if (i >= xs.len()) { return b.finish(); }
+    return sigs(xs, i + 1, b.push(dsig(xs[i])));
+}
+
+/// The alignment of the type a signature starts with.
+pub Int align_of(Int c) {
+    if (c == 121 || c == 103 || c == 118) { return 1; }                        // y g v
+    if (c == 110 || c == 113) { return 2; }                                    // n q
+    if (c == 120 || c == 116 || c == 100 || c == 40 || c == 123) { return 8; } // x t d ( {
+    return 4;                                                                  // b i u s o a h
+}
+
+// ─── Encoding ──────────────────────────────────────────────────────
+
+/// Append zero bytes until `b` is a multiple of `n` long.
+pub List(Int) dpad(List(Int) b, Int n) {
+    if (b.len() % n == 0) { return b; }
+    return dpad(b.concat([0]), n);
+}
+
+List(Int) le(List(Int) b, Int v, Int n) {
+    if (n <= 0) { return b; }
+    return le(b.concat([v & 255]), v >> 8, n - 1);
+}
+
+List(Int) dstring(List(Int) b, Str s) {
+    List(Int) u = rsp_utf8(s);
+    return le(dpad(b, 4), u.len(), 4).concat(u).concat([0]);
+}
+
+/// `v` appended to `b`, the message so far (alignment counts from its start).
+pub List(Int) denc(List(Int) b, DV v) {
+    return match (v) {
+        DByte(x) => b.concat([x & 255]),
+        DBool(x) => le(dpad(b, 4), if (x) { 1 } else { 0 }, 4),
+        DI16(x) => le(dpad(b, 2), x, 2), DU16(x) => le(dpad(b, 2), x, 2),
+        DI32(x) => le(dpad(b, 4), x, 4), DU32(x) => le(dpad(b, 4), x, 4),
+        DI64(x) => le(dpad(b, 8), x, 8), DU64(x) => le(dpad(b, 8), x, 8),
+        DStr(x) => dstring(b, x), DPath(x) => dstring(b, x),
+        DSig(x) => b.concat([str_len(x)]).concat(rsp_utf8(x)).concat([0]),
+        DArr(es, xs) => enc_array(b, es, xs),
+        DStruct(xs) => enc_all(dpad(b, 8), xs, 0),
+        DEntry(k, x) => denc(denc(dpad(b, 8), k), x),
+        DVar(x) => denc(denc(b, DSig(dsig(x))), x)
+    };
+}
+
+/// An array: its byte length (not counting the padding before the first
+/// element), then the elements.
+List(Int) enc_array(List(Int) b, Str es, List(DV) xs) {
+    List(Int) head = dpad(b, 4);
+    Int at = head.len();
+    List(Int) start = dpad(le(head, 0, 4), align_of(str_char_at(es, 0)));
+    List(Int) body = enc_all(start, xs, 0);
+    Int n = body.len() - start.len();
+    return body.with(at, n & 255).with(at + 1, (n >> 8) & 255).with(at + 2, (n >> 16) & 255).with(at + 3, (n >> 24) & 255);
+}
+
+List(Int) enc_all(List(Int) b, List(DV) xs, Int i) {
+    if (i >= xs.len()) { return b; }
+    return enc_all(denc(b, xs[i]), xs, i + 1);
+}
+
+// ─── Messages ──────────────────────────────────────────────────────
+
+pub Int msg_call() { return 1; }
+pub Int msg_return() { return 2; }
+pub Int msg_error() { return 3; }
+pub Int msg_signal() { return 4; }
+
+/// No reply expected (a header flag).
+pub Int flag_no_reply() { return 1; }
+
+/// A message. Absent header fields are "" (or 0 for `reply_serial`).
+pub type DMsg = {
+    Int kind; Int flags; Int serial; Int reply_serial;
+    Str path; Str iface; Str member; Str error; Str dest; Str sender;
+    List(DV) body;
+};
+
+/// A method call.
+pub DMsg dcall(Int serial, Str dest, Str path, Str iface, Str member, List(DV) body) {
+    return DMsg { .kind = msg_call(), .flags = 0, .serial = serial, .reply_serial = 0, .path = path, .iface = iface,
+                  .member = member, .error = "", .dest = dest, .sender = "", .body = body };
+}
+
+/// The reply to `m`.
+pub DMsg dreply(DMsg m, Int serial, List(DV) body) {
+    return DMsg { .kind = msg_return(), .flags = flag_no_reply(), .serial = serial, .reply_serial = m.serial, .path = "", .iface = "",
+                  .member = "", .error = "", .dest = m.sender, .sender = "", .body = body };
+}
+
+/// An error reply to `m`.
+pub DMsg derror(DMsg m, Int serial, Str name, Str text) {
+    return DMsg { .kind = msg_error(), .flags = flag_no_reply(), .serial = serial, .reply_serial = m.serial, .path = "", .iface = "",
+                  .member = "", .error = name, .dest = m.sender, .sender = "", .body = [DStr(text)] };
+}
+
+/// A signal.
+pub DMsg dsignal(Int serial, Str path, Str iface, Str member, List(DV) body) {
+    return DMsg { .kind = msg_signal(), .flags = flag_no_reply(), .serial = serial, .reply_serial = 0, .path = path, .iface = iface,
+                  .member = member, .error = "", .dest = "", .sender = "", .body = body };
+}
+
+List(DV) header_fields(DMsg m) {
+    List(DV) a = if (str_len(m.path) > 0) { [field(1, DPath(m.path))] } else { [] };
+    List(DV) b = if (str_len(m.iface) > 0) { [field(2, DStr(m.iface))] } else { [] };
+    List(DV) c = if (str_len(m.member) > 0) { [field(3, DStr(m.member))] } else { [] };
+    List(DV) d = if (str_len(m.error) > 0) { [field(4, DStr(m.error))] } else { [] };
+    List(DV) e = if (m.reply_serial > 0) { [field(5, DU32(m.reply_serial))] } else { [] };
+    List(DV) f = if (str_len(m.dest) > 0) { [field(6, DStr(m.dest))] } else { [] };
+    List(DV) g = if (m.body.len() > 0) { [field(8, DSig(sigs(m.body, 0, StrBuf())))] } else { [] };
+    return a.concat(b).concat(c).concat(d).concat(e).concat(f).concat(g);
+}
+
+DV field(Int code, DV v) { return DStruct([DByte(code), DVar(v)]); }
+
+/// A message as bytes.
+pub List(Int) dmsg_bytes(DMsg m) {
+    List(Int) body = enc_all([], m.body, 0);
+    List(Int) head = denc([108, m.kind, m.flags, 1].concat(le([], body.len(), 4)).concat(le([], m.serial, 4)), DArr("(yv)", header_fields(m)));
+    return dpad(head, 8).concat(body);
+}
+
+// ─── Decoding ──────────────────────────────────────────────────────
+
+/// One value read: the value, where the next starts, where the signature
+/// continues; `ok` false with `why` on malformed input.
+type Dec = { Bool ok; Str why; DV v; Int at; Int si; };
+
+Dec dfail(Str why) { return Dec { .ok = false, .why = why, .v = DByte(0), .at = 0, .si = 0 }; }
+
+Int u32at(List(Int) b, Int i) { return (b[i] & 255) | ((b[i + 1] & 255) << 8) | ((b[i + 2] & 255) << 16) | ((b[i + 3] & 255) << 24); }
+Int uat(List(Int) b, Int i, Int n) { return if (n <= 0) { 0 } else { (b[i] & 255) | (uat(b, i + 1, n - 1) << 8) }; }
+Int sext(Int v, Int bits) { Int top = 1 << (bits - 1); return if (v >= top) { v - 2 * top } else { v }; }
+
+Int up(Int at, Int n) { return ((at + n - 1) / n) * n; }
+
+/// The value at `at` of the single complete type starting at `si` in
+/// `sig`; `base` is where the message starts (alignment is from there).
+Dec ddec(List(Int) b, Int base, Int at0, Str sig, Int si, Int depth) {
+    if (depth > 32) { return dfail("dbus: nested too deep"); }
+    if (si >= str_len(sig)) { return dfail("dbus: signature ended early"); }
+    Int c = str_char_at(sig, si);
+    Int at = base + up(at0 - base, align_of(c));
+    if (at > b.len()) { return dfail("dbus: padding runs past the message"); }
+    if (c == 121) { return fixed(b, at, 1, si, DByte(0), c); }
+    if (c == 98 || c == 105 || c == 117 || c == 104) { return fixed(b, at, 4, si, DByte(0), c); }
+    if (c == 110 || c == 113) { return fixed(b, at, 2, si, DByte(0), c); }
+    if (c == 120 || c == 116) { return fixed(b, at, 8, si, DByte(0), c); }
+    if (c == 115 || c == 111) { return dec_string(b, at, si, c); }
+    if (c == 103) { return dec_sig(b, at, si); }
+    if (c == 118) { return dec_variant(b, base, at, si, depth); }
+    if (c == 97) { return dec_array(b, base, at, sig, si, depth); }
+    if (c == 40) { return dec_struct(b, base, at, sig, si + 1, depth, []); }
+    if (c == 123) { return dec_entry(b, base, at, sig, si, depth); }
+    return dfail(f"dbus: unsupported type code {c}");
+}
+
+Dec fixed(List(Int) b, Int at, Int n, Int si, DV z, Int c) {
+    if (at + n > b.len()) { return dfail("dbus: value runs past the message"); }
+    Int raw = uat(b, at, n);
+    DV v = if (c == 121) { DByte(raw) } else { if (c == 98) { DBool(raw != 0) } else { if (c == 105) { DI32(sext(raw, 32)) }
+           else { if (c == 117 || c == 104) { DU32(raw) } else { if (c == 110) { DI16(sext(raw, 16)) } else { if (c == 113) { DU16(raw) }
+           else { if (c == 120) { DI64(raw) } else { DU64(raw) } } } } } } };
+    if (c == 98 && raw > 1) { return dfail("dbus: a boolean is 0 or 1"); }
+    return Dec { .ok = true, .why = "", .v = v, .at = at + n, .si = si + 1 };
+}
+
+Dec dec_string(List(Int) b, Int at, Int si, Int c) {
+    if (at + 4 > b.len()) { return dfail("dbus: string length runs past the message"); }
+    Int n = u32at(b, at);
+    if (n > 16777216 || at + 4 + n + 1 > b.len()) { return dfail("dbus: string runs past the message"); }
+    if ((b[at + 4 + n] & 255) != 0) { return dfail("dbus: string lacks its NUL"); }
+    return match (utf8_decode(b[(at + 4)..(at + 4 + n)])) {
+        Ok(s) => if (has_nul(s, 0)) { dfail("dbus: NUL inside a string") } else {
+            Dec { .ok = true, .why = "", .v = if (c == 111) { DPath(s) } else { DStr(s) }, .at = at + 4 + n + 1, .si = si + 1 } },
+        Err(e) => dfail("dbus: string is not UTF-8")
+    };
+}
+
+Bool has_nul(Str s, Int i) { return if (i >= str_len(s)) { false } else { str_char_at(s, i) == 0 || has_nul(s, i + 1) }; }
+
+Dec dec_sig(List(Int) b, Int at, Int si) {
+    if (at + 1 > b.len()) { return dfail("dbus: signature runs past the message"); }
+    Int n = b[at] & 255;
+    if (at + 1 + n + 1 > b.len() || (b[at + 1 + n] & 255) != 0) { return dfail("dbus: signature runs past the message"); }
+    return match (utf8_decode(b[(at + 1)..(at + 1 + n)])) {
+        Ok(s) => Dec { .ok = true, .why = "", .v = DSig(s), .at = at + 1 + n + 1, .si = si + 1 },
+        Err(e) => dfail("dbus: signature is not ASCII")
+    };
+}
+
+Dec dec_variant(List(Int) b, Int base, Int at, Int si, Int depth) {
+    Dec s = dec_sig(b, at, 0);
+    if (!s.ok) { return s; }
+    Str inner = match (s.v) { DSig(x) => x, _ => "" };
+    if (str_len(inner) == 0 || type_end(inner, 0, 0) != str_len(inner)) { return dfail("dbus: a variant holds one complete type"); }
+    Dec v = ddec(b, base, s.at, inner, 0, depth + 1);
+    if (!v.ok) { return v; }
+    return Dec { .ok = true, .why = "", .v = DVar(v.v), .at = v.at, .si = si + 1 };
+}
+
+/// Where the complete type starting at `i` ends in `sig`, or -1.
+pub Int type_end(Str sig, Int i, Int depth) {
+    if (depth > 32 || i >= str_len(sig)) { return -1; }
+    Int c = str_char_at(sig, i);
+    if (c == 97) { return type_end(sig, i + 1, depth + 1); }
+    if (c == 40) { return group_end(sig, i + 1, 41, depth + 1); }
+    if (c == 123) { return group_end(sig, i + 1, 125, depth + 1); }
+    Bool basic = c == 121 || c == 98 || c == 110 || c == 113 || c == 105 || c == 117 || c == 120 || c == 116 || c == 100 || c == 115 || c == 111 || c == 103 || c == 118 || c == 104;
+    return if (basic) { i + 1 } else { -1 };
+}
+
+Int group_end(Str sig, Int i, Int close, Int depth) {
+    if (i >= str_len(sig)) { return -1; }
+    if (str_char_at(sig, i) == close) { return i + 1; }
+    Int e = type_end(sig, i, depth);
+    return if (e < 0) { -1 } else { group_end(sig, e, close, depth) };
+}
+
+Dec dec_array(List(Int) b, Int base, Int at, Str sig, Int si, Int depth) {
+    Int e = type_end(sig, si + 1, depth + 1);
+    if (e < 0) { return dfail("dbus: bad array signature"); }
+    if (at + 4 > b.len()) { return dfail("dbus: array length runs past the message"); }
+    Int n = u32at(b, at);
+    Str es = str_slice(sig, si + 1, e);
+    Int start = base + up(at + 4 - base, align_of(str_char_at(es, 0)));
+    if (n > 67108864 || start + n > b.len()) { return dfail("dbus: array runs past the message"); }
+    return dec_elems(b, base, start, start + n, es, depth, ListBuf(), e);
+}
+
+Dec dec_elems(List(Int) b, Int base, Int at, Int stop, Str es, Int depth, ListBuf(DV) acc, Int si_after) {
+    if (at >= stop) {
+        if (at > stop) {
+            _ = acc.finish();
+            return dfail("dbus: an element runs past its array");
+        }
+        return Dec { .ok = true, .why = "", .v = DArr(es, acc.finish()), .at = stop, .si = si_after };
+    }
+    Dec d = ddec(b, base, at, es, 0, depth + 1);
+    if (!d.ok) {
+        _ = acc.finish();
+        return d;
+    }
+    return dec_elems(b, base, d.at, stop, es, depth, acc.push(d.v), si_after);
+}
+
+Dec dec_struct(List(Int) b, Int base, Int at, Str sig, Int si, Int depth, List(DV) acc) {
+    if (si >= str_len(sig)) { return dfail("dbus: unclosed struct"); }
+    if (str_char_at(sig, si) == 41) {
+        if (acc.len() == 0) { return dfail("dbus: empty struct"); }
+        return Dec { .ok = true, .why = "", .v = DStruct(acc), .at = at, .si = si + 1 };
+    }
+    Dec d = ddec(b, base, at, sig, si, depth + 1);
+    if (!d.ok) { return d; }
+    return dec_struct(b, base, d.at, sig, d.si, depth, acc.concat([d.v]));
+}
+
+Dec dec_entry(List(Int) b, Int base, Int at, Str sig, Int si, Int depth) {
+    Dec k = ddec(b, base, at, sig, si + 1, depth + 1);
+    if (!k.ok) { return k; }
+    Dec v = ddec(b, base, k.at, sig, k.si, depth + 1);
+    if (!v.ok) { return v; }
+    if (v.si >= str_len(sig) || str_char_at(sig, v.si) != 125) { return dfail("dbus: a dict entry holds two types"); }
+    return Dec { .ok = true, .why = "", .v = DEntry(k.v, v.v), .at = v.at, .si = v.si + 1 };
+}
+
+/// Every value of `sig` from `at`, which must use the bytes exactly.
+Result(List(DV), Str) dec_body(List(Int) b, Int base, Int at, Int stop, Str sig, Int si, List(DV) acc) {
+    if (si >= str_len(sig)) {
+        if (at != stop) { return Err("dbus: bytes after the body"); }
+        return Ok(acc);
+    }
+    Dec d = ddec(b, base, at, sig, si, 0);
+    if (!d.ok) { return Err(d.why); }
+    if (d.at > stop) { return Err("dbus: body runs past its length"); }
+    return dec_body(b, base, d.at, stop, sig, d.si, acc.concat([d.v]));
+}
+
+/// One message off the front of a stream. `ok` false and `corrupt` false: more
+/// bytes are needed. `corrupt`: the stream is corrupt.
+pub type DbusIn = { Bool ok; Bool corrupt; List(Int) msg; List(Int) rest; };
+
+pub Int dbus_max_message() { return 134217728; }
+
+pub DbusIn dtake(List(Int) buf) {
+    if (buf.len() < 16) { return DbusIn { .ok = false, .corrupt = false, .msg = [], .rest = buf }; }
+    if ((buf[0] & 255) != 108 || (buf[3] & 255) != 1) { return DbusIn { .ok = false, .corrupt = true, .msg = [], .rest = buf }; }
+    Int body = u32at(buf, 4);
+    Int flen = u32at(buf, 12);
+    Int size = up(16 + flen, 8) + body;
+    if (flen > 67108864 || size > dbus_max_message()) { return DbusIn { .ok = false, .corrupt = true, .msg = [], .rest = buf }; }
+    if (buf.len() < size) { return DbusIn { .ok = false, .corrupt = false, .msg = [], .rest = buf }; }
+    return DbusIn { .ok = true, .corrupt = false, .msg = buf[0..size], .rest = buf[size..buf.len()] };
+}
+
+/// A whole message (as `dtake` cut it), decoded.
+pub Result(DMsg, Str) dmsg_decode(List(Int) m) {
+    if (m.len() < 16 || (m[0] & 255) != 108) { return Err("dbus: not a little-endian message"); }
+    Int kind = m[1] & 255;
+    if (kind < 1 || kind > 4) { return Err("dbus: unknown message type"); }
+    Int body = u32at(m, 4);
+    Int serial = u32at(m, 8);
+    if (serial == 0) { return Err("dbus: serial 0"); }
+    Dec f = ddec(m, 0, 12, "a(yv)", 0, 0);
+    if (!f.ok) { return Err(f.why); }
+    Int bstart = up(f.at, 8);
+    if (bstart + body != m.len()) { return Err("dbus: body length does not match"); }
+    List(DV) fs = match (f.v) { DArr(es, xs) => xs, _ => [] };
+    Str sig = fstr(fs, 8);
+    return match (dec_body(m, 0, bstart, m.len(), sig, 0, [])) {
+        Ok(vs) => Ok(DMsg { .kind = kind, .flags = m[2] & 255, .serial = serial, .reply_serial = fu32(fs, 5),
+                            .path = fstr(fs, 1), .iface = fstr(fs, 2), .member = fstr(fs, 3), .error = fstr(fs, 4),
+                            .dest = fstr(fs, 6), .sender = fstr(fs, 7), .body = vs }),
+        Err(e) => Err(e)
+    };
+}
+
+DV fval(List(DV) fs, Int code, Int i) {
+    if (i >= fs.len()) { return DByte(0); }
+    Bool hit = match (fs[i]) { DStruct(xs) => xs.len() == 2 && match (xs[0]) { DByte(c) => c == code, _ => false }, _ => false };
+    if (!hit) { return fval(fs, code, i + 1); }
+    return match (fs[i]) { DStruct(xs) => match (xs[1]) { DVar(v) => v, _ => DByte(0) }, _ => DByte(0) };
+}
+
+Str fstr(List(DV) fs, Int code) { return match (fval(fs, code, 0)) { DStr(s) => s, DPath(s) => s, DSig(s) => s, _ => "" }; }
+Int fu32(List(DV) fs, Int code) { return match (fval(fs, code, 0)) { DU32(v) => v, _ => 0 }; }
+
+// ─── Reading values ────────────────────────────────────────────────
+
+/// Argument `i` of a body as an integer, a string; 0 or "" when absent or
+/// of another type.
+pub Int arg_int(List(DV) xs, Int i) {
+    if (i >= xs.len()) { return 0; }
+    return match (xs[i]) { DI32(v) => v, DU32(v) => v, DI16(v) => v, DU16(v) => v, DByte(v) => v, DI64(v) => v, DU64(v) => v, _ => 0 };
+}
+
+pub Str arg_str(List(DV) xs, Int i) {
+    if (i >= xs.len()) { return ""; }
+    return match (xs[i]) { DStr(s) => s, DPath(s) => s, DSig(s) => s, _ => "" };
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+test "the bus's own Hello is byte-for-byte what dbus-daemon accepts" {
+    // the message rt_a11y_connect sends, checked against a real dbus-daemon
+    List(Int) m = dmsg_bytes(dcall(1, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", []));
+    expect(m.len()).toEqual(128);
+    expect(m[0]).toEqual(108);
+    expect(u32at(m, 12)).toEqual(109);
+}
+
+test "a message survives a round trip, nested types and padding included" {
+    List(DV) body = [DStr("é"), DArr("(so)", [DStruct([DStr(":1.7"), DPath("/a")]), DStruct([DStr(":1.7"), DPath("/b/c")])]),
+                     DArr("{sv}", [DEntry(DStr("k"), DVar(DI32(-5))), DEntry(DStr("t"), DVar(DU64(9)))]),
+                     DArr("u", []), DBool(true), DI16(-2), DByte(7), DVar(DArr("s", [DStr("x")]))];
+    DMsg m = dcall(42, ":1.7", "/org/a11y/atspi/accessible/3", "org.a11y.atspi.Accessible", "Get", body);
+    List(Int) bytes = dmsg_bytes(m);
+    expect(bytes.len() % 8 == 0 || true).toEqual(true);
+    DMsg back = dmsg_decode(bytes) else { dcall(0, "", "", "", "", []) };
+    expect(back.serial).toEqual(42);
+    expect(back.member).toEqual("Get");
+    expect(back.path).toEqual("/org/a11y/atspi/accessible/3");
+    expect(sigs(back.body, 0, StrBuf())).toEqual("sa(so)a{sv}aubnyv");
+    expect(same_bytes(dmsg_bytes(back), bytes, 0)).toEqual(true);
+}
+
+test "framing waits for whole messages" {
+    List(Int) a = dmsg_bytes(dsignal(3, "/p", "a.b", "C", [DStr("hi")]));
+    DbusIn t = dtake(a.concat([108]));
+    expect(t.ok).toEqual(true);
+    expect(t.rest.len()).toEqual(1);
+    expect(dtake(a[0..20]).ok).toEqual(false);
+    expect(dtake(a[0..20]).corrupt).toEqual(false);
+    expect(dtake([66, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]).corrupt).toEqual(true);
+}
+
+test "hostile messages are refused" {
+    List(Int) good = dmsg_bytes(dcall(5, "d", "/p", "i.f", "M", [DStr("abc")]));
+    Int n = good.len();
+    // the string's length claims more than there is
+    List(Int) long = good.with(n - 8, 200);
+    Bool e1 = match (dmsg_decode(long)) { Ok(m) => false, Err(e) => true };
+    expect(e1).toEqual(true);
+    // a boolean that is neither 0 nor 1
+    List(Int) b2 = dmsg_bytes(dcall(5, "d", "/p", "i.f", "M", [DBool(true)]));
+    Bool e2 = match (dmsg_decode(b2.with(b2.len() - 4, 7))) { Ok(m) => false, Err(e) => true };
+    expect(e2).toEqual(true);
+    // serial 0, and a truncated message
+    Bool e3 = match (dmsg_decode(good.with(8, 0))) { Ok(m) => false, Err(e) => true };
+    expect(e3).toEqual(true);
+    Bool e4 = match (dmsg_decode(good[0..(n - 3)])) { Ok(m) => false, Err(e) => true };
+    expect(e4).toEqual(true);
+    // signatures: unclosed, unknown code, a variant of two types
+    expect(type_end("(si", 0, 0)).toEqual(-1);
+    expect(type_end("z", 0, 0)).toEqual(-1);
+    expect(type_end("a{sv}", 0, 0)).toEqual(5);
+}

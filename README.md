@@ -26,7 +26,7 @@ Widget counter_view(Int m) {
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 Int main() {
     return gui_run(WindowOptions { .title = "Counter", .width = 320, .height = 120, .resizable = true });
 }
@@ -111,6 +111,26 @@ For development, `gui_run_dev` (`src/dev/hot.resid`) logs every event
 comes back where it was (`examples/dev_counter.resid`).
 `tools/caps_manifest.py` turns a program's capabilities into platform
 permission manifests. The plan is `PLAN-ui-everywhere.md`.
+
+## Accessibility
+
+Screen readers read a resid-gui window. On Linux the library joins the
+accessibility bus (AT-SPI over D-Bus, `src/a11y/`) and serves the
+semantics tree there: roles, names, states, text, extents, and actions
+that come back as `Assist` events; on other platforms the host shell hands
+the same tree to the platform's API. Being on that bus means being able to
+read other programs' trees, so it is a capability of its own: a GUI
+program declares `@requires(display, accessibility, ...)`.
+`tests/atspi.sh` drives the counter through a real `dbus-daemon` with
+GLib's `gdbus` playing the screen reader.
+
+## The residual lens
+
+`tools/resid_lens.py PROGRAM.resid` shows which widgets the compiler
+built at compile time and which are built while the program runs, on a
+real frame, with the reason for each (it uses `m`; it calls `rows(...)`).
+It reads the compiler's reduced program (`--dump-reduced`), so it shows
+what the reducer actually did, misses included.
 
 ## Themes
 

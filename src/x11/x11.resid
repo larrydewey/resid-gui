@@ -438,12 +438,13 @@ pub Bool x11_alive(X11 x) { return x.alive; }
 /// No appearance hints yet: the desktop's colour scheme comes over D-Bus
 /// (the settings portal), which this backend does not speak.
 pub Int x11_hints(X11 b) { return 0; }
+pub Int x11_fd(X11 b) { return b.fd; }
 
 pub X11 x11_semantics(X11 b, List(SemNode) nodes) { return b; }
 
 Backend(X11) = {
     .be_pump = x11_pump, .be_alive = x11_alive, .be_width = x11_width, .be_height = x11_height,
-    .be_scale = x11_scale_of, .be_ready = x11_ready, .be_present = x11_present, .be_close = x11_close, .be_semantics = x11_semantics, .be_hints = x11_hints
+    .be_scale = x11_scale_of, .be_ready = x11_ready, .be_present = x11_present, .be_close = x11_close, .be_semantics = x11_semantics, .be_hints = x11_hints, .be_fd = x11_fd
 };
 
 test "wheel buttons are notches, other buttons press and release" {

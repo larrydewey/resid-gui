@@ -79,7 +79,7 @@ Widget todo_view(Todo t) {
 
 App(Todo) = { .init = todo_init, .update = todo_update, .view = todo_view };
 
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 Int main() {
     return gui_run(WindowOptions { .title = "Todo", .width = 360, .height = 300, .resizable = true });
 }

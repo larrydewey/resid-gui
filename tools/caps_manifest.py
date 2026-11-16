@@ -29,6 +29,9 @@ import sys
 # capability (family, mode) -> per-platform needs. mode None means read-write.
 MAP = {
     "display": {"macos": [], "windows": [], "android": []},
+    # Being readable by screen readers needs no store permission anywhere;
+    # the platforms' accessibility frameworks serve every app.
+    "accessibility": {"macos": [], "windows": [], "android": []},
     "clock": {"macos": [], "windows": [], "android": []},
     "args": {"macos": [], "windows": [], "android": []},
     "environment": {"macos": [], "windows": [], "android": []},

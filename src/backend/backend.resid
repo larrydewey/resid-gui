@@ -44,6 +44,9 @@ behavior Backend(B) {
     /// The platform's appearance hints (`hint_*` in ui/theme.resid: dark,
     /// reduced motion, high contrast), 0 when the backend knows none.
     Int be_hints(B b);
+    /// The descriptor the backend reads, so the loop can wait on it beside
+    /// others (the accessibility bus); -1 when there is none.
+    Int be_fd(B b);
     /// Close the window and the connection.
     Bool be_close(B b);
 }

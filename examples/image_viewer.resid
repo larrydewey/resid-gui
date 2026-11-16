@@ -58,7 +58,7 @@ Widget viewer_view(Viewer v) {
 
 App(Viewer) = { .init = viewer_init, .update = viewer_update, .view = viewer_view };
 
-@requires(display, clock(readonly), args, filesystem(readonly), native_image)
+@requires(display, accessibility, clock(readonly), args, filesystem(readonly), native_image)
 Int main() {
     Str path = args.get(1);
     if (str_len(path) == 0) {

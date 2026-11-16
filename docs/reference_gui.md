@@ -33,23 +33,23 @@ The meaning of each event and widget is in
 
 ```resid
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run(WindowOptions opts)
 
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_x11(WindowOptions opts)
 
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_with(WindowOptions opts, List(Font) fonts)
 
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
 
 @needs(App(M), Backend(B))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_on(B b, M m0, List(Font) fonts)
 
 pub Font pick_font(List(Font) fs, Int scale)

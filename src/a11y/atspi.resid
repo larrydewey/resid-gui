@@ -1,0 +1,615 @@
+// atspi.resid — the semantics tree on the accessibility bus (AT-SPI 2).
+//
+// Linux screen readers (Orca) and other assistive tools find programs on
+// the accessibility bus and walk their objects over D-Bus. This module
+// serves the semantics tree (ui/semantics.resid) there:
+//
+//   /org/a11y/atspi/accessible/root    the application
+//   /org/a11y/atspi/accessible/frame   its window
+//   /org/a11y/atspi/accessible/<n>     widget number n
+//
+// with the interfaces a reader asks for: Accessible (role, name, state,
+// children, parent), Component (extents, hit testing, focus), Action
+// (buttons and checkboxes), Text (text fields), Application, and the
+// standard Properties and Introspectable. A reader's actions come back as
+// `Assist` events, which the widgets already turn into clicks and focus;
+// changes to the tree go out as AT-SPI signals.
+//
+// `serve` is pure: one message in, the new state, the replies and the
+// events out. The effectful part (connecting, reading, sending) is small
+// and below it. Reaching the bus needs the `accessibility` capability:
+// anything on it can read other programs' trees, so a program that is
+// accessible says so.
+//
+// Roles and states are AT-SPI's numbers (atspi-constants.h). Extents are
+// in the window's logical pixels for every coordinate type: Wayland gives a
+// client no screen position, so screen coordinates are the window's.
+
+import "../app.resid";
+import "../gfx/color.resid";
+import "../ui/semantics.resid";
+import "dbus.resid";
+
+pub type A11y = {
+    Int fd; Bool alive; Str err; List(Int) buf; Int serial;
+    Str name; Str title; List(SemNode) tree;
+};
+
+pub A11y a11y_none() {
+    return A11y { .fd = -1, .alive = false, .err = "", .buf = [], .serial = 1, .name = "", .title = "", .tree = [] };
+}
+
+A11y with_tree(A11y a, List(SemNode) t) {
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = t };
+}
+
+A11y with_serial(A11y a, Int s) {
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = s, .name = a.name, .title = a.title, .tree = a.tree };
+}
+
+A11y with_buf(A11y a, List(Int) b) {
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = b, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree };
+}
+
+A11y dead(A11y a, Str why) {
+    return A11y { .fd = a.fd, .alive = false, .err = why, .buf = [], .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree };
+}
+
+// ─── Objects ───────────────────────────────────────────────────────
+
+pub Str path_prefix() { return "/org/a11y/atspi/accessible/"; }
+pub Str root_path() { return "/org/a11y/atspi/accessible/root"; }
+pub Str frame_path() { return "/org/a11y/atspi/accessible/frame"; }
+pub Str null_path() { return "/org/a11y/atspi/null"; }
+
+Int root_id() { return -2; }
+Int frame_id() { return -3; }
+
+/// The object a path names: -2 the application, -3 the window, a widget
+/// number, or -9 for anything else.
+pub Int id_of(A11y a, Str p) {
+    if (p == root_path()) { return root_id(); }
+    if (p == frame_path()) { return frame_id(); }
+    if (!str_starts_with(p, path_prefix())) { return -9; }
+    Str rest = str_slice(p, str_len(path_prefix()), str_len(p));
+    if (str_len(rest) == 0 || str_len(rest) > 9 || !digits(rest, 0)) { return -9; }
+    Int n = digits_value(rest, 0, 0);
+    return if (find_node(a.tree, n, 0) >= 0) { n } else { -9 };
+}
+
+Bool digits(Str s, Int i) { return i >= str_len(s) || (str_char_at(s, i) >= 48 && str_char_at(s, i) <= 57 && digits(s, i + 1)); }
+Int digits_value(Str s, Int i, Int acc) { return if (i >= str_len(s)) { acc } else { digits_value(s, i + 1, acc * 10 + str_char_at(s, i) - 48) }; }
+
+pub Str path_of(Int id) {
+    if (id == root_id()) { return root_path(); }
+    if (id == frame_id()) { return frame_path(); }
+    if (id < 0) { return null_path(); }
+    return path_prefix() + f"{id}";
+}
+
+DV ref(A11y a, Int id) { return DStruct([DStr(a.name), DPath(path_of(id))]); }
+
+/// Where node `id` is in the tree, or -1.
+Int find_node(List(SemNode) t, Int id, Int i) {
+    if (i >= t.len()) { return -1; }
+    return if (t[i].id == id) { i } else { find_node(t, id, i + 1) };
+}
+
+SemNode node(A11y a, Int id) {
+    Int k = find_node(a.tree, id, 0);
+    if (k < 0) { return SemNode { .id = -9, .parent = -1, .role = 0, .flags = 0, .bounds = rect_none(), .actions = 0, .label = "", .value = "" }; }
+    return a.tree[k];
+}
+
+/// The children of an object, in reading order.
+pub List(Int) children_of(A11y a, Int id) {
+    if (id == root_id()) { return [frame_id()]; }
+    Int want = if (id == frame_id()) { -1 } else { id };
+    return kids(a.tree, want, 0, ListBuf());
+}
+
+List(Int) kids(List(SemNode) t, Int parent, Int i, ListBuf(Int) acc) {
+    if (i >= t.len()) { return acc.finish(); }
+    return kids(t, parent, i + 1, if (t[i].parent == parent) { acc.push(t[i].id) } else { acc });
+}
+
+Int parent_of(A11y a, Int id) {
+    if (id == root_id()) { return -9; }
+    if (id == frame_id()) { return root_id(); }
+    Int p = node(a, id).parent;
+    return if (p < 0) { frame_id() } else { p };
+}
+
+Int index_in(List(Int) xs, Int v, Int i) { return if (i >= xs.len()) { -1 } else { if (xs[i] == v) { i } else { index_in(xs, v, i + 1) } }; }
+
+/// AT-SPI role numbers and names.
+pub Int atspi_role(A11y a, Int id) {
+    if (id == root_id()) { return 75; }
+    if (id == frame_id()) { return 23; }
+    Int r = node(a, id).role;
+    List(Int) map = [39, 29, 43, 7, 61, 51, 27, 49, 31];
+    return if (r >= 0 && r < map.len()) { map[r] } else { 39 };
+}
+
+pub Str role_name(Int role) {
+    if (role == 75) { return "application"; }
+    if (role == 23) { return "frame"; }
+    if (role == 29) { return "label"; }
+    if (role == 43) { return "push button"; }
+    if (role == 7) { return "check box"; }
+    if (role == 61) { return "text"; }
+    if (role == 51) { return "slider"; }
+    if (role == 27) { return "image"; }
+    if (role == 49) { return "scroll pane"; }
+    if (role == 31) { return "list"; }
+    return "panel";
+}
+
+Str name_of(A11y a, Int id) {
+    if (id == root_id()) { return a.title; }
+    if (id == frame_id()) { return a.title; }
+    return node(a, id).label;
+}
+
+/// AT-SPI state numbers, as the two-word bit set GetState answers.
+pub List(Int) states(A11y a, Int id) {
+    List(Int) base = [8, 24, 25, 30];                       // enabled, sensitive, showing, visible
+    if (id == root_id()) { return base; }
+    if (id == frame_id()) { return base.concat([1]); }      // active
+    SemNode n = node(a, id);
+    Bool interactive = n.actions != 0;
+    List(Int) focus = if (interactive) { [11] } else { [] };                                  // focusable
+    List(Int) focused = if ((n.flags & sem_focused()) != 0) { [12] } else { [] };
+    List(Int) checks = if (n.role == role_checkbox()) { [41].concat(if ((n.flags & sem_checked()) != 0) { [4] } else { [] }) } else { [] };
+    List(Int) edit = if ((n.flags & sem_editable()) != 0) { [7, 26] } else { [] };          // editable, single line
+    return base.concat(focus).concat(focused).concat(checks).concat(edit);
+}
+
+List(DV) state_words(List(Int) ss) { return [DU32(bits(ss, 0, 0, 0)), DU32(bits(ss, 0, 32, 0))]; }
+
+Int bits(List(Int) ss, Int i, Int lo, Int acc) {
+    if (i >= ss.len()) { return acc; }
+    Int s = ss[i];
+    return bits(ss, i + 1, lo, if (s >= lo && s < lo + 32) { acc | (1 << (s - lo)) } else { acc });
+}
+
+List(Str) interfaces(A11y a, Int id) {
+    if (id == root_id()) { return ["org.a11y.atspi.Accessible", "org.a11y.atspi.Application"]; }
+    if (id == frame_id()) { return ["org.a11y.atspi.Accessible", "org.a11y.atspi.Component"]; }
+    SemNode n = node(a, id);
+    List(Str) act = if ((n.actions & act_activate()) != 0) { ["org.a11y.atspi.Action"] } else { [] };
+    List(Str) text = if (n.role == role_textbox()) { ["org.a11y.atspi.Text"] } else { [] };
+    return ["org.a11y.atspi.Accessible", "org.a11y.atspi.Component"].concat(act).concat(text);
+}
+
+Rect extents(A11y a, Int id) {
+    if (id >= 0) { return node(a, id).bounds; }
+    return bounds_all(a.tree, 0, rect_none());
+}
+
+Rect bounds_all(List(SemNode) t, Int i, Rect acc) {
+    if (i >= t.len()) { return acc; }
+    return bounds_all(t, i + 1, if (rect_is_empty(acc)) { t[i].bounds } else { rect_union(acc, t[i].bounds) });
+}
+
+/// The deepest object under (x, y): the last node in reading order whose
+/// box holds the point, else the window.
+Int at_point(A11y a, Int x, Int y, Int i, Int found) {
+    if (i >= a.tree.len()) { return found; }
+    return at_point(a, x, y, i + 1, if (rect_contains(a.tree[i].bounds, x, y)) { a.tree[i].id } else { found });
+}
+
+// ─── Serving ───────────────────────────────────────────────────────
+
+/// What one message produced.
+pub type Served = { A11y a; List(DMsg) out; List(Event) events; };
+
+Served answer(A11y a, DMsg m, List(DV) body, List(Event) es) {
+    if ((m.flags & flag_no_reply()) != 0) { return Served { .a = a, .out = [], .events = es }; }
+    return Served { .a = with_serial(a, a.serial + 1), .out = [dreply(m, a.serial, body)], .events = es };
+}
+
+Served fail(A11y a, DMsg m, Str name, Str text) {
+    if ((m.flags & flag_no_reply()) != 0) { return Served { .a = a, .out = [], .events = [] }; }
+    return Served { .a = with_serial(a, a.serial + 1), .out = [derror(m, a.serial, name, text)], .events = [] };
+}
+
+/// Handle one message: a method call on one of our objects gets its reply
+/// (and may raise events); anything else is ignored.
+pub Served serve(A11y a, DMsg m) {
+    if (m.kind != msg_call()) { return Served { .a = a, .out = [], .events = [] }; }
+    Int id = id_of(a, m.path);
+    if (id == -9) { return fail(a, m, "org.freedesktop.DBus.Error.UnknownObject", "no such object: " + m.path); }
+    if (m.iface == "org.freedesktop.DBus.Properties") { return properties(a, m, id); }
+    if (m.iface == "org.freedesktop.DBus.Introspectable" && m.member == "Introspect") { return answer(a, m, [DStr(introspect(a, id))], []); }
+    if (m.iface == "org.a11y.atspi.Accessible" || m.iface == "") {
+        Served s = accessible(a, m, id);
+        if (s.out.len() > 0 || m.iface != "") { return s; }
+    }
+    if (m.iface == "org.a11y.atspi.Component") { return component(a, m, id); }
+    if (m.iface == "org.a11y.atspi.Action") { return action(a, m, id); }
+    if (m.iface == "org.a11y.atspi.Text") { return text(a, m, id); }
+    if (m.iface == "org.a11y.atspi.Application" && m.member == "GetLocale") { return answer(a, m, [DStr("C")], []); }
+    return fail(a, m, "org.freedesktop.DBus.Error.UnknownMethod", f"{m.iface}.{m.member} is not supported");
+}
+
+Served accessible(A11y a, DMsg m, Int id) {
+    Str k = m.member;
+    List(Int) cs = children_of(a, id);
+    if (k == "GetChildren") { return answer(a, m, [DArr("(so)", refs(a, cs, 0, ListBuf()))], []); }
+    if (k == "GetChildAtIndex") {
+        Int i = arg_int(m.body, 0);
+        return answer(a, m, [ref(a, if (i >= 0 && i < cs.len()) { cs[i] } else { -9 })], []);
+    }
+    if (k == "GetIndexInParent") {
+        Int p = parent_of(a, id);
+        return answer(a, m, [DI32(if (p == -9) { -1 } else { index_in(children_of(a, p), id, 0) })], []);
+    }
+    if (k == "GetRole") { return answer(a, m, [DU32(atspi_role(a, id))], []); }
+    if (k == "GetRoleName" || k == "GetLocalizedRoleName") { return answer(a, m, [DStr(role_name(atspi_role(a, id)))], []); }
+    if (k == "GetState") { return answer(a, m, [DArr("u", state_words(states(a, id)))], []); }
+    if (k == "GetAttributes") { return answer(a, m, [DArr("{ss}", [DEntry(DStr("toolkit"), DStr("resid-gui"))])], []); }
+    if (k == "GetApplication") { return answer(a, m, [ref(a, root_id())], []); }
+    if (k == "GetInterfaces") { return answer(a, m, [DArr("s", strs(interfaces(a, id), 0, ListBuf()))], []); }
+    if (k == "GetRelationSet") { return answer(a, m, [DArr("(ua(so))", [])], []); }
+    return Served { .a = a, .out = [], .events = [] };
+}
+
+List(DV) refs(A11y a, List(Int) ids, Int i, ListBuf(DV) acc) {
+    if (i >= ids.len()) { return acc.finish(); }
+    return refs(a, ids, i + 1, acc.push(ref(a, ids[i])));
+}
+
+List(DV) strs(List(Str) xs, Int i, ListBuf(DV) acc) {
+    if (i >= xs.len()) { return acc.finish(); }
+    return strs(xs, i + 1, acc.push(DStr(xs[i])));
+}
+
+Served component(A11y a, DMsg m, Int id) {
+    Rect r = extents(a, id);
+    if (m.member == "GetExtents") { return answer(a, m, [DStruct([DI32(r.x), DI32(r.y), DI32(r.w), DI32(r.h)])], []); }
+    if (m.member == "GetPosition") { return answer(a, m, [DI32(r.x), DI32(r.y)], []); }
+    if (m.member == "GetSize") { return answer(a, m, [DI32(r.w), DI32(r.h)], []); }
+    if (m.member == "Contains") { return answer(a, m, [DBool(rect_contains(r, arg_int(m.body, 0), arg_int(m.body, 1)))], []); }
+    if (m.member == "GetAccessibleAtPoint") { return answer(a, m, [ref(a, at_point(a, arg_int(m.body, 0), arg_int(m.body, 1), 0, frame_id()))], []); }
+    if (m.member == "GrabFocus") {
+        Bool can = id >= 0 && (node(a, id).actions & act_focus()) != 0;
+        return answer(a, m, [DBool(can)], if (can) { [Assist(id, act_focus())] } else { [] });
+    }
+    if (m.member == "GetLayer") { return answer(a, m, [DU32(3)], []); }   // widget layer
+    if (m.member == "GetMDIZOrder") { return answer(a, m, [DI16(0)], []); }
+    return fail(a, m, "org.freedesktop.DBus.Error.UnknownMethod", "Component." + m.member + " is not supported");
+}
+
+Bool can_act(A11y a, Int id) { return id >= 0 && (node(a, id).actions & act_activate()) != 0; }
+
+Str action_name(A11y a, Int id) { return if (node(a, id).role == role_checkbox()) { "toggle" } else { "click" }; }
+
+Served action(A11y a, DMsg m, Int id) {
+    if (!can_act(a, id)) { return fail(a, m, "org.freedesktop.DBus.Error.UnknownMethod", "this object has no actions"); }
+    Str k = m.member;
+    Bool first = arg_int(m.body, 0) == 0;
+    if (k == "GetActions") { return answer(a, m, [DArr("(sss)", [DStruct([DStr(action_name(a, id)), DStr(""), DStr("")])])], []); }
+    if (k == "GetName" || k == "GetLocalizedName") { return answer(a, m, [DStr(if (first) { action_name(a, id) } else { "" })], []); }
+    if (k == "GetDescription" || k == "GetKeyBinding") { return answer(a, m, [DStr("")], []); }
+    if (k == "DoAction") { return answer(a, m, [DBool(first)], if (first) { [Assist(id, act_activate())] } else { [] }); }
+    return fail(a, m, "org.freedesktop.DBus.Error.UnknownMethod", "Action." + k + " is not supported");
+}
+
+Served text(A11y a, DMsg m, Int id) {
+    Str v = node(a, id).value;
+    if (m.member == "GetText") {
+        Int s0 = arg_int(m.body, 0);
+        Int e0 = arg_int(m.body, 1);
+        Int s = if (s0 < 0) { 0 } else { if (s0 > str_len(v)) { str_len(v) } else { s0 } };
+        Int e = if (e0 < 0 || e0 > str_len(v)) { str_len(v) } else { if (e0 < s) { s } else { e0 } };
+        return answer(a, m, [DStr(str_slice(v, s, e))], []);
+    }
+    return fail(a, m, "org.freedesktop.DBus.Error.UnknownMethod", "Text." + m.member + " is not supported");
+}
+
+/// A property's value, or a byte 0 for none.
+DV prop(A11y a, Int id, Str iface, Str p) {
+    if (iface == "org.a11y.atspi.Accessible") {
+        if (p == "Name") { return DStr(name_of(a, id)); }
+        if (p == "Description" || p == "HelpText" || p == "AccessibleId") { return DStr(""); }
+        if (p == "Locale") { return DStr("C"); }
+        if (p == "Parent") { return ref(a, parent_of(a, id)); }
+        if (p == "ChildCount") { return DI32(children_of(a, id).len()); }
+    }
+    if (iface == "org.a11y.atspi.Application" && id == root_id()) {
+        if (p == "ToolkitName") { return DStr("resid-gui"); }
+        if (p == "Version") { return DStr("1"); }
+        if (p == "AtspiVersion") { return DStr("2.1"); }
+        if (p == "Id") { return DI32(0); }
+    }
+    if (iface == "org.a11y.atspi.Action" && can_act(a, id) && p == "NActions") { return DI32(1); }
+    if (iface == "org.a11y.atspi.Text" && id >= 0 && node(a, id).role == role_textbox()) {
+        if (p == "CharacterCount") { return DI32(str_len(node(a, id).value)); }
+        if (p == "CaretOffset") { return DI32(str_len(node(a, id).value)); }
+    }
+    return DByte(0);
+}
+
+Bool is_none(DV v) { return match (v) { DByte(x) => true, _ => false }; }
+
+List(Str) prop_names(Str iface) {
+    if (iface == "org.a11y.atspi.Accessible") { return ["Name", "Description", "Parent", "ChildCount", "Locale", "AccessibleId", "HelpText"]; }
+    if (iface == "org.a11y.atspi.Application") { return ["ToolkitName", "Version", "AtspiVersion", "Id"]; }
+    if (iface == "org.a11y.atspi.Action") { return ["NActions"]; }
+    if (iface == "org.a11y.atspi.Text") { return ["CharacterCount", "CaretOffset"]; }
+    return [];
+}
+
+Served properties(A11y a, DMsg m, Int id) {
+    Str iface = arg_str(m.body, 0);
+    if (m.member == "Get") {
+        DV v = prop(a, id, iface, arg_str(m.body, 1));
+        if (is_none(v)) { return fail(a, m, "org.freedesktop.DBus.Error.UnknownProperty", "no property " + iface + "." + arg_str(m.body, 1)); }
+        return answer(a, m, [DVar(v)], []);
+    }
+    if (m.member == "GetAll") { return answer(a, m, [DArr("{sv}", all_props(a, id, iface, prop_names(iface), 0, ListBuf()))], []); }
+    if (m.member == "Set") { return fail(a, m, "org.freedesktop.DBus.Error.PropertyReadOnly", "properties are read-only"); }
+    return fail(a, m, "org.freedesktop.DBus.Error.UnknownMethod", "Properties." + m.member + " is not supported");
+}
+
+List(DV) all_props(A11y a, Int id, Str iface, List(Str) ps, Int i, ListBuf(DV) acc) {
+    if (i >= ps.len()) { return acc.finish(); }
+    DV v = prop(a, id, iface, ps[i]);
+    return all_props(a, id, iface, ps, i + 1, if (is_none(v)) { acc } else { acc.push(DEntry(DStr(ps[i]), DVar(v))) });
+}
+
+Str introspect(A11y a, Int id) {
+    List(Str) ifs = interfaces(a, id).concat(["org.freedesktop.DBus.Properties", "org.freedesktop.DBus.Introspectable"]);
+    return "<node>" + ifaces_xml(ifs, 0, StrBuf()) + "</node>";
+}
+
+Str ifaces_xml(List(Str) xs, Int i, StrBuf b) {
+    if (i >= xs.len()) { return b.finish(); }
+    return ifaces_xml(xs, i + 1, b.push("<interface name=\"").push(xs[i]).push("\"/>"));
+}
+
+// ─── Changes ───────────────────────────────────────────────────────
+
+/// AT-SPI event signals for a change of tree, and the state with the new
+/// tree: a changed name, value, focus or check state on a node that stays,
+/// and children added to or removed from a parent.
+pub Served changed(A11y a, List(SemNode) now) {
+    SemDiff d = sem_diff(a.tree, now);
+    A11y next = with_tree(a, now);
+    List(DMsg) sig = signals_put(a, next, d.put, 0, a.serial, []);
+    List(DMsg) gone = signals_gone(a, d.removed, 0, a.serial + sig.len(), []);
+    return Served { .a = with_serial(next, a.serial + sig.len() + gone.len()), .out = sig.concat(gone), .events = [] };
+}
+
+DMsg event(Int serial, Str path, Str member, Str detail, Int d1, Int d2, DV v) {
+    return dsignal(serial, path, "org.a11y.atspi.Event.Object", member, [DStr(detail), DI32(d1), DI32(d2), DVar(v), DArr("{sv}", [])]);
+}
+
+List(DMsg) signals_put(A11y old, A11y now, List(SemNode) put, Int i, Int s, List(DMsg) acc) {
+    if (i >= put.len()) { return acc; }
+    SemNode n = put[i];
+    Int k = find_node(old.tree, n.id, 0);
+    List(DMsg) these = if (k < 0) {
+        Int p = parent_of(now, n.id);
+        [event(s, path_of(p), "ChildrenChanged", "add", index_in(children_of(now, p), n.id, 0), 0, ref(now, n.id))]
+    } else { node_changes(old.tree[k], n, s) };
+    return signals_put(old, now, put, i + 1, s + these.len(), acc.concat(these));
+}
+
+List(DMsg) node_changes(SemNode o, SemNode n, Int s) {
+    Str p = path_of(n.id);
+    List(DMsg) name = if (o.label != n.label) { [event(s, p, "PropertyChange", "accessible-name", 0, 0, DStr(n.label))] } else { [] };
+    Int s1 = s + name.len();
+    List(DMsg) value = if (o.value != n.value) { [event(s1, p, "PropertyChange", "accessible-value", 0, 0, DStr(n.value))] } else { [] };
+    Int s2 = s1 + value.len();
+    Bool fo = (o.flags & sem_focused()) != 0;
+    Bool fn = (n.flags & sem_focused()) != 0;
+    List(DMsg) focus = if (fo != fn) { [event(s2, p, "StateChanged", "focused", if (fn) { 1 } else { 0 }, 0, DI32(0))] } else { [] };
+    Int s3 = s2 + focus.len();
+    Bool co = (o.flags & sem_checked()) != 0;
+    Bool cn = (n.flags & sem_checked()) != 0;
+    List(DMsg) check = if (co != cn) { [event(s3, p, "StateChanged", "checked", if (cn) { 1 } else { 0 }, 0, DI32(0))] } else { [] };
+    return name.concat(value).concat(focus).concat(check);
+}
+
+List(DMsg) signals_gone(A11y old, List(Int) ids, Int i, Int s, List(DMsg) acc) {
+    if (i >= ids.len()) { return acc; }
+    Int p = parent_of(old, ids[i]);
+    DMsg m = event(s, path_of(p), "ChildrenChanged", "remove", index_in(children_of(old, p), ids[i], 0), 0, ref(old, ids[i]));
+    return signals_gone(old, ids, i + 1, s + 1, acc.concat([m]));
+}
+
+// ─── The connection ────────────────────────────────────────────────
+
+@requires(display)
+A11y send(A11y a, List(DMsg) ms, Int i) {
+    if (i >= ms.len() || !a.alive) { return a; }
+    if (!resid_disp_send(a.fd, dmsg_bytes(ms[i]), -1)) { return dead(a, "atspi: the bus stopped reading"); }
+    return send(a, ms, i + 1);
+}
+
+/// Join the accessibility bus as program `title`, or a disconnected value
+/// when there is none (no screen reader running is the usual case).
+@requires(accessibility, display)
+pub A11y a11y_start(Str title) {
+    Int fd = resid_a11y_connect();
+    if (fd < 0) { return a11y_none(); }
+    return a11y_start_on(fd, title);
+}
+
+/// `a11y_start` over a connected, authenticated bus socket: Hello for a
+/// unique name, then registration with the AT-SPI registry (Embed). A bus
+/// without a registry is fine: readers can still find the program by
+/// name.
+@requires(display)
+pub A11y a11y_start_on(Int fd, Str title) {
+    A11y a0 = A11y { .fd = fd, .alive = true, .err = "", .buf = [], .serial = 1, .name = "", .title = title, .tree = [] };
+    A11y a1 = send(a0, [dcall(1, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", [])], 0);
+    A11y a2 = wait_name(with_serial(a1, 2), 20);
+    if (!a2.alive || str_len(a2.name) == 0) {
+        _ = resid_disp_close(fd);
+        return a11y_none();
+    }
+    DMsg embed = dcall(a2.serial, "org.a11y.atspi.Registry", root_path(), "org.a11y.atspi.Socket", "Embed", [ref(a2, root_id())]);
+    return send(with_serial(a2, a2.serial + 1), [embed], 0);
+}
+
+/// Read until the reply to Hello (serial 1) names us.
+@requires(display)
+A11y wait_name(A11y a, Int tries) {
+    if (!a.alive || tries <= 0 || str_len(a.name) > 0) { return a; }
+    DbusIn t = dtake(a.buf);
+    if (t.corrupt) { return dead(a, "atspi: corrupt stream from the bus"); }
+    if (t.ok) {
+        A11y rest = with_buf(a, t.rest);
+        Str name = match (dmsg_decode(t.msg)) { Ok(m) => if (m.kind == msg_return() && m.reply_serial == 1) { arg_str(m.body, 0) } else { "" }, Err(e) => "" };
+        return wait_name(if (str_len(name) > 0) { A11y { .fd = rest.fd, .alive = true, .err = "", .buf = rest.buf, .serial = rest.serial, .name = name, .title = rest.title, .tree = rest.tree } } else { rest }, tries);
+    }
+    List(Int) ready = resid_disp_poll([a.fd], [1], 200);
+    if (ready.len() == 0 || (ready[0] & 1) == 0) { return wait_name(a, tries - 1); }
+    List(Int) got = resid_disp_recv(a.fd, 65536);
+    if (got.len() == 0) { return dead(a, "atspi: the bus closed the connection"); }
+    return wait_name(with_buf(a, a.buf.concat(got)), tries - 1);
+}
+
+/// What a pump produced: the new state and the events for the program.
+pub type A11yStep = { A11y a; List(Event) events; };
+
+/// Read what has arrived (without waiting), answer every call.
+@requires(display)
+pub A11yStep a11y_pump(A11y a) {
+    if (!a.alive) { return A11yStep { .a = a, .events = [] }; }
+    List(Int) ready = resid_disp_poll([a.fd], [1], 0);
+    Bool readable = ready.len() > 0 && (ready[0] & 1) != 0;
+    if (!readable) { return drain(a, []); }
+    List(Int) got = resid_disp_recv(a.fd, 65536);
+    if (got.len() == 0) { return A11yStep { .a = dead(a, "atspi: the bus closed the connection"), .events = [] }; }
+    if (a.buf.len() + got.len() > 1048576) { return A11yStep { .a = dead(a, "atspi: the bus sent more than 1 MB unread"), .events = [] }; }
+    return drain(with_buf(a, a.buf.concat(got)), []);
+}
+
+@requires(display)
+A11yStep drain(A11y a, List(Event) acc) {
+    DbusIn t = dtake(a.buf);
+    if (t.corrupt) { return A11yStep { .a = dead(a, "atspi: corrupt stream from the bus"), .events = acc }; }
+    if (!t.ok) { return A11yStep { .a = a, .events = acc }; }
+    A11y rest = with_buf(a, t.rest);
+    return match (dmsg_decode(t.msg)) {
+        Ok(m) => drained(serve(rest, m), acc),
+        Err(e) => A11yStep { .a = dead(rest, e), .events = acc }
+    };
+}
+
+@requires(display)
+A11yStep drained(Served s, List(Event) acc) { return drain(send(s.a, s.out, 0), acc.concat(s.events)); }
+
+/// Publish a new tree: signals for what changed.
+@requires(display)
+pub A11y a11y_tree(A11y a, List(SemNode) now) {
+    if (!a.alive) { return with_tree(a, now); }
+    Served s = changed(a, now);
+    return send(s.a, s.out, 0);
+}
+
+pub Bool a11y_alive(A11y a) { return a.alive; }
+pub Int a11y_fd(A11y a) { return a.fd; }
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+A11y sample() {
+    List(SemNode) t = semantics(Column([Text("count: 1"), Button("+1", Clicked), Checkbox("Alerts", true, Toggled), TextInput("hello", 5, Submitted)]),
+                                Rect { .x = 0, .y = 0, .w = 200, .h = 160 }, ui_with_focus(ui_new(), 4));
+    return with_tree(A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Counter", .tree = [] }, t);
+}
+
+DMsg call(Str path, Str iface, Str member, List(DV) body) {
+    DMsg m = dcall(99, ":1.7", path, iface, member, body);
+    return DMsg { .kind = m.kind, .flags = 0, .serial = 99, .reply_serial = 0, .path = path, .iface = iface, .member = member,
+                  .error = "", .dest = ":1.7", .sender = ":1.42", .body = body };
+}
+
+/// The one reply a call got, passed through the wire and back.
+DMsg reply_of(Served s) {
+    List(Int) bytes = dmsg_bytes(s.out[0]);
+    return dmsg_decode(bytes) else { dcall(1, "", "", "", "", []) };
+}
+
+test "the tree hangs from an application and its window" {
+    A11y a = sample();
+    DMsg r = reply_of(serve(a, call(root_path(), "org.a11y.atspi.Accessible", "GetChildren", [])));
+    expect(r.kind).toEqual(msg_return());
+    expect(r.reply_serial).toEqual(99);
+    expect(r.dest).toEqual(":1.42");
+    expect(dsig(r.body[0])).toEqual("a(so)");
+    List(Int) top = children_of(a, -3);
+    expect(top.len()).toEqual(4);
+    expect(atspi_role(a, top[1])).toEqual(43);
+    expect(role_name(atspi_role(a, top[2]))).toEqual("check box");
+    DMsg name = reply_of(serve(a, call(path_of(top[1]), "org.freedesktop.DBus.Properties", "Get", [DStr("org.a11y.atspi.Accessible"), DStr("Name")])));
+    Bool plus = match (name.body[0]) { DVar(v) => match (v) { DStr(s) => s == "+1", _ => false }, _ => false };
+    expect(plus).toEqual(true);
+}
+
+test "states carry checked, focused and editable" {
+    A11y a = sample();
+    List(Int) top = children_of(a, -3);
+    expect(index_in(states(a, top[2]), 4, 0) >= 0).toEqual(true);     // checked
+    expect(index_in(states(a, top[3]), 12, 0) >= 0).toEqual(true);    // focused
+    expect(index_in(states(a, top[3]), 7, 0) >= 0).toEqual(true);     // editable
+    DMsg r = reply_of(serve(a, call(path_of(top[2]), "org.a11y.atspi.Accessible", "GetState", [])));
+    Int lo = match (r.body[0]) { DArr(es, xs) => arg_int(xs, 0), _ => 0 };
+    expect((lo & (1 << 4)) != 0).toEqual(true);
+}
+
+test "a reader's actions become Assist events" {
+    A11y a = sample();
+    List(Int) top = children_of(a, -3);
+    Served s = serve(a, call(path_of(top[1]), "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    Bool assist = s.events.len() == 1 && match (s.events[0]) { Assist(n, act) => n == top[1] && act == act_activate(), _ => false };
+    expect(assist).toEqual(true);
+    Served f = serve(a, call(path_of(top[3]), "org.a11y.atspi.Component", "GrabFocus", []));
+    Bool focus = f.events.len() == 1 && match (f.events[0]) { Assist(n, act) => act == act_focus(), _ => false };
+    expect(focus).toEqual(true);
+    // a label has no actions
+    expect(reply_of(serve(a, call(path_of(top[0]), "org.a11y.atspi.Action", "DoAction", [DI32(0)]))).kind).toEqual(msg_error());
+}
+
+test "unknown objects and methods are errors, and no-reply calls get none" {
+    A11y a = sample();
+    expect(reply_of(serve(a, call("/org/a11y/atspi/accessible/999", "org.a11y.atspi.Accessible", "GetRole", []))).error).toEqual("org.freedesktop.DBus.Error.UnknownObject");
+    expect(reply_of(serve(a, call("/etc/passwd", "org.a11y.atspi.Accessible", "GetRole", []))).kind).toEqual(msg_error());
+    expect(reply_of(serve(a, call(root_path(), "org.a11y.atspi.Nope", "X", []))).error).toEqual("org.freedesktop.DBus.Error.UnknownMethod");
+    DMsg quiet = call(root_path(), "org.a11y.atspi.Accessible", "GetRole", []);
+    DMsg noreply = DMsg { .kind = quiet.kind, .flags = flag_no_reply(), .serial = 5, .reply_serial = 0, .path = quiet.path, .iface = quiet.iface,
+                          .member = quiet.member, .error = "", .dest = "", .sender = ":1.9", .body = [] };
+    expect(serve(a, noreply).out.len()).toEqual(0);
+}
+
+test "text fields give their text; extents and hit testing use the layout" {
+    A11y a = sample();
+    List(Int) top = children_of(a, -3);
+    DMsg t = reply_of(serve(a, call(path_of(top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)])));
+    expect(arg_str(t.body, 0)).toEqual("ello");
+    Rect r = node(a, top[1]).bounds;
+    expect(at_point(a, r.x + 1, r.y + 1, 0, -3)).toEqual(top[1]);
+    DMsg e = reply_of(serve(a, call(path_of(top[1]), "org.a11y.atspi.Component", "GetExtents", [DU32(1)])));
+    Int w = match (e.body[0]) { DStruct(xs) => arg_int(xs, 2), _ => 0 };
+    expect(w).toEqual(r.w);
+}
+
+test "a changed tree is announced" {
+    A11y a = sample();
+    List(SemNode) now = semantics(Column([Text("count: 2"), Button("+1", Clicked), Checkbox("Alerts", false, Toggled), TextInput("hello", 5, Submitted)]),
+                                  Rect { .x = 0, .y = 0, .w = 200, .h = 160 }, ui_with_focus(ui_new(), 4));
+    Served s = changed(a, now);
+    expect(s.out.len()).toEqual(2);
+    expect(s.out[0].member).toEqual("PropertyChange");
+    expect(arg_str(s.out[0].body, 0)).toEqual("accessible-name");
+    expect(s.out[1].member).toEqual("StateChanged");
+    expect(arg_str(s.out[1].body, 0)).toEqual("checked");
+    expect(sigs(s.out[0].body, 0, StrBuf())).toEqual("siiva{sv}");
+    Served gone = changed(a, []);
+    expect(gone.out.len()).toEqual(4);
+    expect(arg_str(gone.out[0].body, 0)).toEqual("remove");
+}

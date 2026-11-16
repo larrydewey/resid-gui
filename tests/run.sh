@@ -68,6 +68,22 @@ if ! RESIDC="$RESIDC" "$ROOT/tests/evil.sh" >"$OUT/evil.log" 2>&1; then
     fail=$((fail + 1))
 fi
 
+# The AT-SPI bridge against a real dbus-daemon (skipped without one).
+total=$((total + 1))
+if ! RESIDC="$RESIDC" "$ROOT/tests/atspi.sh" >"$OUT/atspi.log" 2>&1; then
+    cat "$OUT/atspi.log"
+    echo "FAILED: tests/atspi.sh"
+    fail=$((fail + 1))
+fi
+
+# The residual lens reads the reducer's output correctly.
+total=$((total + 1))
+if ! RESIDC="$RESIDC" "$ROOT/tests/lens.sh" >"$OUT/lens.log" 2>&1; then
+    cat "$OUT/lens.log"
+    echo "FAILED: tests/lens.sh"
+    fail=$((fail + 1))
+fi
+
 # The documents: their programs type-check and their signatures exist.
 total=$((total + 1))
 if ! python3 -I "$ROOT/tools/check_docs.py" "$RESIDC"; then

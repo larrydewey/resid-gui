@@ -51,7 +51,7 @@ Widget counter_view(Int m) {
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 Int main() {
     return gui_run(WindowOptions { .title = "Counter", .width = 240, .height = 90, .resizable = true });
 }
@@ -138,7 +138,7 @@ read (a file, the arguments) builds that model itself and passes it:
 
 ```resid
 @needs(App(M))
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
 ```
 

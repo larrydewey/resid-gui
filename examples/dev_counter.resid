@@ -28,7 +28,7 @@ Widget counter_view(Int m) {
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display, clock(readonly), filesystem)
+@requires(display, accessibility, clock(readonly), filesystem)
 Int main() {
     return gui_run_dev(WindowOptions { .title = "Counter (dev)", .width = 240, .height = 90, .resizable = true }, "counter.events");
 }

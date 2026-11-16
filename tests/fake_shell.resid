@@ -102,7 +102,9 @@ Sh attached(Sh s, Int w, Int h, Int stride) {
 @requires(display)
 Sh presented(Int fd, Sh s, Int id) {
     Sh s1 = sh(s, s.stage, s.title, s.attaches, s.presents + 1, s.commits, s.tree, s.pending, s.gone, s.bye, "");
-    if (!out(fd, [Release(id), FrameDone], 0)) { return fail(s1, "send"); }
+    // Once the shell asked to close (stage 3), the core may already have
+    // said Bye and closed its end: a failed send then is expected.
+    if (!out(fd, [Release(id), FrameDone], 0) && s.stage < 3) { return fail(s1, "send"); }
     return click_if_ready(fd, s1);
 }
 
@@ -161,20 +163,20 @@ Sh sh_new(Int scale) {
                 .bye = false, .why = "", .platform_scale = scale };
 }
 
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 Int core(Int fd) {
     Rsp r = rsp_start_on(fd, WindowOptions { .title = "Counter", .width = 160, .height = 60, .resizable = true });
     if (!r.alive) { return 100; }
     return gui_run_on(r, counter_init(), []);
 }
 
-@requires(display, clock(readonly))
+@requires(display, accessibility, clock(readonly))
 test "a shell drives the counter by pointer and by screen reader" {
     List(Int) pair = resid_disp_pair();
     expect(pair.len()).toEqual(2);
     Int sfd = pair[0];
     Int cfd = pair[1];
-    Result(Int, RegionError) r = spawn (display, clock(readonly)) {
+    Result(Int, RegionError) r = spawn (display, accessibility, clock(readonly)) {
         return core(cfd);
     };
     Sh s = serve(sfd, [], sh_new(2));

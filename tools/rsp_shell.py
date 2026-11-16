@@ -23,7 +23,8 @@ message ends the session.
 --theme sets the platform's appearance hints the shell reports.
 
 Actions: wait:TEXT  click:LABEL  assist:LABEL  type:TEXT  key:CODE
-         shot:NAME  speak  close
+         shot:NAME  tree:NAME (the semantics tree as JSON)  speak  close
+         run:COMMAND (runs while the shell keeps serving the window)
 """
 
 import argparse
@@ -269,6 +270,20 @@ class Shell:
                 self.send("Key", int(arg), 0, 0)
             elif verb == "shot":
                 self.shot(arg)
+            elif verb == "run":
+                # a command run while the shell keeps serving the window
+                proc = subprocess.Popen(arg, shell=True)
+                while proc.poll() is None:
+                    self.pump(0.05)
+                if proc.returncode != 0:
+                    raise ProtocolError(f"step command failed ({proc.returncode}): {arg}")
+            elif verb == "tree":
+                import json
+                self.wait(lambda: not self.pending, "a committed tree")
+                path = os.path.join(self.out_dir, f"{arg}.json")
+                with open(path, "w") as fh:
+                    json.dump({"scale": self.scale, "nodes": sorted(self.tree.values(), key=lambda n: n["id"])}, fh)
+                print(f"tree: {path}")
             elif verb == "speak":
                 self.wait(lambda: not self.pending, "a committed tree")
                 self.pump(0.3)

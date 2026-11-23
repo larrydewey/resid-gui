@@ -1,0 +1,150 @@
+// gpubench.resid — the 1080p benchmark view's display list (see
+// bench/frame_1080p.resid) encoded as a GPU-style command stream into a
+// shared ring and handed to a fake driver process, which either passes the
+// buffer on unread or reads every command. The second suite repeats the
+// list 20 times for a game-sized frame. bench/crossing/run.sh runs it.
+//
+// A prototype of the mechanism, not of a language feature: it uses the
+// runtime's raw primitives (E0220), which is why it lives under a
+// runtime/rt/ path and builds with --runtime-internals. x86-64 Linux only.
+// This process is pinned to CPU 0, the driver to CPU 2.
+import "../../../../src/app.resid";
+import "../../../../src/gfx/color.resid";
+import "../../../../src/gfx/draw.resid";
+import "../../../../src/gfx/font.resid";
+import "../../../../src/ui/paint.resid";
+import "../../../../src/ui/state.resid";
+
+Int sys(Int n, Int a, Int b, Int c) { return resid_raw_syscall(n, a, b, c, 0, 0, 0); }
+Int now(Int ts) { _ = sys(228, 1, ts, 0); return resid_raw_load64(ts) * 1000000000 + resid_raw_load64(ts + 8); }
+Int pin(Int s, Int cpu) { _ = resid_raw_store64(s + 256, 1 << cpu); return sys(203, 0, 8, s + 256); }
+Int rd(Int p) { return resid_raw_fetch_add(p, 0); }
+Int bye() { return sys(231, 0, 0, 0); }
+Int reap(Int pid) { return resid_raw_syscall(61, pid, 0, 0, 0, 0, 0); }
+
+Widget row_of(Int i) {
+    return Row([Text(f"item {i}"), Button("open", Custom(i)), Checkbox("done", i % 3 == 0, Toggled),
+                TextInput(f"note for {i}", 4, Custom(1000 + i)), Slider((i * 7) % 100, Custom(2000 + i))]);
+}
+List(Widget) rows_from(Int i, Int n, ListBuf(Widget) b) {
+    if (i >= n) { return b.finish(); }
+    return rows_from(i + 1, n, b.push(row_of(i)));
+}
+
+Int col(Color c) { return (c.a << 24) | (c.r << 16) | (c.g << 8) | c.b; }
+
+// One 32-byte quad command; the new write position, or -1 when it would not fit.
+Int enc_quad(Int p, Int end, Int tag, Int x, Int y, Int w, Int h, Int extra, Int c) {
+    if (p + 32 > end) { return 0 - 1; }
+    _ = resid_raw_store32(p, tag);
+    _ = resid_raw_store32(p + 4, x);
+    _ = resid_raw_store32(p + 8, y);
+    _ = resid_raw_store32(p + 12, w);
+    _ = resid_raw_store32(p + 16, h);
+    _ = resid_raw_store32(p + 20, extra);
+    _ = resid_raw_store32(p + 24, c);
+    _ = resid_raw_store32(p + 28, 0);
+    return p + 32;
+}
+// Text as one 16-byte glyph instance per character.
+Int enc_text(Int p, Int end, Int x, Int y, Str s, Int i, Int n, Int c) {
+    if (i >= n) { return p; }
+    if (p + 16 > end) { return 0 - 1; }
+    _ = resid_raw_store32(p, 6 | (str_char_at(s, i) << 8));
+    _ = resid_raw_store32(p + 4, x + i * 8);
+    _ = resid_raw_store32(p + 8, y);
+    _ = resid_raw_store32(p + 12, c);
+    return enc_text(p + 16, end, x, y, s, i + 1, n, c);
+}
+Int enc_op(Int p, Int end, DrawOp op) {
+    return match (op) {
+        OpFill(r, c) => enc_quad(p, end, 1, r.x, r.y, r.w, r.h, 0, col(c)),
+        OpRound(r, rad, c) => enc_quad(p, end, 2, r.x, r.y, r.w, r.h, rad, col(c)),
+        OpText(x, y, s, c) => enc_text(p, end, x, y, s, 0, str_len(s), col(c)),
+        OpImage(x, y, w, h, px) => enc_quad(p, end, 3, x, y, w, h, 0, 0),
+        OpClipPush(r) => enc_quad(p, end, 4, r.x, r.y, r.w, r.h, 0, 0),
+        OpClipPop => enc_quad(p, end, 5, 0, 0, 0, 0, 0, 0)
+    };
+}
+Int enc_all(List(DrawOp) ops, Int i, Int p, Int end) {
+    if (p < 0 || i >= ops.len()) { return p; }
+    return enc_all(ops, i + 1, enc_op(p, end, ops[i]), end);
+}
+// The display list `reps` times (a heavier, game-sized frame when reps > 1).
+Int enc_frame(List(DrawOp) ops, Int reps, Int p, Int end) {
+    if (reps <= 0 || p < 0) { return p; }
+    return enc_frame(ops, reps - 1, enc_all(ops, 0, p, end), end);
+}
+
+Int checksum(Int p, Int end, Int acc) {
+    if (p >= end) { return acc; }
+    return checksum(p + 8, end, acc ^ resid_raw_load64(p));
+}
+
+// The fake driver: mode 0 hands the buffer on unread, mode 1 reads all of it.
+Int serve(Int s, Int seen, Int mode) {
+    Int r = rd(s);
+    if (r == 0 - 1) { return 0; }
+    if (r != seen) {
+        Int len = resid_raw_load64(s + 512);
+        if (mode == 1) { _ = resid_raw_store64(s + 448, checksum(s + 4096, s + 4096 + len, 0)); }
+        _ = resid_raw_store64(s + 64, r);
+        return serve(s, r, mode);
+    }
+    return serve(s, seen, mode);
+}
+Int wait_ack(Int s, Int v) { if (rd(s + 64) == v) { return 0; } return wait_ack(s, v); }
+
+// mode: 0 encode only, 1 encode + read in this process, 2 encode + cross.
+Int frames(Int s, List(DrawOp) ops, Int reps, Int i, Int k, Int mode) {
+    if (i > k) { return 0; }
+    Int base = s + 4096;
+    Int e = enc_frame(ops, reps, base, base + 8388608);
+    if (e < 0) { return 0 - 1; }
+    _ = resid_raw_store64(s + 512, e - base);
+    if (mode == 1) { _ = resid_raw_store64(s + 448, checksum(base, e, 0)); }
+    if (mode == 2) {
+        _ = resid_raw_store64(s, i);
+        _ = wait_ack(s, i);
+    }
+    return frames(s, ops, reps, i + 1, k, mode);
+}
+
+Int run(Int s, List(DrawOp) ops, Int reps, Int k, Int mode, Int drv, Str name) {
+    _ = resid_raw_store64(s, 0);
+    _ = resid_raw_store64(s + 64, 0);
+    Int pid = if (mode == 2) { sys(57, 0, 0, 0) } else { 1 };
+    if (pid == 0) { _ = pin(s, 2); _ = serve(s, 0, drv); _ = bye(); }
+    Int t0 = now(s + 128);
+    Int rc = frames(s, ops, reps, 1, k, mode);
+    Int t1 = now(s + 128);
+    if (mode == 2) { _ = resid_raw_store64(s, 0 - 1); _ = reap(pid); }
+    Int us10 = (t1 - t0) / k / 100;
+    println(f"  {name}  {us10 / 10}.{us10 % 10} us/frame (rc {rc})");
+    return 0;
+}
+
+Int suite(Int s, List(DrawOp) ops, Int reps, Int k) {
+    Int e = enc_frame(ops, reps, s + 4096, s + 4096 + 8388608);
+    println(f"{ops.len() * reps} draw ops, {(e - s - 4096) / 1024} KiB of commands per frame, {k} frames");
+    _ = run(s, ops, reps, k, 0, 0, "encode only, one process          ");
+    _ = run(s, ops, reps, k, 1, 0, "encode + read, one process        ");
+    _ = run(s, ops, reps, k, 2, 0, "encode + cross, driver hands on   ");
+    _ = run(s, ops, reps, k, 2, 1, "encode + cross, driver reads all  ");
+    return 0;
+}
+
+Int main() {
+    Int s = resid_raw_syscall(9, 0, 16777216, 3, 33, 0 - 1, 0);
+    _ = pin(s, 0);
+    Rect screen = Rect { .x = 0, .y = 0, .w = 1920, .h = 1080 };
+    Widget v = Padding(8, Column(rows_from(0, 45, ListBuf())));
+    UiState lit = ui_with_focus(ui_new(), 6);
+    Int t0 = now(s + 128);
+    List(DrawOp) ops = paint(v, screen, lit);
+    Int t1 = now(s + 128);
+    println(f"paint (first run) {(t1 - t0) / 1000} us");
+    _ = suite(s, ops, 1, 5000);
+    _ = suite(s, ops, 20, 500);
+    return 0;
+}

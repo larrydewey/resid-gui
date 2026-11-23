@@ -18,7 +18,7 @@ import "../../../../src/ui/state.resid";
 Int sys(Int n, Int a, Int b, Int c) { return resid_raw_syscall(n, a, b, c, 0, 0, 0); }
 Int now(Int ts) { _ = sys(228, 1, ts, 0); return resid_raw_load64(ts) * 1000000000 + resid_raw_load64(ts + 8); }
 Int pin(Int s, Int cpu) { _ = resid_raw_store64(s + 256, 1 << cpu); return sys(203, 0, 8, s + 256); }
-Int rd(Int p) { return resid_raw_fetch_add(p, 0); }
+Int rd(Int p) { return resid_raw_loadv64(p); }
 Int bye() { return sys(231, 0, 0, 0); }
 Int reap(Int pid) { return resid_raw_syscall(61, pid, 0, 0, 0, 0, 0); }
 

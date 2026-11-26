@@ -135,6 +135,7 @@ class Shell:
         theirs.close()
         self.sock, self.buf, self.fds = mine, b"", []
         self.buffers, self.tree, self.pending, self.gone = {}, {}, {}, set()
+        self.fresh = 0
         self.presents, self.last_frame, self.bye, self.title = 0, None, False, ""
         self.dims = (0, 0)
 
@@ -219,17 +220,25 @@ class Shell:
             self.send("Release", f[0])
             self.send("FrameDone")
         elif name == "SemPut":
-            if f[0] not in self.pending and len(self.tree) + len(self.pending) >= MAX_NODES:
-                raise ProtocolError("too many semantics nodes")
+            # A node already in the tree is an update and adds nothing; only
+            # new ids count against the cap, each once however often it is put.
+            if f[0] not in self.pending and f[0] not in self.tree:
+                if len(self.tree) + self.fresh >= MAX_NODES:
+                    raise ProtocolError("too many semantics nodes")
+                self.fresh += 1
             self.pending[f[0]] = dict(id=f[0], parent=f[1], role=f[2], flags=f[3], x=f[4], y=f[5], w=f[6], h=f[7],
                                       actions=f[8], label=f[9], value=f[10])
         elif name == "SemRemove":
-            self.gone.add(f[0])
+            # Only a node in the tree can go: removing anything else is a
+            # no-op at the commit, so it is not kept (the set stays within
+            # MAX_NODES however many removes arrive).
+            if f[0] in self.tree:
+                self.gone.add(f[0])
         elif name == "SemCommit":
             for i in self.gone:
                 self.tree.pop(i, None)
             self.tree.update(self.pending)
-            self.pending, self.gone = {}, set()
+            self.pending, self.gone, self.fresh = {}, set(), 0
         elif name == "Bye":
             self.bye = True
 
@@ -339,6 +348,7 @@ def self_test():
     sh.size, sh.scale, sh.out_dir, sh.theme = None, 1, ".", 0
     sh.sock, sh.buf, sh.fds = None, b"", []
     sh.buffers, sh.tree, sh.pending, sh.gone = {}, {}, {}, set()
+    sh.fresh = 0
     sh.presents, sh.last_frame, sh.bye, sh.title = 0, None, False, ""
     sent = []
     sh.send = lambda name, *fields: sent.append(name)
@@ -380,6 +390,23 @@ def self_test():
     sh.handle("SemPut", [1, -1, 2, 0, 0, 0, 10, 10, 1, "\x1b[2Jok\x9b", ""])
     sh.handle("SemCommit", [])
     assert sh.speech() == ['button "\\x1b[2Jok\\x9b"'], sh.speech()
+    # a full tree re-put is an update, not twice as many nodes (R3-8)
+    sh.tree, sh.pending, sh.gone, sh.fresh = {}, {}, set(), 0
+    for i in range(MAX_NODES):
+        sh.handle("SemPut", [i, -1, 0, 0, 0, 0, 1, 1, 0, "", ""])
+    sh.handle("SemCommit", [])
+    for i in range(MAX_NODES):
+        sh.handle("SemPut", [i, -1, 0, 0, 0, 0, 1, 1, 0, "x", ""])
+    sh.handle("SemCommit", [])
+    assert len(sh.tree) == MAX_NODES and sh.tree[0]["label"] == "x"
+    refused("SemPut", [MAX_NODES, -1, 0, 0, 0, 0, 1, 1, 0, "", ""], "too many")
+    # removes of nodes that are not there are not kept (R3-8)
+    for i in range(MAX_NODES, 4 * MAX_NODES):
+        sh.handle("SemRemove", [i])
+    assert len(sh.gone) == 0, len(sh.gone)
+    sh.handle("SemRemove", [5])
+    sh.handle("SemCommit", [])
+    assert len(sh.tree) == MAX_NODES - 1 and 5 not in sh.tree
     print("rsp_shell: self-test passed")
     return 0
 

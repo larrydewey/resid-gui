@@ -9,10 +9,15 @@
 // bench/soak_counter.resid was first measured with).
 //
 // The bounds: the client exits 0 having drawn at least one frame per 100
-// events; the resident set after the 10k-event warm-up grows by less
-// than 4 MB to the end (a leak of one 64-byte record per turn would add
-// about 0.4 MB here, a display list per turn far more); the peak stays
-// under 64 MB. tests/run.sh runs it with no accessibility bus.
+// events; the resident set read while the client still runs grows by
+// less than 1 MB from the 10k-event checkpoint (after warm-up) to the 80k
+// one, and by less than 512 kB from 40k to 80k: a leak per turn grows
+// at least as much over the second span (40k events) as over the first
+// (30k), while warm-up growth is done by 10k (R4-8). A leak of 300 bytes
+// a turn (about 1.2 MB from 10k to 80k events here) fails both. The
+// peak stays under 64 MB. The reading after the client has exited is
+// printed, not judged: its memory is gone by then. tests/run.sh runs it
+// with no accessibility bus.
 
 import "../bench/soak_lib.resid";
 
@@ -21,11 +26,15 @@ Int main() {
     Int total = 120000;
     Soaked s = soak(total);
     Int peak = status_kb("VmHWM:");
-    Int warm = if (s.marks.len() > 0) { s.marks[0] } else { -1 };
-    Int end = if (s.marks.len() > 0) { s.marks[s.marks.len() - 1] } else { -1 };
-    println(f"soak_bounded: {s.events} events, {s.frames} frames; rss {warm} kB after 10k, {end} kB at the end, peak {peak} kB");
-    Bool ok = s.code == 0 && s.events >= total && s.frames >= total / 100 && s.marks.len() >= 5
-              && warm > 0 && end - warm < 4096 && peak > 0 && peak < 65536;
+    // marks: 10k, 20k, 40k, 80k events (the client running), then the end
+    Bool have = s.marks.len() >= 5;
+    Int m10 = if (have) { s.marks[0] } else { -1 };
+    Int m40 = if (have) { s.marks[2] } else { -1 };
+    Int m80 = if (have) { s.marks[3] } else { -1 };
+    Int end = if (have) { s.marks[s.marks.len() - 1] } else { -1 };
+    println(f"soak_bounded: {s.events} events, {s.frames} frames; rss {m10} kB at 10k, {m40} kB at 40k, {m80} kB at 80k, {end} kB at the end, peak {peak} kB");
+    Bool ok = s.code == 0 && s.events >= total && s.frames >= total / 100 && have
+              && m10 > 0 && m80 - m10 < 1024 && m80 - m40 < 512 && peak > 0 && peak < 65536;
     if (!ok) { println("soak_bounded: FAILED"); }
     return if (ok) { 0 } else { 1 };
 }

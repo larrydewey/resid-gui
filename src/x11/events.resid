@@ -43,11 +43,14 @@ type XEv = XKey(Bool, Int, Int)            // pressed, keycode, modifier state
 pub Int s16(Int v) { return if (v >= 32768) { v - 65536 } else { v }; }
 
 /// Decode an event; `shm_event` is MIT-SHM's first event code, 0 without
-/// the extension. The top bit of the code marks a `SendEvent` copy, which
-/// decodes the same.
+/// the extension. The top bit of the code marks a `SendEvent` copy: any
+/// client of the server can send one, so a copy of a key, button or
+/// motion event is not input and is ignored; other copies (the window
+/// manager's close request, its synthetic configure) decode the same.
 pub XEv x_decode_event(List(Int) e, Int shm_event) {
     if (e.len() < 32) { return XOther; }
     Int t = e[0] & 127;
+    if ((e[0] & 128) != 0 && t >= 2 && t <= 6) { return XOther; }
     Int x = s16(half_at(e, 24));
     Int y = s16(half_at(e, 26));
     if (t == 2 || t == 3) { return XKey(t == 2, e[1], half_at(e, 28)); }
@@ -112,4 +115,17 @@ test "events decode to their fields" {
     expect(mapping).toEqual(true);
     Bool sent = match (x_decode_event(event_bytes(128 + 33, 32, [8, 12], [9, 10]), 0)) { XClient(t, d) => t == 9 && d == 10, _ => false };
     expect(sent).toEqual(true);
+}
+
+test "keys, buttons and motion another client sent are not input" {
+    // the same key press and click as above, with the SendEvent bit
+    Bool key = match (x_decode_event(event_bytes(128 + 2, 38, [28], [1]), 0)) { XOther => true, _ => false };
+    expect(key).toEqual(true);
+    Bool btn = match (x_decode_event(event_bytes(128 + 4, 1, [24, 26], [10, 10]), 0)) { XOther => true, _ => false };
+    expect(btn).toEqual(true);
+    Bool motion = match (x_decode_event(event_bytes(128 + 6, 0, [24, 26], [10, 10]), 0)) { XOther => true, _ => false };
+    expect(motion).toEqual(true);
+    // a synthetic configure from the window manager still counts
+    Bool cfg = match (x_decode_event(event_bytes(128 + 22, 0, [20, 22], [300, 200]), 0)) { XConfigure(w, h) => w == 300, _ => false };
+    expect(cfg).toEqual(true);
 }

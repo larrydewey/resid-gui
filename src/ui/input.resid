@@ -228,7 +228,7 @@ UiState mods_after(UiState ui, Int code, Bool down) {
 
 UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     Found f = hit_in(root, area, x, y, fo);
-    UiState pressed = ui_with_press(ui, f.id, msg_of(f.w), label_of(f.w), f.r);
+    UiState pressed = ui_with_press(ui, f.id, msg_of(f.w), label_of(f.w), f.r, if (f.id >= 0) { press_print(root, f.id) } else { 0 });
     return match (f.w) {
         TextInput(s, k, m) => press_input(pressed, f.id, s, k, m, caret_at_in(f.r, s, k, x, fo)),
         Slider(v, m) => UiStep { .ui = ui_with_focus(pressed, -1), .out = [SliderSet(m, slider_value_at(f.r, x))] },
@@ -268,14 +268,77 @@ Str label_of(Widget w) {
 }
 
 /// The pressed widget, if the one numbered so is still the one pressed
-/// (same message, label and box); otherwise none. A message alone is not
-/// enough: rows keyed by index (Custom(i)) renumber when one is removed,
-/// and the next row's button arrives under the pointer with the message
-/// the pressed one had.
+/// (same message, label and box, and the widgets numbered before it
+/// unchanged); otherwise none. A message alone is not enough: rows keyed
+/// by index (Custom(i)) renumber when one is removed, and the next row's
+/// button arrives under the pointer with the message the pressed one had,
+/// and with its label and box too when every row has the same button
+/// (R4-5).
 Found pressed_in(UiState ui, Widget root, Rect area, Font fo) {
     Found f = find_in(root, area, ui.pressed, fo);
-    Bool same = f.id >= 0 && msg_eq(msg_of(f.w), ui.pmsg) && label_of(f.w) == ui.plabel && rect_eq(f.r, ui.prect);
+    Bool same = f.id >= 0 && msg_eq(msg_of(f.w), ui.pmsg) && label_of(f.w) == ui.plabel && rect_eq(f.r, ui.prect)
+                && press_print(root, ui.pressed) == ui.pprint;
     return if (same) { f } else { not_found() };
+}
+
+/// A fingerprint of the widgets numbered 0 to `upto`, in pre-order: each
+/// one's kind, its text or label, its message and its shape (how many
+/// children, padding, alignment), but not what using it changes (a
+/// slider's value, a checkbox's mark, an input's text or caret, a scroll
+/// offset), so a drag does not cancel itself. Removing or replacing a
+/// widget before the pressed one changes it.
+pub Int press_print(Widget root, Int upto) { return fp_node(root, 0, upto, Fp { .h = 17, .id = 0 }).h; }
+
+/// A fingerprint so far, and the number of the next widget.
+type Fp = { Int h; Int id; };
+
+Int fp_mask() { return (1 << 40) - 1; }
+Int fp_mix(Int h, Int x) { return (h * 31 + (x & fp_mask())) & fp_mask(); }
+
+Int fp_str(Int h, Str s, Int i) {
+    if (i >= str_len(s)) { return fp_mix(h, 0); }
+    return fp_str(fp_mix(h, str_char_at(s, i)), s, i + 1);
+}
+
+/// A message's fingerprint; a `Changed` input's text is left out.
+Int fp_msg(Int h, Msg m, Bool text) {
+    return match (m) {
+        Clicked => fp_mix(h, 1), Toggled => fp_mix(h, 2), Submitted => fp_mix(h, 4),
+        Changed(x) => if (text) { fp_str(fp_mix(h, 3), x, 0) } else { fp_mix(h, 3) },
+        Custom(n) => fp_mix(fp_mix(h, 5), n)
+    };
+}
+
+Int fp_one(Int h, Widget w) {
+    return match (w) {
+        Text(s) => fp_str(fp_mix(h, 101), s, 0),
+        Button(s, m) => fp_msg(fp_str(fp_mix(h, 102), s, 0), m, true),
+        Checkbox(s, c, m) => fp_msg(fp_str(fp_mix(h, 103), s, 0), m, true),
+        TextInput(s, k, m) => fp_msg(fp_mix(h, 104), m, false),
+        Row(xs) => fp_mix(fp_mix(h, 105), xs.len()),
+        Column(xs) => fp_mix(fp_mix(h, 106), xs.len()),
+        Stack(xs) => fp_mix(fp_mix(h, 107), xs.len()),
+        Padding(n, c) => fp_mix(fp_mix(h, 108), n),
+        Align(ax, ay, c) => fp_mix(fp_mix(fp_mix(h, 109), ax), ay),
+        Scroll(o, c) => fp_mix(h, 110),
+        Rows(o, rh, xs) => fp_mix(fp_mix(fp_mix(h, 111), rh), xs.len()),
+        Bitmap(bw, bh, px) => fp_mix(fp_mix(fp_mix(h, 112), bw), bh),
+        Slider(v, m) => fp_msg(fp_mix(h, 113), m, true),
+        Spacer => fp_mix(h, 114),
+        Themed(t, c) => fp_mix(h, 115)
+    };
+}
+
+Fp fp_node(Widget w, Int id, Int upto, Fp acc) {
+    if (id > upto) { return acc; }
+    return fp_kids(children(w), 0, upto, Fp { .h = fp_one(acc.h, w), .id = id + 1 });
+}
+
+Fp fp_kids(List(Widget) xs, Int i, Int upto, Fp acc) {
+    if (i >= xs.len() || acc.id > upto) { return acc; }
+    Fp next = fp_node(xs[i], acc.id, upto, acc);
+    // a subtree passed over still takes its numbers
+    return fp_kids(xs, i + 1, upto, Fp { .h = next.h, .id = acc.id + node_count(xs[i]) });
 }
 
 /// Whether `a` and `b` are the same input's message. A `Changed(text)`
@@ -684,4 +747,37 @@ test "an off-screen field under a modal cannot be scrolled to (R4-1)" {
     UiStep s = ui_event(ui_new(), w, r, Assist(5, act_scroll()));
     expect(s.out.len()).toEqual(1);
     expect(ui_event(ui_new(), w, r, Assist(5, act_focus())).ui.focus).toEqual(-1);
+}
+
+/// A row per name, each with a Dismiss button keyed by its index.
+Widget dismiss_rows(List(Str) names, Int i, ListBuf(Widget) acc) {
+    if (i >= names.len()) { return Column(acc.finish()); }
+    return dismiss_rows(names, i + 1, acc.push(Row([Text(names[i]), Button("Dismiss", Custom(i))])));
+}
+
+test "a release raises nothing when rows with the same label renumber under it (R4-5)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...
+    Widget abc = dismiss_rows(["A", "B", "C"], 0, ListBuf());
+    Found b = find(abc, r, 6);
+    Int x = b.r.x + 2;
+    Int y = b.r.y + 2;
+    UiStep down = ui_event(ui_new(), abc, r, PointerDown(x, y, 1));
+    expect(down.ui.pressed).toEqual(6);
+    // a tick removes A: C's Dismiss, now Custom(1), is number 6, in B's place
+    Widget bc = dismiss_rows(["B", "C"], 0, ListBuf());
+    expect(find(bc, r, 6).r.y).toEqual(b.r.y);
+    UiStep up = ui_event(down.ui, bc, r, PointerUp(x, y, 1));
+    expect(raised_any(up, 0)).toEqual(false);
+    expect(up.ui.pressed).toEqual(-1);
+    // unchanged rows still click, and so does a change after the pressed one
+    expect(raised(ui_event(down.ui, abc, r, PointerUp(x, y, 1)), Custom(1), 0)).toEqual(true);
+    Widget abd = dismiss_rows(["A", "B", "D"], 0, ListBuf());
+    expect(raised(ui_event(down.ui, abd, r, PointerUp(x, y, 1)), Custom(1), 0)).toEqual(true);
+    // a slider dragged changes its own value, which does not cancel the drag
+    Widget sl = Column([Text("vol"), Slider(10, Custom(7))]);
+    Found s = find(sl, r, 2);
+    UiStep sd = ui_event(ui_new(), sl, r, PointerDown(s.r.x + 5, s.r.y + 2, 1));
+    UiStep sm = ui_event(sd.ui, Column([Text("vol"), Slider(60, Custom(7))]), r, PointerMoved(s.r.x + s.r.w - 5, s.r.y + 2));
+    expect(sm.out.len()).toEqual(2);
 }

@@ -47,13 +47,20 @@ pub Rect rect_union(Rect a, Rect b) {
     return Rect { .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
 }
 
+/// `n * s` for the extent of `n` cells of size `s`, capped at 1 << 40 (past
+/// any clip) so that a lying count or scale cannot overflow it.
+Int cells_span(Int n, Int s) {
+    if (n <= 0) { return 0; }
+    return if (n > (1 << 40) / s) { 1 << 40 } else { n * s };
+}
+
 /// Which cells of a grid `cols` x `rows` cells of `k` x `k` pixels, its
 /// corner at (`x0`, `y0`), touch `clip`: as a rectangle of cell indices,
 /// empty when none do. Drawing only those cells costs what the clip
 /// shows, not what the grid holds.
 pub Rect cells_in(Rect clip, Int x0, Int y0, Int cols, Int rows, Int k) {
     Int s = if (k < 1) { 1 } else { k };
-    Rect d = rect_intersect(clip, Rect { .x = x0, .y = y0, .w = cols * s, .h = rows * s });
+    Rect d = rect_intersect(clip, Rect { .x = x0, .y = y0, .w = cells_span(cols, s), .h = cells_span(rows, s) });
     if (rect_is_empty(d)) { return rect_none(); }
     Int cx = (d.x - x0) / s;
     Int cy = (d.y - y0) / s;

@@ -676,3 +676,12 @@ test "Tab skips inputs scrolled out of view or covered (R3-3)" {
     expect(ui_event(next, w, big, KeyDown(key_tab(), "")).ui.focus).toEqual(1);
     expect(tab_inputs(w, big, ui_new(), font_builtin())).toEqual([1, 10]);
 }
+
+test "an off-screen field under a modal cannot be scrolled to (R4-1)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // Stack 0, Scroll 1, Column 2, Padding 3, Spacer 4, TextInput 5, Button 6
+    Widget w = Stack([Scroll(0, Column([Padding(200, Spacer), TextInput("secret", 0, Custom(1))])), Button("modal", Custom(2))]);
+    UiStep s = ui_event(ui_new(), w, r, Assist(5, act_scroll()));
+    expect(s.out.len()).toEqual(1);
+    expect(ui_event(ui_new(), w, r, Assist(5, act_focus())).ui.focus).toEqual(-1);
+}

@@ -23,7 +23,7 @@ pub Int radius_in(Int r, Int w, Int h) {
 
 /// Fill `r` with corners of radius `rad`, clipped to `clip` and the canvas.
 pub Canvas fill_round_clip(Canvas c, Rect r, Int rad0, Color col, Rect clip) {
-    if (rect_is_empty(r) || rect_is_empty(rect_intersect(r, rect_intersect(clip, canvas_bounds(c))))) { return c; }
+    if (rect_is_empty(r) || rect_is_empty(rect_intersect(r, clip))) { return c; }
     Int rad = radius_in(rad0, r.w, r.h);
     if (rad == 0) { return fill_rect_clip(c, r, col, clip); }
     // the middle band, full width, and the strips between the corners
@@ -39,11 +39,12 @@ pub Canvas fill_round_clip(Canvas c, Rect r, Int rad0, Color col, Rect clip) {
 
 /// The square of `rad` x `rad` pixels at (`x0`, `y0`), each pixel blended
 /// by how much of it lies within `rad` of the point (`cx`, `cy`). Only the
-/// part of the square inside the clip and the canvas is visited: a corner
+/// part of the square inside the clip is visited (the rasterizer's clips
+/// lie within the canvas, and `blend_pixel_clip` checks it): a corner
 /// of radius 2000 drawn into a damaged strip one pixel wide costs that
 /// strip, not four million samples.
 Canvas corner(Canvas c, Int x0, Int y0, Int cx, Int cy, Int rad, Color col, Rect clip, Int i) {
-    Rect q = rect_intersect(Rect { .x = x0, .y = y0, .w = rad, .h = rad }, rect_intersect(clip, canvas_bounds(c)));
+    Rect q = rect_intersect(Rect { .x = x0, .y = y0, .w = rad, .h = rad }, clip);
     if (rect_is_empty(q)) { return c; }
     return corner_at(c, q, cx, cy, rad, col, clip, q.x, q.y);
 }

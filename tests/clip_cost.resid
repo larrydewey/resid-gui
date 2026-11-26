@@ -13,6 +13,8 @@ import "../src/gfx/font.resid";
 import "../src/gfx/text.resid";
 import "../src/gfx/image.resid";
 import "../src/gfx/shapes.resid";
+import "../src/gfx/draw.resid";
+import "../src/gfx/raster.resid";
 
 @requires(clock(readonly))
 Int now_ms() { return clock.monotonic_ns() / 1000000; }
@@ -138,4 +140,31 @@ test "a scaled image lands where it did, clipped" {
     expect(pixel_at(d, 4, 4).r).toEqual(255);
     expect(pixel_at(d, 4, 4).b).toEqual(255);
     expect(pixel_at(d, 5, 5).r).toEqual(0);
+}
+
+// ─── Fills write in place ──────────────────────────────────────────
+
+/// The process's peak resident set, in KB.
+@requires(filesystem(readonly))
+Int peak_kb() {
+    Str s = filesystem.read_all("/proc/self/status");
+    Int at = str_index_of(s, "VmHWM:", 0);
+    if (at < 0) { return 0; }
+    Int end = str_index_of(s, " kB", at);
+    return str_parse_int(str_trim(str_slice(s, at + 6, end)));
+}
+
+List(DrawOp) fills(Int i, Int n, ListBuf(DrawOp) acc) {
+    if (i >= n) { return acc.finish(); }
+    return fills(i + 1, n, acc.push(OpFill(Rect { .x = (i % 20) * 50, .y = (i / 20) * 50, .w = 40, .h = 40 }, rgb(200, 210, 220))));
+}
+
+@requires(filesystem(readonly))
+test "a frame of 200 fills writes one canvas, not a copy per fill" {
+    // a copy of this 1000 x 1000 canvas per op would be 800 MB; a
+    // rounded-corner change that read the canvas's size once did that
+    Int before = peak_kb();
+    Canvas c = raster_frame_rect(Frame { .ops = fills(0, 200, ListBuf()), .scale = 1, .font = font_builtin() }, Rect { .x = 0, .y = 0, .w = 1000, .h = 1000 }, background());
+    expect(pixel_at(c, 5, 5).r).toEqual(200);
+    expect(peak_kb() - before < 100000).toEqual(true);
 }

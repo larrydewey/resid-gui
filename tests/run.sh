@@ -84,6 +84,14 @@ if ! RESIDC="$RESIDC" "$ROOT/tests/lens.sh" >"$OUT/lens.log" 2>&1; then
     fail=$((fail + 1))
 fi
 
+# The permission-manifest tool reads main's capabilities, not a comment's.
+total=$((total + 1))
+if ! python3 -I "$ROOT/tools/caps_manifest.py" --self-test >"$OUT/caps.log" 2>&1; then
+    cat "$OUT/caps.log"
+    echo "FAILED: tools/caps_manifest.py --self-test"
+    fail=$((fail + 1))
+fi
+
 # The documents: their programs type-check and their signatures exist.
 total=$((total + 1))
 if ! python3 -I "$ROOT/tools/check_docs.py" "$RESIDC"; then

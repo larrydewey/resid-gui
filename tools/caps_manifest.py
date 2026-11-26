@@ -51,8 +51,39 @@ NO_HONEST_ENTITLEMENT = {
 }
 
 
+def code_only(source):
+    """`source` with comments and string literals blanked (same length), so
+    a `@requires` or an `Int main()` in either is not taken for code."""
+    out = []
+    i, n = 0, len(source)
+    while i < n:
+        c = source[i]
+        if source.startswith("//", i):
+            j = source.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+        elif source.startswith("/*", i):
+            j = source.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in source[i:j]))
+            i = j
+        elif c == '"':
+            j = i + 1
+            while j < n and source[j] != '"':
+                j += 2 if source[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append('"' + " " * (j - i - 2) + '"' if j - i >= 2 else " " * (j - i))
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def requires_of_main(source):
     """The capabilities on `main`, as (family, mode) pairs, mode None for read-write."""
+    source = code_only(source)
     m = re.search(r"((?:@\w+\([^)]*(?:\([^)]*\)[^)]*)*\)\s*)*)Int\s+main\s*\(\s*\)", source)
     if not m:
         raise ValueError("no `Int main()` found")
@@ -112,6 +143,12 @@ def self_test():
     _, problems = plan(requires_of_main("@requires(display, filesystem(readonly))\nInt main() { return 0; }"))
     assert len(problems) == 1 and problems[0].startswith("filesystem(readonly)"), problems
     assert plan(requires_of_main("Int main() { return 0; }"))[0]["windows"] == []
+    # a main, or its @requires, in a comment or a string is not the program's
+    fooled = ("// @requires(display) Int main() { return 0; }\n"
+              "Str s() { return \"@requires(display) Int main()\"; }\n"
+              "/* @requires(clock(readonly))\nInt main() */\n"
+              "@requires(display, filesystem)\nInt main() { return 0; }\n")
+    assert requires_of_main(fooled) == [("display", None), ("filesystem", None)], requires_of_main(fooled)
     print("caps_manifest: self-test passed")
     return 0
 
@@ -136,7 +173,8 @@ def main():
             return 1
     caps = requires_of_main(open(a.program, encoding="utf-8").read())
     out, problems = plan(caps)
-    print("# capabilities on main (compiler-proven): " + (", ".join(f + (f"({m})" if m else "") for f, m in caps) or "none"))
+    proof = "compiler-proven" if a.residc else "not type-checked: pass --residc to prove it"
+    print(f"# capabilities on main ({proof}): " + (", ".join(f + (f"({m})" if m else "") for f, m in caps) or "none"))
     if a.platform in ("macos", "all"):
         print("\n# macOS entitlements\n" + macos_plist(out["macos"]), end="")
     if a.platform in ("windows", "all"):

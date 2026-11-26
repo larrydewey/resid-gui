@@ -139,19 +139,96 @@ def code_only(source):
     return "".join(out)
 
 
+_MAIN = re.compile(r"(?<![\w.])((?:(?:pub|export)\s+)*)Int\s+main\s*\(\s*\)")
+
+
+def _open_of(code, close):
+    """The index of the `(` matching the `)` at `close`, or -1."""
+    depth = 0
+    for j in range(close, -1, -1):
+        if code[j] == ")":
+            depth += 1
+        elif code[j] == "(":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def _attributes_before(code, end):
+    """The attributes written just before index `end`, nearest last, as
+    (name, argument text or None) pairs, and the index where they start."""
+    attrs = []
+    i = end
+    while True:
+        j = i
+        while j > 0 and code[j - 1].isspace():
+            j -= 1
+        args = None
+        k = j
+        if k > 0 and code[k - 1] == ")":
+            o = _open_of(code, k - 1)
+            if o < 0:
+                break
+            args = code[o + 1:k - 1]
+            k = o
+            while k > 0 and code[k - 1].isspace():
+                k -= 1
+        n = k
+        while n > 0 and _ident(code[n - 1]):
+            n -= 1
+        if n == k or n == 0 or code[n - 1] != "@":
+            break
+        attrs.append((code[n:k], args))
+        i = n - 1
+    attrs.reverse()
+    return attrs, i
+
+
+def _caps_list(text):
+    """`display, clock(readonly)` as (family, mode) pairs; ValueError on
+    anything else."""
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+            continue
+        depth += (ch == "(") - (ch == ")")
+        cur += ch
+    parts.append(cur)
+    caps = []
+    for part in parts:
+        if not part.strip() and len(parts) == 1:
+            continue
+        m = re.fullmatch(r"\s*(\w+)\s*(?:\(\s*(\w+)\s*\))?\s*", part)
+        if not m:
+            raise ValueError(f"@requires on main does not parse: {part.strip()!r}")
+        caps.append((m.group(1), m.group(2)))
+    return caps
+
+
 def requires_of_main(source):
-    """The capabilities on `main`, as (family, mode) pairs, mode None for read-write."""
-    source = code_only(source)
-    m = re.search(r"((?:@\w+\([^)]*(?:\([^)]*\)[^)]*)*\)\s*)*)Int\s+main\s*\(\s*\)", source)
+    """The capabilities on `main`, as (family, mode) pairs, mode None for
+    read-write. Raises ValueError when there is no `main`, or when what is
+    written before it looks like attributes but does not parse: an empty
+    list must mean no capabilities, never "could not read them"."""
+    code = code_only(source)
+    m = _MAIN.search(code)
     if not m:
         raise ValueError("no `Int main()` found")
-    req = re.search(r"@requires\(((?:[^()]|\([^)]*\))*)\)", m.group(1))
-    if not req:
-        return []
+    attrs, start = _attributes_before(code, m.start())
+    # whatever stands between the previous item and the attributes read
+    prev = max(code.rfind(";", 0, start), code.rfind("}", 0, start), code.rfind("{", 0, start))
+    gap = code[prev + 1:start]
+    if "@" in gap or gap.strip().endswith(")"):
+        raise ValueError("the attributes before `Int main()` do not parse: " + " ".join(gap.split())[:80])
     caps = []
-    for part in re.findall(r"\w+(?:\(\w+\))?", req.group(1)):
-        fam, _, mode = part.partition("(")
-        caps.append((fam, mode.rstrip(")") or None))
+    for name, args in attrs:
+        if name == "requires":
+            if args is None:
+                raise ValueError("@requires on main has no capability list")
+            caps += _caps_list(args)
     return caps
 
 
@@ -216,6 +293,26 @@ def self_test():
                   "Bool q(Byte c) { return c == '\\''; } Str t() { return \"@requires(device) Int main()\"; }\n"):
         got = requires_of_main(trick + "@requires(display)\nInt main() { return 0; }\n")
         assert got == [("display", None)], (trick, got)
+    # modifiers, a space before the list, nested attributes in any order (R4-9)
+    for src, want in (("@requires(display, filesystem)\npub Int main() { return 0; }", [("display", None), ("filesystem", None)]),
+                      ("@requires (display, clock ( readonly ))\nInt main() { return 0; }", [("display", None), ("clock", "readonly")]),
+                      ("@requires(display)\n@needs(App(Foo(M)))\nInt main() { return 0; }", [("display", None)]),
+                      ("@needs(App(Pair(Foo(M), N)))\n@requires(display, network(readonly))\n\npub  Int  main ( ) { return 0; }",
+                       [("display", None), ("network", "readonly")]),
+                      ("Int f() { return 1; }\nInt main() { return 0; }", [])):
+        got = requires_of_main(src)
+        assert got == want, (src, got)
+    # attributes that do not parse are an error, never "no capabilities"
+    for bad in ("@requires(display, network(x(y)))\nInt main() { return 0; }",
+                "@requires(display\nInt main() { return 0; }",
+                "@ requires(display)\nInt main() { return 0; }",
+                "@requires(display) junk\nInt main() { return 0; }",
+                "@requires\nInt main() { return 0; }"):
+        try:
+            got = requires_of_main(bad)
+        except ValueError:
+            continue
+        raise AssertionError(("accepted", bad, got))
     print("caps_manifest: self-test passed")
     return 0
 
@@ -238,7 +335,11 @@ def main():
             sys.stderr.write(r.stdout + r.stderr)
             print("caps_manifest: the program does not type-check; its capabilities are not proven", file=sys.stderr)
             return 1
-    caps = requires_of_main(open(a.program, encoding="utf-8").read())
+    try:
+        caps = requires_of_main(open(a.program, encoding="utf-8").read())
+    except ValueError as e:
+        print(f"caps_manifest: {e}", file=sys.stderr)
+        return 1
     out, problems = plan(caps)
     proof = "compiler-proven" if a.residc else "not type-checked: pass --residc to prove it"
     print(f"# capabilities on main ({proof}): " + (", ".join(f + (f"({m})" if m else "") for f, m in caps) or "none"))

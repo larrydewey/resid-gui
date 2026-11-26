@@ -680,15 +680,24 @@ A11y on_fd(A11y a, Int fd) {
     return A11y { .fd = fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip };
 }
 
-/// How many whole messages `b` holds: the replies, counted by framing
-/// alone. (Decoding them would be a stronger check, and passes in this
-/// file's own build, but this Resid compiler miscompiles the decoder for
-/// bytes read at run time in some larger builds that include these tests,
-/// such as tests/golden.resid's.)
+/// How many whole messages `b` holds: the replies, counted by framing.
 Int whole(List(Int) b, Int n) {
     DbusIn t = dtake(b);
     if (!t.ok) { return n; }
     return whole(t.rest, n + 1);
+}
+
+/// The reply to call `serial` among the whole messages in `b`, decoded,
+/// or an empty message. (Before dbus.resid's decoder record was renamed
+/// from `Dec`, a Resid built-in type's name, the compiler moved it as a
+/// decimal and lost its strings and lists in some builds; these checks
+/// were counts only then.)
+DMsg reply_in(List(Int) b, Int serial) {
+    DbusIn t = dtake(b);
+    if (!t.ok) { return dcall(1, "", "", "", "", []); }
+    DMsg m = dmsg_decode(t.msg) else { dcall(1, "", "", "", "", []) };
+    if (m.reply_serial == serial) { return m; }
+    return reply_in(t.rest, serial);
 }
 
 /// Send `n` chunks of zero bytes, pumping after each.
@@ -727,7 +736,11 @@ test "a message that does not decode is refused, and the bus stays open" {
     _ = resid_disp_send(pair[0], bad.concat(be).concat(dbl).concat(good), -1);
     A11yStep s = a11y_pump(a);
     expect(s.a.alive).toEqual(true);
-    expect(whole(resid_disp_recv(pair[0], 65536), 0)).toEqual(3);
+    List(Int) rs = resid_disp_recv(pair[0], 65536);
+    expect(whole(rs, 0)).toEqual(3);
+    expect(reply_in(rs, 31).error).toEqual("org.freedesktop.DBus.Error.Failed");
+    expect(reply_in(rs, 32).error).toEqual("org.freedesktop.DBus.Error.UnknownMethod");
+    expect(arg_str(reply_in(rs, 30).body, 0)).toEqual("ello");
     _ = resid_disp_close(pair[0]);
     _ = resid_disp_close(pair[1]);
 }
@@ -749,7 +762,9 @@ test "a message past 1 MB is skipped as it arrives, and the bus stays open" {
     _ = resid_disp_send(pair[0], zero_bytes(body - 24 * 65536, ListBuf()).concat(good), -1);
     A11yStep s = a11y_pump(a1);
     expect(s.a.alive).toEqual(true);
-    expect(whole(resid_disp_recv(pair[0], 65536), 0)).toEqual(1);
+    List(Int) rs = resid_disp_recv(pair[0], 65536);
+    expect(whole(rs, 0)).toEqual(1);
+    expect(arg_str(reply_in(rs, 41).body, 0)).toEqual("ello");
     _ = resid_disp_close(pair[0]);
     _ = resid_disp_close(pair[1]);
 }

@@ -165,9 +165,9 @@ pub List(Int) dmsg_bytes(DMsg m) {
 
 /// One value read: the value, where the next starts, where the signature
 /// continues; `ok` false with `why` on malformed input.
-type Dec = { Bool ok; Str why; DV v; Int at; Int si; };
+type DbusDec = { Bool ok; Str why; DV v; Int at; Int si; };
 
-Dec dfail(Str why) { return Dec { .ok = false, .why = why, .v = DByte(0), .at = 0, .si = 0 }; }
+DbusDec dfail(Str why) { return DbusDec { .ok = false, .why = why, .v = DByte(0), .at = 0, .si = 0 }; }
 
 Int u32at(List(Int) b, Int i) { return (b[i] & 255) | ((b[i + 1] & 255) << 8) | ((b[i + 2] & 255) << 16) | ((b[i + 3] & 255) << 24); }
 Int uat(List(Int) b, Int i, Int n) { return if (n <= 0) { 0 } else { (b[i] & 255) | (uat(b, i + 1, n - 1) << 8) }; }
@@ -177,7 +177,7 @@ Int up(Int at, Int n) { return ((at + n - 1) / n) * n; }
 
 /// The value at `at` of the single complete type starting at `si` in
 /// `sig`; `base` is where the message starts (alignment is from there).
-Dec ddec(List(Int) b, Int base, Int at0, Str sig, Int si, Int depth) {
+DbusDec ddec(List(Int) b, Int base, Int at0, Str sig, Int si, Int depth) {
     if (depth > 32) { return dfail("dbus: nested too deep"); }
     if (si >= str_len(sig)) { return dfail("dbus: signature ended early"); }
     Int c = str_char_at(sig, si);
@@ -198,48 +198,48 @@ Dec ddec(List(Int) b, Int base, Int at0, Str sig, Int si, Int depth) {
     return dfail(f"dbus: unsupported type code {c}");
 }
 
-Dec fixed(List(Int) b, Int at, Int n, Int si, DV z, Int c) {
+DbusDec fixed(List(Int) b, Int at, Int n, Int si, DV z, Int c) {
     if (at + n > b.len()) { return dfail("dbus: value runs past the message"); }
     Int raw = uat(b, at, n);
     DV v = if (c == 121) { DByte(raw) } else { if (c == 98) { DBool(raw != 0) } else { if (c == 105) { DI32(sext(raw, 32)) }
            else { if (c == 117 || c == 104) { DU32(raw) } else { if (c == 110) { DI16(sext(raw, 16)) } else { if (c == 113) { DU16(raw) }
            else { if (c == 120) { DI64(raw) } else { DU64(raw) } } } } } } };
     if (c == 98 && raw > 1) { return dfail("dbus: a boolean is 0 or 1"); }
-    return Dec { .ok = true, .why = "", .v = v, .at = at + n, .si = si + 1 };
+    return DbusDec { .ok = true, .why = "", .v = v, .at = at + n, .si = si + 1 };
 }
 
-Dec dec_string(List(Int) b, Int at, Int si, Int c) {
+DbusDec dec_string(List(Int) b, Int at, Int si, Int c) {
     if (at + 4 > b.len()) { return dfail("dbus: string length runs past the message"); }
     Int n = u32at(b, at);
     if (n > 16777216 || at + 4 + n + 1 > b.len()) { return dfail("dbus: string runs past the message"); }
     if ((b[at + 4 + n] & 255) != 0) { return dfail("dbus: string lacks its NUL"); }
     return match (utf8_decode(b[(at + 4)..(at + 4 + n)])) {
         Ok(s) => if (has_nul(s, 0)) { dfail("dbus: NUL inside a string") } else {
-            Dec { .ok = true, .why = "", .v = if (c == 111) { DPath(s) } else { DStr(s) }, .at = at + 4 + n + 1, .si = si + 1 } },
+            DbusDec { .ok = true, .why = "", .v = if (c == 111) { DPath(s) } else { DStr(s) }, .at = at + 4 + n + 1, .si = si + 1 } },
         Err(e) => dfail("dbus: string is not UTF-8")
     };
 }
 
 Bool has_nul(Str s, Int i) { return if (i >= str_len(s)) { false } else { str_char_at(s, i) == 0 || has_nul(s, i + 1) }; }
 
-Dec dec_sig(List(Int) b, Int at, Int si) {
+DbusDec dec_sig(List(Int) b, Int at, Int si) {
     if (at + 1 > b.len()) { return dfail("dbus: signature runs past the message"); }
     Int n = b[at] & 255;
     if (at + 1 + n + 1 > b.len() || (b[at + 1 + n] & 255) != 0) { return dfail("dbus: signature runs past the message"); }
     return match (utf8_decode(b[(at + 1)..(at + 1 + n)])) {
-        Ok(s) => Dec { .ok = true, .why = "", .v = DSig(s), .at = at + 1 + n + 1, .si = si + 1 },
+        Ok(s) => DbusDec { .ok = true, .why = "", .v = DSig(s), .at = at + 1 + n + 1, .si = si + 1 },
         Err(e) => dfail("dbus: signature is not ASCII")
     };
 }
 
-Dec dec_variant(List(Int) b, Int base, Int at, Int si, Int depth) {
-    Dec s = dec_sig(b, at, 0);
+DbusDec dec_variant(List(Int) b, Int base, Int at, Int si, Int depth) {
+    DbusDec s = dec_sig(b, at, 0);
     if (!s.ok) { return s; }
     Str inner = match (s.v) { DSig(x) => x, _ => "" };
     if (str_len(inner) == 0 || type_end(inner, 0, 0) != str_len(inner)) { return dfail("dbus: a variant holds one complete type"); }
-    Dec v = ddec(b, base, s.at, inner, 0, depth + 1);
+    DbusDec v = ddec(b, base, s.at, inner, 0, depth + 1);
     if (!v.ok) { return v; }
-    return Dec { .ok = true, .why = "", .v = DVar(v.v), .at = v.at, .si = si + 1 };
+    return DbusDec { .ok = true, .why = "", .v = DVar(v.v), .at = v.at, .si = si + 1 };
 }
 
 /// Where the complete type starting at `i` ends in `sig`, or -1.
@@ -260,7 +260,7 @@ Int group_end(Str sig, Int i, Int close, Int depth) {
     return if (e < 0) { -1 } else { group_end(sig, e, close, depth) };
 }
 
-Dec dec_array(List(Int) b, Int base, Int at, Str sig, Int si, Int depth) {
+DbusDec dec_array(List(Int) b, Int base, Int at, Str sig, Int si, Int depth) {
     Int e = type_end(sig, si + 1, depth + 1);
     if (e < 0) { return dfail("dbus: bad array signature"); }
     if (at + 4 > b.len()) { return dfail("dbus: array length runs past the message"); }
@@ -271,15 +271,15 @@ Dec dec_array(List(Int) b, Int base, Int at, Str sig, Int si, Int depth) {
     return dec_elems(b, base, start, start + n, es, depth, ListBuf(), e);
 }
 
-Dec dec_elems(List(Int) b, Int base, Int at, Int stop, Str es, Int depth, ListBuf(DV) acc, Int si_after) {
+DbusDec dec_elems(List(Int) b, Int base, Int at, Int stop, Str es, Int depth, ListBuf(DV) acc, Int si_after) {
     if (at >= stop) {
         if (at > stop) {
             _ = acc.finish();
             return dfail("dbus: an element runs past its array");
         }
-        return Dec { .ok = true, .why = "", .v = DArr(es, acc.finish()), .at = stop, .si = si_after };
+        return DbusDec { .ok = true, .why = "", .v = DArr(es, acc.finish()), .at = stop, .si = si_after };
     }
-    Dec d = ddec(b, base, at, es, 0, depth + 1);
+    DbusDec d = ddec(b, base, at, es, 0, depth + 1);
     if (!d.ok) {
         _ = acc.finish();
         return d;
@@ -287,24 +287,24 @@ Dec dec_elems(List(Int) b, Int base, Int at, Int stop, Str es, Int depth, ListBu
     return dec_elems(b, base, d.at, stop, es, depth, acc.push(d.v), si_after);
 }
 
-Dec dec_struct(List(Int) b, Int base, Int at, Str sig, Int si, Int depth, List(DV) acc) {
+DbusDec dec_struct(List(Int) b, Int base, Int at, Str sig, Int si, Int depth, List(DV) acc) {
     if (si >= str_len(sig)) { return dfail("dbus: unclosed struct"); }
     if (str_char_at(sig, si) == 41) {
         if (acc.len() == 0) { return dfail("dbus: empty struct"); }
-        return Dec { .ok = true, .why = "", .v = DStruct(acc), .at = at, .si = si + 1 };
+        return DbusDec { .ok = true, .why = "", .v = DStruct(acc), .at = at, .si = si + 1 };
     }
-    Dec d = ddec(b, base, at, sig, si, depth + 1);
+    DbusDec d = ddec(b, base, at, sig, si, depth + 1);
     if (!d.ok) { return d; }
     return dec_struct(b, base, d.at, sig, d.si, depth, acc.concat([d.v]));
 }
 
-Dec dec_entry(List(Int) b, Int base, Int at, Str sig, Int si, Int depth) {
-    Dec k = ddec(b, base, at, sig, si + 1, depth + 1);
+DbusDec dec_entry(List(Int) b, Int base, Int at, Str sig, Int si, Int depth) {
+    DbusDec k = ddec(b, base, at, sig, si + 1, depth + 1);
     if (!k.ok) { return k; }
-    Dec v = ddec(b, base, k.at, sig, k.si, depth + 1);
+    DbusDec v = ddec(b, base, k.at, sig, k.si, depth + 1);
     if (!v.ok) { return v; }
     if (v.si >= str_len(sig) || str_char_at(sig, v.si) != 125) { return dfail("dbus: a dict entry holds two types"); }
-    return Dec { .ok = true, .why = "", .v = DEntry(k.v, v.v), .at = v.at, .si = v.si + 1 };
+    return DbusDec { .ok = true, .why = "", .v = DEntry(k.v, v.v), .at = v.at, .si = v.si + 1 };
 }
 
 /// Every value of `sig` from `at`, which must use the bytes exactly.
@@ -313,7 +313,7 @@ Result(List(DV), Str) dec_body(List(Int) b, Int base, Int at, Int stop, Str sig,
         if (at != stop) { return Err("dbus: bytes after the body"); }
         return Ok(acc);
     }
-    Dec d = ddec(b, base, at, sig, si, 0);
+    DbusDec d = ddec(b, base, at, sig, si, 0);
     if (!d.ok) { return Err(d.why); }
     if (d.at > stop) { return Err("dbus: body runs past its length"); }
     return dec_body(b, base, d.at, stop, sig, d.si, acc.concat([d.v]));
@@ -358,7 +358,7 @@ pub Result(DMsg, Str) dmsg_decode(List(Int) m) {
     Int body = u32at(m, 4);
     Int serial = u32at(m, 8);
     if (serial == 0) { return Err("dbus: serial 0"); }
-    Dec f = ddec(m, 0, 12, "a(yv)", 0, 0);
+    DbusDec f = ddec(m, 0, 12, "a(yv)", 0, 0);
     if (!f.ok) { return Err(f.why); }
     Int bstart = up(f.at, 8);
     if (bstart + body != m.len()) { return Err("dbus: body length does not match"); }
@@ -383,7 +383,7 @@ pub Result(DMsg, Str) dmsg_header(List(Int) m) {
     Int body = u32at(m, 4);
     Int serial = u32at(m, 8);
     if (serial == 0) { return Err("dbus: serial 0"); }
-    Dec f = ddec(m, 0, 12, "a(yv)", 0, 0);
+    DbusDec f = ddec(m, 0, 12, "a(yv)", 0, 0);
     if (!f.ok) { return Err(f.why); }
     if (up(f.at, 8) + body != m.len()) { return Err("dbus: body length does not match"); }
     List(DV) fs = match (f.v) { DArr(es, xs) => xs, _ => [] };

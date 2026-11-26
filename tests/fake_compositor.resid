@@ -26,19 +26,21 @@ type Comp = {
     Int registry; Int compositor; Int shm; Int wm_base; Int seat;
     Int surface; Int xdg_surface; Int toplevel; Int pointer; Int keyboard;
     Int pools; Int commits; Int attached; Int frames; Bool input_sent; Bool bad; Str why;
+    Int kmsize;
 };
 
-Comp comp_new() {
+/// A compositor that says its keymap is `kmsize` bytes (0: what it is).
+Comp comp_new(Int kmsize) {
     return Comp { .registry = 0, .compositor = 0, .shm = 0, .wm_base = 0, .seat = 0, .surface = 0, .xdg_surface = 0,
                   .toplevel = 0, .pointer = 0, .keyboard = 0, .pools = 0, .commits = 0, .attached = 0, .frames = 0,
-                  .input_sent = false, .bad = false, .why = "" };
+                  .input_sent = false, .bad = false, .why = "", .kmsize = kmsize };
 }
 
 Comp failed(Comp c, Str why) {
     return Comp { .registry = c.registry, .compositor = c.compositor, .shm = c.shm, .wm_base = c.wm_base, .seat = c.seat,
                   .surface = c.surface, .xdg_surface = c.xdg_surface, .toplevel = c.toplevel, .pointer = c.pointer,
                   .keyboard = c.keyboard, .pools = c.pools, .commits = c.commits, .attached = c.attached, .frames = c.frames,
-                  .input_sent = c.input_sent, .bad = true, .why = why };
+                  .input_sent = c.input_sent, .bad = true, .why = why, .kmsize = c.kmsize };
 }
 
 /// One field set by name, the rest kept.
@@ -51,7 +53,7 @@ Comp set(Comp c, Str f, Int v) {
         .pointer = if (f == "pointer") { v } else { c.pointer }, .keyboard = if (f == "keyboard") { v } else { c.keyboard },
         .pools = if (f == "pools") { v } else { c.pools }, .commits = if (f == "commits") { v } else { c.commits },
         .attached = if (f == "attached") { v } else { c.attached }, .frames = if (f == "frames") { v } else { c.frames },
-        .input_sent = if (f == "input_sent") { v != 0 } else { c.input_sent }, .bad = c.bad, .why = c.why
+        .input_sent = if (f == "input_sent") { v != 0 } else { c.input_sent }, .bad = c.bad, .why = c.why, .kmsize = c.kmsize
     };
 }
 
@@ -129,7 +131,7 @@ Comp commit(Int fd, Comp c) {
     if (c.attached != 0 && !c.input_sent) {
         // a French keymap, enter at (10.5, 20), button 272 down and up,
         // key 30 (A on a US keyboard, Q here) down and up, close
-        _ = send_keymap(fd, c.keyboard);
+        _ = send_keymap(fd, c.keyboard, c.kmsize);
         List(List(Int)) input = [
             wl_msg(c.pointer, 0, wl_words([1, c.surface, 10 * 256 + 128, 20 * 256])),
             wl_msg(c.pointer, 3, wl_words([2, 0, 272, 1])),
@@ -151,14 +153,16 @@ Str azerty() {
 }
 
 /// `wl_keyboard.keymap` (format 1, XKB text) with the text in a shared
-/// mapping whose descriptor rides along.
+/// mapping whose descriptor rides along, said to be `size` bytes long (0:
+/// its real length).
 @requires(display)
-Bool send_keymap(Int fd, Int keyboard) {
+Bool send_keymap(Int fd, Int keyboard, Int size) {
     Str t = azerty();
     List(Int) bytes = text_bytes(t, 0, lb()).concat([0]);
     Int h = resid_disp_shm_new(bytes.len());
     if (h == 0 || !resid_disp_shm_put(h, 0, bytes, bytes.len())) { return false; }
-    Bool sent = resid_disp_send(fd, wl_msg(keyboard, 0, wl_words([1, bytes.len()])), resid_disp_shm_fd(h));
+    Int said = if (size > 0) { size } else { bytes.len() };
+    Bool sent = resid_disp_send(fd, wl_msg(keyboard, 0, wl_words([1, said])), resid_disp_shm_fd(h));
     _ = resid_disp_shm_free(h);
     return sent;
 }
@@ -214,7 +218,7 @@ test "the Wayland backend configures, presents and decodes input" {
     Result(Got, RegionError) r = spawn (display, clock(readonly)) {
         return client(cfd);
     };
-    Comp c = serve(sfd, [], comp_new());
+    Comp c = serve(sfd, [], comp_new(0));
     Got g = r else { Got { .downs = -9, .ups = 0, .keys = 0, .text = "", .x = -1, .closed = false } };
     expect(c.why).toEqual("");
     expect(c.pools).toEqual(2);
@@ -225,5 +229,24 @@ test "the Wayland backend configures, presents and decodes input" {
     expect(g.ups).toEqual(1);
     expect(g.keys).toEqual(1);
     expect(g.x).toEqual(10);
+    expect(g.closed).toEqual(true);
+}
+
+@requires(display, clock(readonly))
+test "a keymap that claims 2 GB is not read, and the layout stays" {
+    // the same keymap text, said to be 0x7fffffff bytes: the client must
+    // not read it (nor allocate for it) and keeps the US layout, where
+    // key 30 types a
+    List(Int) pair = resid_disp_pair();
+    Int sfd = pair[0];
+    Int cfd = pair[1];
+    Result(Got, RegionError) r = spawn (display, clock(readonly)) {
+        return client(cfd);
+    };
+    Comp c = serve(sfd, [], comp_new(2147483647));
+    Got g = r else { Got { .downs = -9, .ups = 0, .keys = 0, .text = "", .x = -1, .closed = false } };
+    expect(c.why).toEqual("");
+    expect(g.keys).toEqual(1);
+    expect(g.text).toEqual("a");
     expect(g.closed).toEqual(true);
 }

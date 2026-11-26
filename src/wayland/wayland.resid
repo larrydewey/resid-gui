@@ -500,10 +500,14 @@ WlStep on_pointer(Wl w, Int op, List(Int) m) {
 WlStep on_keyboard(Wl w, Int op, List(Int) m, Int now) {
     if (op == 0) {
         // The layout, as XKB keymap text in the descriptor that came with
-        // the event (format 1). Anything else keeps the layout there is.
+        // the event (format 1). Anything else keeps the layout there is,
+        // and so does a size past what a keymap can be (`xkb_keymap`'s
+        // limit), which is not read at all. Reading with size 0 only
+        // closes the descriptor: it is never left open.
         Int fd = resid_disp_recv_fd();
         Int size = wl_u32(m, 12);
-        List(Int) text = if (fd >= 0) { resid_disp_fd_read(fd, if (wl_u32(m, 8) == 1) { size } else { 0 }) } else { [] };
+        Bool usable = wl_u32(m, 8) == 1 && size > 0 && size <= xkb_max_text();
+        List(Int) text = if (fd >= 0) { resid_disp_fd_read(fd, if (usable) { size } else { 0 }) } else { [] };
         return match (xkb_keymap(text)) {
             Some(k) => quiet(with_keymap(w, k)),
             None => quiet(w)

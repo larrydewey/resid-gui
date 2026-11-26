@@ -284,7 +284,14 @@ Loop(M) fold_events(List(Event) es, Int i, Loop(M) st, Int s, Int w, Int h) {
         .model = st.model, .ui = u.ui, .view = st.view, .ops = st.ops, .w = st.w, .h = st.h, .scale = st.scale,
         .pending = st.pending, .blink = st.blink, .done = st.done, .fonts = st.fonts, .font = st.font, .rec = st.rec, .log = st.log, .a11y = st.a11y
     });
-    return fold_events(es, i + 1, next, s, w, h);
+    // The new view may have renumbered the focused input: the caret, the
+    // screen reader and the next key follow the input, not the number.
+    UiState ui2 = ui_refocus(next.ui, next.view, area, next.font);
+    Loop(M) kept = Loop {
+        .model = next.model, .ui = ui2, .view = next.view, .ops = next.ops, .w = next.w, .h = next.h, .scale = next.scale,
+        .pending = next.pending, .blink = next.blink, .done = next.done, .fonts = next.fonts, .font = next.font, .rec = next.rec, .log = next.log, .a11y = next.a11y
+    };
+    return fold_events(es, i + 1, kept, s, w, h);
 }
 
 /// Hand each event to `update`, refreshing the view after each so the next

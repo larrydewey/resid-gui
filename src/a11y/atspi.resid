@@ -32,27 +32,33 @@ import "dbus.resid";
 
 pub type A11y = {
     Int fd; Bool alive; Str err; List(Int) buf; Int serial;
-    Str name; Str title; List(SemNode) tree;
+    Str name; Str title; List(SemNode) tree; Int skip;
 };
 
 pub A11y a11y_none() {
-    return A11y { .fd = -1, .alive = false, .err = "", .buf = [], .serial = 1, .name = "", .title = "", .tree = [] };
+    return A11y { .fd = -1, .alive = false, .err = "", .buf = [], .serial = 1, .name = "", .title = "", .tree = [], .skip = 0 };
 }
 
 A11y with_tree(A11y a, List(SemNode) t) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = t };
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = t, .skip = a.skip };
 }
 
 A11y with_serial(A11y a, Int s) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = s, .name = a.name, .title = a.title, .tree = a.tree };
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = s, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip };
 }
 
 A11y with_buf(A11y a, List(Int) b) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = b, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree };
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = b, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip };
+}
+
+/// `a` skipping the next `n` bytes from the bus: the rest of a message too
+/// large to keep.
+A11y with_skip(A11y a, Int n) {
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = n };
 }
 
 A11y dead(A11y a, Str why) {
-    return A11y { .fd = a.fd, .alive = false, .err = why, .buf = [], .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree };
+    return A11y { .fd = a.fd, .alive = false, .err = why, .buf = [], .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = 0 };
 }
 
 // ─── Objects ───────────────────────────────────────────────────────
@@ -444,7 +450,7 @@ pub A11y a11y_start(Str title) {
 /// name.
 @requires(display)
 pub A11y a11y_start_on(Int fd, Str title) {
-    A11y a0 = A11y { .fd = fd, .alive = true, .err = "", .buf = [], .serial = 1, .name = "", .title = title, .tree = [] };
+    A11y a0 = A11y { .fd = fd, .alive = true, .err = "", .buf = [], .serial = 1, .name = "", .title = title, .tree = [], .skip = 0 };
     A11y a1 = send(a0, [dcall(1, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", [])], 0);
     A11y a2 = wait_name(with_serial(a1, 2), 20);
     if (!a2.alive || str_len(a2.name) == 0) {
@@ -464,7 +470,7 @@ A11y wait_name(A11y a, Int tries) {
     if (t.ok) {
         A11y rest = with_buf(a, t.rest);
         Str name = match (dmsg_decode(t.msg)) { Ok(m) => if (m.kind == msg_return() && m.reply_serial == 1) { arg_str(m.body, 0) } else { "" }, Err(e) => "" };
-        return wait_name(if (str_len(name) > 0) { A11y { .fd = rest.fd, .alive = true, .err = "", .buf = rest.buf, .serial = rest.serial, .name = name, .title = rest.title, .tree = rest.tree } } else { rest }, tries);
+        return wait_name(if (str_len(name) > 0) { A11y { .fd = rest.fd, .alive = true, .err = "", .buf = rest.buf, .serial = rest.serial, .name = name, .title = rest.title, .tree = rest.tree, .skip = rest.skip } } else { rest }, tries);
     }
     List(Int) ready = resid_disp_poll([a.fd], [1], 200);
     if (ready.len() == 0 || (ready[0] & 1) == 0) { return wait_name(a, tries - 1); }
@@ -485,8 +491,26 @@ pub A11yStep a11y_pump(A11y a) {
     if (!readable) { return drain(a, []); }
     List(Int) got = resid_disp_recv(a.fd, 65536);
     if (got.len() == 0) { return A11yStep { .a = dead(a, "atspi: the bus closed the connection"), .events = [] }; }
-    if (a.buf.len() + got.len() > 1048576) { return A11yStep { .a = dead(a, "atspi: the bus sent more than 1 MB unread"), .events = [] }; }
-    return drain(with_buf(a, a.buf.concat(got)), []);
+    A11yStep s = drain(arrived(a, got), []);
+    return A11yStep { .a = too_large(s.a), .events = s.events };
+}
+
+/// Bytes from the bus: what a message being skipped still owes is
+/// dropped, the rest kept.
+A11y arrived(A11y a, List(Int) got) {
+    if (a.skip <= 0) { return with_buf(a, a.buf.concat(got)); }
+    if (got.len() <= a.skip) { return with_skip(a, a.skip - got.len()); }
+    return with_buf(with_skip(a, 0), a.buf.concat(got[a.skip..got.len()]));
+}
+
+/// What is left once every whole message is served is the start of one
+/// more. Past 1 MB, it is not kept: its bytes are skipped as they come,
+/// and the messages after it are read as usual.
+A11y too_large(A11y a) {
+    if (!a.alive || a.buf.len() <= 1048576) { return a; }
+    Int n = dbus_size(a.buf);
+    if (n < 0) { return dead(a, "atspi: corrupt stream from the bus"); }
+    return with_skip(with_buf(a, []), n - a.buf.len());
 }
 
 @requires(display)
@@ -497,7 +521,18 @@ A11yStep drain(A11y a, List(Event) acc) {
     A11y rest = with_buf(a, t.rest);
     return match (dmsg_decode(t.msg)) {
         Ok(m) => drained(serve(rest, m), acc),
-        Err(e) => A11yStep { .a = dead(rest, e), .events = acc }
+        Err(e) => drained(refuse(rest, t.msg, e), acc)
+    };
+}
+
+/// A whole message that does not decode is dropped, and the stream goes
+/// on: one bad message from one client of the bus must not end the
+/// program's accessibility. A method call whose header reads gets an
+/// error reply, so its sender is not left waiting.
+Served refuse(A11y a, List(Int) msg, Str why) {
+    return match (dmsg_header(msg)) {
+        Ok(h) => if (h.kind == msg_call()) { fail(a, h, "org.freedesktop.DBus.Error.Failed", why) } else { Served { .a = a, .out = [], .events = [] } },
+        Err(e) => Served { .a = a, .out = [], .events = [] }
     };
 }
 
@@ -520,7 +555,7 @@ pub Int a11y_fd(A11y a) { return a.fd; }
 A11y sample() {
     List(SemNode) t = semantics(Column([Text("count: 1"), Button("+1", Clicked), Checkbox("Alerts", true, Toggled), TextInput("hello", 5, Submitted)]),
                                 Rect { .x = 0, .y = 0, .w = 200, .h = 160 }, ui_with_focus(ui_new(), 4));
-    return with_tree(A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Counter", .tree = [] }, t);
+    return with_tree(A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Counter", .tree = [], .skip = 0 }, t);
 }
 
 DMsg call(Str path, Str iface, Str member, List(DV) body) {
@@ -612,4 +647,89 @@ test "a changed tree is announced" {
     Served gone = changed(a, []);
     expect(gone.out.len()).toEqual(4);
     expect(arg_str(gone.out[0].body, 0)).toEqual("remove");
+}
+
+// ─── A hostile client of the bus ───────────────────────────────────
+
+/// A call to the sample tree as a client sends it.
+List(Int) wire(Int serial, Str path, Str iface, Str member, List(DV) body) {
+    DMsg c = call(path, iface, member, body);
+    return dmsg_bytes(DMsg { .kind = c.kind, .flags = 0, .serial = serial, .reply_serial = 0, .path = path, .iface = iface, .member = member,
+                             .error = "", .dest = c.dest, .sender = c.sender, .body = body });
+}
+
+A11y on_fd(A11y a, Int fd) {
+    return A11y { .fd = fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip };
+}
+
+/// The reply to call `serial` among the whole messages in `b`, or an
+/// empty message.
+DMsg reply_in(List(Int) b, Int serial) {
+    DbusIn t = dtake(b);
+    if (!t.ok) { return dcall(1, "", "", "", "", []); }
+    DMsg m = dmsg_decode(t.msg) else { dcall(1, "", "", "", "", []) };
+    if (m.reply_serial == serial) { return m; }
+    return reply_in(t.rest, serial);
+}
+
+/// Send `n` chunks of `size` zero bytes, pumping after each.
+@requires(display)
+A11y feed_zeros(A11y a, Int fd, Int n, Int size, List(Int) chunk) {
+    if (n <= 0 || !a.alive) { return a; }
+    _ = resid_disp_send(fd, chunk, -1);
+    return feed_zeros(a11y_pump(a).a, fd, n - 1, size, chunk);
+}
+
+/// `b` with its first signature "x" made "d" (a double).
+List(Int) x_to_d(List(Int) b, Int i) {
+    if (i + 3 > b.len()) { return b; }
+    if (b[i] == 1 && b[i + 1] == 120 && b[i + 2] == 0) { return b.with(i + 1, 100); }
+    return x_to_d(b, i + 1);
+}
+
+List(Int) zero_bytes(Int n, ListBuf(Int) b) { return if (n <= 0) { b.finish() } else { zero_bytes(n - 1, b.push(0)) }; }
+
+@requires(display)
+test "a message that does not decode is refused, and the bus stays open" {
+    List(Int) pair = resid_disp_pair();
+    A11y a = on_fd(sample(), pair[1]);
+    List(Int) top = children_of(a, -3);
+    List(Int) good = wire(30, path_of(top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)]);
+    // a boolean that is 7, a big-endian message, a call with a double
+    List(Int) b7 = wire(31, root_path(), "org.a11y.atspi.Accessible", "GetRole", [DBool(true)]);
+    List(Int) bad = b7.with(b7.len() - 4, 7);
+    List(Int) be = [66, 1, 0, 1, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+    List(Int) x = wire(32, root_path(), "org.a11y.atspi.Nope", "X", [DI64(7)]);
+    List(Int) dbl = x_to_d(x, 0);
+    _ = resid_disp_send(pair[0], bad.concat(be).concat(dbl).concat(good), -1);
+    A11yStep s = a11y_pump(a);
+    expect(s.a.alive).toEqual(true);
+    List(Int) rs = resid_disp_recv(pair[0], 65536);
+    expect(reply_in(rs, 31).error).toEqual("org.freedesktop.DBus.Error.Failed");
+    expect(reply_in(rs, 32).error).toEqual("org.freedesktop.DBus.Error.UnknownMethod");
+    expect(arg_str(reply_in(rs, 30).body, 0)).toEqual("ello");
+    _ = resid_disp_close(pair[0]);
+    _ = resid_disp_close(pair[1]);
+}
+
+@requires(display)
+test "a message past 1 MB is skipped as it arrives, and the bus stays open" {
+    List(Int) pair = resid_disp_pair();
+    A11y a = on_fd(sample(), pair[1]);
+    List(Int) top = children_of(a, -3);
+    // a call whose body claims 1.5 MB of bytes, sent in 64 KB pieces
+    List(Int) head = wire(40, root_path(), "org.a11y.atspi.Accessible", "GetRole", []);
+    Int body = 24 * 65536 + 1000;
+    List(Int) big = head.with(4, body & 255).with(5, (body >> 8) & 255).with(6, (body >> 16) & 255).with(7, 0);
+    _ = resid_disp_send(pair[0], big, -1);
+    A11y a1 = feed_zeros(a11y_pump(a).a, pair[0], 24, 65536, zero_bytes(65536, ListBuf()));
+    expect(a1.alive).toEqual(true);
+    // then the call's last bytes and an honest call
+    List(Int) good = wire(41, path_of(top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)]);
+    _ = resid_disp_send(pair[0], zero_bytes(body - 24 * 65536, ListBuf()).concat(good), -1);
+    A11yStep s = a11y_pump(a1);
+    expect(s.a.alive).toEqual(true);
+    expect(arg_str(reply_in(resid_disp_recv(pair[0], 65536), 41).body, 0)).toEqual("ello");
+    _ = resid_disp_close(pair[0]);
+    _ = resid_disp_close(pair[1]);
 }

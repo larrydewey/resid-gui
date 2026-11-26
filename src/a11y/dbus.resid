@@ -6,9 +6,10 @@
 // message, as the specification says, so a message is encoded in one pass
 // with its position known throughout.
 //
-// Only little-endian messages are read; a big-endian one is refused (every
-// bus and client this talks to runs on the same machine, and x86 and ARM
-// Linux are little-endian). What arrives is untrusted: every length is
+// Only little-endian messages are read; a big-endian one is framed, so
+// the stream goes on past it, and refused (every bus and client this talks
+// to runs on the same machine, and x86 and ARM Linux are little-endian).
+// What arrives is untrusted: every length is
 // checked against the bytes present and against the protocol's limits,
 // signatures are parsed with a depth limit, strings must be UTF-8 without
 // NUL, and anything malformed is an `Err`, never a read past the end.
@@ -186,6 +187,8 @@ Dec ddec(List(Int) b, Int base, Int at0, Str sig, Int si, Int depth) {
     if (c == 98 || c == 105 || c == 117 || c == 104) { return fixed(b, at, 4, si, DByte(0), c); }
     if (c == 110 || c == 113) { return fixed(b, at, 2, si, DByte(0), c); }
     if (c == 120 || c == 116) { return fixed(b, at, 8, si, DByte(0), c); }
+    // a double is kept as its bits: nothing here reads its value
+    if (c == 100) { return fixed(b, at, 8, si, DByte(0), c); }
     if (c == 115 || c == 111) { return dec_string(b, at, si, c); }
     if (c == 103) { return dec_sig(b, at, si); }
     if (c == 118) { return dec_variant(b, base, at, si, depth); }
@@ -324,35 +327,71 @@ pub Int dbus_max_message() { return 134217728; }
 
 pub DbusIn dtake(List(Int) buf) {
     if (buf.len() < 16) { return DbusIn { .ok = false, .corrupt = false, .msg = [], .rest = buf }; }
-    if ((buf[0] & 255) != 108 || (buf[3] & 255) != 1) { return DbusIn { .ok = false, .corrupt = true, .msg = [], .rest = buf }; }
-    Int body = u32at(buf, 4);
-    Int flen = u32at(buf, 12);
-    Int size = up(16 + flen, 8) + body;
-    if (flen > 67108864 || size > dbus_max_message()) { return DbusIn { .ok = false, .corrupt = true, .msg = [], .rest = buf }; }
+    Int size = dbus_size(buf);
+    if (size < 0) { return DbusIn { .ok = false, .corrupt = true, .msg = [], .rest = buf }; }
     if (buf.len() < size) { return DbusIn { .ok = false, .corrupt = false, .msg = [], .rest = buf }; }
     return DbusIn { .ok = true, .corrupt = false, .msg = buf[0..size], .rest = buf[size..buf.len()] };
 }
 
+/// The whole size of the message starting `buf` (16 bytes of it at
+/// least), from its fixed header, in either byte order; -1 when the header
+/// is not a D-Bus header. A big-endian message is framed so it can be
+/// skipped: `dmsg_decode` refuses it.
+pub Int dbus_size(List(Int) buf) {
+    if (buf.len() < 16) { return -1; }
+    Int order = buf[0] & 255;
+    if ((order != 108 && order != 66) || (buf[3] & 255) != 1) { return -1; }
+    Int body = if (order == 108) { u32at(buf, 4) } else { u32be(buf, 4) };
+    Int flen = if (order == 108) { u32at(buf, 12) } else { u32be(buf, 12) };
+    Int size = up(16 + flen, 8) + body;
+    if (flen > 67108864 || size > dbus_max_message()) { return -1; }
+    return size;
+}
+
+Int u32be(List(Int) b, Int i) { return ((b[i] & 255) << 24) | ((b[i + 1] & 255) << 16) | ((b[i + 2] & 255) << 8) | (b[i + 3] & 255); }
+
 /// A whole message (as `dtake` cut it), decoded.
 pub Result(DMsg, Str) dmsg_decode(List(Int) m) {
-    if (m.len() < 16 || (m[0] & 255) != 108) { return Err("dbus: not a little-endian message"); }
-    Int kind = m[1] & 255;
-    if (kind < 1 || kind > 4) { return Err("dbus: unknown message type"); }
-    Int body = u32at(m, 4);
-    Int serial = u32at(m, 8);
-    if (serial == 0) { return Err("dbus: serial 0"); }
-    Dec f = ddec(m, 0, 12, "a(yv)", 0, 0);
-    if (!f.ok) { return Err(f.why); }
-    Int bstart = up(f.at, 8);
-    if (bstart + body != m.len()) { return Err("dbus: body length does not match"); }
-    List(DV) fs = match (f.v) { DArr(es, xs) => xs, _ => [] };
-    Str sig = fstr(fs, 8);
-    return match (dec_body(m, 0, bstart, m.len(), sig, 0, [])) {
-        Ok(vs) => Ok(DMsg { .kind = kind, .flags = m[2] & 255, .serial = serial, .reply_serial = fu32(fs, 5),
-                            .path = fstr(fs, 1), .iface = fstr(fs, 2), .member = fstr(fs, 3), .error = fstr(fs, 4),
-                            .dest = fstr(fs, 6), .sender = fstr(fs, 7), .body = vs }),
+    Head hd = head_of(m);
+    if (!hd.ok) { return Err(hd.why); }
+    DMsg h = hd.h;
+    return match (dec_body(m, 0, hd.bstart, m.len(), hd.sig, 0, [])) {
+        Ok(vs) => Ok(DMsg { .kind = h.kind, .flags = h.flags, .serial = h.serial, .reply_serial = h.reply_serial,
+                            .path = h.path, .iface = h.iface, .member = h.member, .error = h.error,
+                            .dest = h.dest, .sender = h.sender, .body = vs }),
         Err(e) => Err(e)
     };
+}
+
+/// A whole message's header, with no body: enough to answer a call whose
+/// body does not decode.
+pub Result(DMsg, Str) dmsg_header(List(Int) m) {
+    Head hd = head_of(m);
+    return if (hd.ok) { Ok(hd.h) } else { Err(hd.why) };
+}
+
+/// A header read: the message without its body, where the body starts
+/// and its signature; `ok` false with `why` when malformed.
+type Head = { Bool ok; Str why; DMsg h; Int bstart; Str sig; };
+
+Head no_head(Str why) { return Head { .ok = false, .why = why, .h = dcall(1, "", "", "", "", []), .bstart = 0, .sig = "" }; }
+
+Head head_of(List(Int) m) {
+    if (m.len() < 16 || (m[0] & 255) != 108) { return no_head("dbus: not a little-endian message"); }
+    Int kind = m[1] & 255;
+    if (kind < 1 || kind > 4) { return no_head("dbus: unknown message type"); }
+    Int body = u32at(m, 4);
+    Int serial = u32at(m, 8);
+    if (serial == 0) { return no_head("dbus: serial 0"); }
+    Dec f = ddec(m, 0, 12, "a(yv)", 0, 0);
+    if (!f.ok) { return no_head(f.why); }
+    Int bstart = up(f.at, 8);
+    if (bstart + body != m.len()) { return no_head("dbus: body length does not match"); }
+    List(DV) fs = match (f.v) { DArr(es, xs) => xs, _ => [] };
+    DMsg h = DMsg { .kind = kind, .flags = m[2] & 255, .serial = serial, .reply_serial = fu32(fs, 5),
+                    .path = fstr(fs, 1), .iface = fstr(fs, 2), .member = fstr(fs, 3), .error = fstr(fs, 4),
+                    .dest = fstr(fs, 6), .sender = fstr(fs, 7), .body = [] };
+    return Head { .ok = true, .why = "", .h = h, .bstart = bstart, .sig = fstr(fs, 8) };
 }
 
 DV fval(List(DV) fs, Int code, Int i) {
@@ -411,7 +450,7 @@ test "framing waits for whole messages" {
     expect(t.rest.len()).toEqual(1);
     expect(dtake(a[0..20]).ok).toEqual(false);
     expect(dtake(a[0..20]).corrupt).toEqual(false);
-    expect(dtake([66, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]).corrupt).toEqual(true);
+    expect(dtake([71, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]).corrupt).toEqual(true);
 }
 
 test "hostile messages are refused" {
@@ -434,4 +473,29 @@ test "hostile messages are refused" {
     expect(type_end("(si", 0, 0)).toEqual(-1);
     expect(type_end("z", 0, 0)).toEqual(-1);
     expect(type_end("a{sv}", 0, 0)).toEqual(5);
+}
+
+test "a double decodes, and a big-endian message is framed to be skipped" {
+    List(Int) x = dmsg_bytes(dcall(5, "d", "/p", "i.f", "M", [DI64(7)]));
+    // the same message with its body's signature "x" made "d"
+    List(Int) d = swap3(x, [1, 120, 0], [1, 100, 0], 0);
+    expect(same_bytes(d, x, 0)).toEqual(false);
+    Bool ok = match (dmsg_decode(d)) { Ok(m) => m.body.len() == 1, Err(e) => false };
+    expect(ok).toEqual(true);
+    // a big-endian header with eight bytes of body: 24 bytes, then more
+    List(Int) be = [66, 1, 0, 1, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 108];
+    DbusIn t = dtake(be);
+    expect(t.corrupt).toEqual(false);
+    expect(t.ok).toEqual(true);
+    expect(t.msg.len()).toEqual(24);
+    expect(t.rest.len()).toEqual(1);
+    Bool refused = match (dmsg_decode(t.msg)) { Ok(m) => false, Err(e) => true };
+    expect(refused).toEqual(true);
+}
+
+/// `b` with the first run equal to `from` replaced by `to` (same length).
+List(Int) swap3(List(Int) b, List(Int) from, List(Int) to, Int i) {
+    if (i + 3 > b.len()) { return b; }
+    if (b[i] == from[0] && b[i + 1] == from[1] && b[i + 2] == from[2]) { return b.with(i, to[0]).with(i + 1, to[1]).with(i + 2, to[2]); }
+    return swap3(b, from, to, i + 1);
 }

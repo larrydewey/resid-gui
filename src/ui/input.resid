@@ -175,7 +175,7 @@ UiState mods_after(UiState ui, Int code, Bool down) {
 
 UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     Found f = hit_in(root, area, x, y, fo);
-    UiState pressed = ui_with_pressed(ui, f.id);
+    UiState pressed = ui_with_press(ui, f.id, msg_of(f.w));
     return match (f.w) {
         TextInput(s, k, m) => press_input(pressed, f.id, s, k, m, caret_at_in(f.r, s, k, x, fo)),
         Slider(v, m) => UiStep { .ui = ui_with_focus(pressed, -1), .out = [SliderSet(m, slider_value_at(f.r, x))] },
@@ -203,9 +203,21 @@ pub Int caret_at_in(Rect r, Str s, Int caret, Int x, Font f) {
     return index_at_x(f, s, max_int(x - (r.x + 5) + shift, 0));
 }
 
+/// The message a widget raises, or `Clicked` for one that raises none.
+Msg msg_of(Widget w) {
+    return match (w) { Button(s, m) => m, Checkbox(s, c, m) => m, TextInput(s, k, m) => m, Slider(v, m) => m, _ => Clicked };
+}
+
+/// The pressed widget, if the one numbered so is still the one pressed
+/// (same message); otherwise none.
+Found pressed_in(UiState ui, Widget root, Rect area, Font fo) {
+    Found f = find_in(root, area, ui.pressed, fo);
+    return if (f.id >= 0 && msg_eq(msg_of(f.w), ui.pmsg)) { f } else { not_found() };
+}
+
 UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
     if (ui.pressed < 0) { return none(ui); }
-    Found f = find_in(root, area, ui.pressed, fo);
+    Found f = pressed_in(ui, root, area, fo);
     return match (f.w) {
         Slider(v, m) => UiStep { .ui = ui, .out = [SliderSet(m, slider_value_at(f.r, x))] },
         TextInput(s, k, m) => UiStep { .ui = ui, .out = [TextEdited(m, s, caret_at_in(f.r, s, k, x, fo))] },
@@ -216,7 +228,7 @@ UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
 UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     UiState released = ui_with_pressed(ui, -1);
     if (ui.pressed < 0) { return none(released); }
-    Found f = find_in(root, area, ui.pressed, fo);
+    Found f = pressed_in(ui, root, area, fo);
     Bool inside = hit_in(root, area, x, y, fo).id == ui.pressed;
     return match (f.w) {
         Button(s, m) => UiStep { .ui = released, .out = if (inside) { [AppMsg(m)] } else { [] } },
@@ -433,6 +445,22 @@ Bool raised(UiStep s, Msg m, Int i) {
     if (i >= s.out.len()) { return false; }
     Bool hit = match (s.out[i]) { AppMsg(x) => msg_eq(x, m), _ => false };
     return hit || raised(s, m, i + 1);
+}
+
+test "a release raises nothing when the view changed the pressed widget" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    Widget before = Column([Button("a", Custom(1)), Button("keep", Custom(2))]);
+    // the same place, numbered the same, now a different button
+    Widget after = Column([Button("a", Custom(1)), Button("delete", Custom(3))]);
+    Found b = find(before, r, 2);
+    Int x = b.r.x + 2;
+    Int y = b.r.y + 2;
+    UiStep down = ui_event(ui_new(), before, r, PointerDown(x, y, 1));
+    UiStep up = ui_event(down.ui, after, r, PointerUp(x, y, 1));
+    expect(raised(up, Custom(3), 0)).toEqual(false);
+    expect(up.ui.pressed).toEqual(-1);
+    // an unchanged view still clicks
+    expect(raised(ui_event(down.ui, before, r, PointerUp(x, y, 1)), Custom(2), 0)).toEqual(true);
 }
 
 test "an assistive action reaches only what a click could" {

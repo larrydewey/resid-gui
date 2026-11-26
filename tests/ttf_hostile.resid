@@ -252,3 +252,114 @@ test "points far outside the glyph's box are refused, never an overflow" {
     List(Int) f = font_of(16, [[], simple_glyph(0, 0, 1, 1, runaway(0, ListBuf()), true)]);
     expect(err_of(ttf_answer(f, 256))).toEqual("ttf: a point lies far outside the glyph's box");
 }
+
+// ─── R3-2: fonts that cost too much to fill in all ─────────────────
+
+/// A format 4 cmap with every character from `first` to `last` mapped to
+/// glyph `g`: one segment per character.
+List(Int) cmap_all(Int first, Int last, Int g) {
+    Int n = last - first + 2;
+    List(Int) ends = seg_words(first, last, 0, ListBuf()).concat(be16(65535));
+    List(Int) deltas2 = seg_words(first, last, g, ListBuf()).concat(be16(1));
+    List(Int) sub = be16(4).concat(be16(16 + 8 * n)).concat(be16(0)).concat(be16(2 * n)).concat(be16(0)).concat(be16(0)).concat(be16(0))
+        .concat(ends).concat(be16(0)).concat(ends).concat(deltas2).concat(zeros(2 * n, ListBuf()));
+    return be16(0).concat(be16(1)).concat(be16(3)).concat(be16(1)).concat(be32(12)).concat(sub);
+}
+
+/// For each character from `c` to `last`: the character itself (`g` 0),
+/// or the delta that maps it to glyph `g`.
+List(Int) seg_words(Int c, Int last, Int g, ListBuf(Int) b) {
+    if (c > last) { return b.finish(); }
+    Int v = if (g == 0) { c } else { (g - c) & 65535 };
+    return seg_words(c + 1, last, g, push_all(b, be16(v), 0));
+}
+
+/// `n` points zigzagging between (0, 0) and (1, `top`): every line spans
+/// the glyph's full height, so every scanline crosses every line.
+List(Int) zigzag(Int n, Int top, Int i, ListBuf(Int) b) {
+    if (i >= n) { return b.finish(); }
+    return zigzag(n, top, i + 1, b.push(i % 2).push((i % 2) * top));
+}
+
+/// A composite of two copies of glyph `g` in a box `w` units wide and
+/// `top` high.
+List(Int) tall_pair(Int g, Int w, Int top) { return glyph_head(-1, 0, 0, w, top).concat(components(g, 2, 0, 0, ListBuf())); }
+
+/// `n` glyphs, each a `tall_pair` of glyph `g`.
+List(List(Int)) tall_pairs(Int n, Int g, Int w, Int top, ListBuf(List(Int)) b) {
+    if (n <= 0) { return b.finish(); }
+    return tall_pairs(n - 1, g, w, top, b.push(tall_pair(g, w, top)));
+}
+
+/// Whether characters `a` and `b` have the same bitmap in the atlas.
+Bool same_bitmap(Font f, Int a, Int b, Int k) {
+    Int w = glyph_field(f, a, 3);
+    if (w != glyph_field(f, b, 3) || glyph_field(f, a, 4) != glyph_field(f, b, 4)) { return false; }
+    if (k >= w * glyph_field(f, a, 4)) { return true; }
+    Int pa = (glyph_field(f, a, 6) + k / w) * f.aw + glyph_field(f, a, 5) + k % w;
+    Int pb = (glyph_field(f, b, 6) + k / w) * f.aw + glyph_field(f, b, 5) + k % w;
+    return f.atlas[pa] == f.atlas[pb] && same_bitmap(f, a, b, k + 1);
+}
+
+@requires(clock(readonly))
+Int ms_since(Int t0) { return (clock.monotonic_ns() - t0) / 1000000; }
+
+@requires(clock(readonly))
+test "a glyph every scanline crosses 20000 times, for every character, is refused within 2 s (R3-2)" {
+    // glyph 1: 10000 zigzag points; glyph 2: two copies of it (20000
+    // lines, within max_segments); every printable character is glyph 2
+    List(Int) empty = [];
+    List(Int) f = font_with(1000, cmap_all(32, 126, 2), [empty, simple_glyph(0, 0, 1, 2000, zigzag(10000, 2000, 0, ListBuf()), true), tall_pair(1, 1, 2000)]);
+    expect(glyph_of(opened(f), 65)).toEqual(2);
+    Int t0 = clock.monotonic_ns();
+    expect(is_err(ttf_answer(f, 30))).toEqual(true);
+    expect(ms_since(t0) < 2000).toEqual(true);
+}
+
+@requires(clock(readonly))
+test "95 different glyphs, each within a glyph's budget, are refused within 2 s (R3-2)" {
+    // glyph 96 is a zigzag of 2000 points; glyphs 1 to 95 are two copies
+    // of it each, a different glyph for every printable character: each
+    // costs some 30 ms to fill, all of them some 3 s
+    List(Int) empty = [];
+    List(List(Int)) gs = [empty].concat(tall_pairs(95, 96, 1, 2000, ListBuf())).concat([simple_glyph(0, 0, 1, 2000, zigzag(2000, 2000, 0, ListBuf()), true)]);
+    List(Int) f = font_with(1000, cmap_map(32, 126, 1), gs);
+    // one of them alone still draws
+    List(Int) one = font_with(1000, cmap_map(65, 65, 1), [empty, tall_pair(2, 1, 2000), simple_glyph(0, 0, 1, 2000, zigzag(2000, 2000, 0, ListBuf()), true)]);
+    expect(err_of(ttf_answer(one, 30))).toEqual("");
+    Int t0 = clock.monotonic_ns();
+    expect(is_err(ttf_answer(f, 30))).toEqual(true);
+    expect(ms_since(t0) < 2000).toEqual(true);
+}
+
+test "an honest font of 95 squares still draws at 30 pixels (R3-2)" {
+    List(Int) empty = [];
+    List(Int) f = font_with(1000, cmap_map(32, 126, 1), [empty].concat(squares(95, ListBuf())));
+    expect(err_of(ttf_answer(f, 30))).toEqual("");
+    // and one glyph for every character draws too, once
+    List(Int) g = font_with(1000, cmap_all(32, 126, 1), [empty, simple_glyph(0, 0, 1000, 1000, square(1000), true)]);
+    Bool drawn = match (ttf_answer(g, 30)) { Ok(b) => match (font_parse(b, 1)) { Ok(font) => glyph_field(font, 65, 3) > 0 && glyph_field(font, 90, 3) > 0, Err(e) => false }, Err(e) => false };
+    expect(drawn).toEqual(true);
+    // 95 glyphs of 1200 lines each, more than measuring keeps: the rest
+    // are read again to be filled, and draw the same
+    List(List(Int)) gs = [empty].concat(tall_pairs(95, 96, 1000, 100, ListBuf())).concat([simple_glyph(0, 0, 1, 100, zigzag(600, 100, 0, ListBuf()), true)]);
+    List(Int) many = font_with(1000, cmap_map(32, 126, 1), gs);
+    Bool same = match (ttf_answer(many, 30)) {
+        Ok(b) => match (font_parse(b, 1)) { Ok(font) => glyph_field(font, 126, 3) > 0 && same_bitmap(font, 32, 126, 0), Err(e) => false },
+        Err(e) => false
+    };
+    expect(same).toEqual(true);
+}
+
+@requires(clock(readonly))
+test "an atlas past 1 MB is refused before a glyph is filled (R3-2)" {
+    // 95 glyphs of a 1000-unit box, each two copies of a 1000-point
+    // zigzag: at 120 pixels they do not fit the atlas, and filling them
+    // first would take some 3 s
+    List(Int) empty = [];
+    List(List(Int)) gs = [empty].concat(tall_pairs(95, 96, 1000, 1000, ListBuf())).concat([simple_glyph(0, 0, 1, 1000, zigzag(1000, 1000, 0, ListBuf()), true)]);
+    List(Int) f = font_with(1000, cmap_map(32, 126, 1), gs);
+    Int t0 = clock.monotonic_ns();
+    expect(err_of(ttf_answer(f, 120))).toEqual("ttf: the glyphs do not fit the atlas");
+    expect(ms_since(t0) < 1000).toEqual(true);
+}

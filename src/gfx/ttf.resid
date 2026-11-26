@@ -508,20 +508,29 @@ List(Int) bump_run(List(Int) row, Int i, Int stop, Int v) {
 /// One glyph drawn: its record and its bitmap.
 type Drawn = { Int adv; Int xoff; Int yoff; Int w; Int h; List(Int) cover; };
 
-/// Draw character `c` at `ppem` pixels per em, with the line's top
-/// `ascent_px` above the baseline.
-Result(Drawn, Str) draw_char(Ttf t, Int c, Int ppem, Int ascent_px) {
-    Int g = glyph_of(t, c);
+/// One glyph measured but not yet filled: glyph `g`'s record, the corner
+/// of its bitmap (`bx`, `bt`), its lines (when `kept`) and what filling
+/// it will cost.
+type Plan = { Int g; Int adv; Int xoff; Int yoff; Int w; Int h; Int bx; Int bt; Int cost; List(Seg) segs; Bool kept; };
+
+/// Every printable character's glyph, measured: `ps` holds each glyph
+/// once, `order` which of them each character from 32 to 126 is.
+type Plans = { List(Plan) ps; List(Int) order; Int cost; };
+
+/// Measure glyph `g` at `ppem` pixels per em, with the line's top
+/// `ascent_px` above the baseline: its box, its lines and their cost are
+/// checked here, before anything is filled.
+Result(Plan, Str) plan_glyph(Ttf t, Int g, Int ppem, Int ascent_px) {
     Int adv = fdiv(advance_of(t, g) * ppem + t.upem / 2, t.upem);
     return match (outline_of(t, g)) {
-        Ok(o) => draw_outline(o, ppem, t.upem, ascent_px, adv),
+        Ok(o) => plan_outline(o, g, ppem, t.upem, ascent_px, adv),
         Err(e) => Err(e)
     };
 }
 
-Result(Drawn, Str) draw_outline(Outline o, Int ppem, Int upem, Int ascent_px, Int adv) {
+Result(Plan, Str) plan_outline(Outline o, Int g, Int ppem, Int upem, Int ascent_px, Int adv) {
     if (o.contours.len() == 0 || o.xmax <= o.xmin || o.ymax <= o.ymin) {
-        return Ok(Drawn { .adv = adv, .xoff = 0, .yoff = 0, .w = 0, .h = 0, .cover = [] });
+        return Ok(Plan { .g = g, .adv = adv, .xoff = 0, .yoff = 0, .w = 0, .h = 0, .bx = 0, .bt = 0, .cost = 0, .segs = [], .kept = true });
     }
     Int bx = fdiv(o.xmin * ppem, upem);
     Int bt = cdiv(o.ymax * ppem, upem);
@@ -534,15 +543,70 @@ Result(Drawn, Str) draw_outline(Outline o, Int ppem, Int upem, Int ascent_px, In
     if (!inside(o.contours, o.xmin - upem, o.ymin - upem, o.xmax + upem, o.ymax + upem, 0)) {
         return Err("ttf: a point lies far outside the glyph's box");
     }
-    Xf f = Xf { .ppem = ppem, .upem = upem, .bx = bx, .by = bt };
-    List(Seg) segs = flatten(o.contours, f);
+    List(Seg) segs = flatten(o.contours, Xf { .ppem = ppem, .upem = upem, .bx = bx, .by = bt });
     if (segs.len() > max_segments()) { return Err("ttf: the glyph has too many lines"); }
-    return Ok(Drawn { .adv = adv, .xoff = bx, .yoff = ascent_px - bt, .w = w, .h = h, .cover = fill(segs, w, h) });
+    Int cost = fill_cost(segs, h);
+    if (cost > max_glyph_cost()) { return Err("ttf: the glyph costs too much to fill"); }
+    return Ok(Plan { .g = g, .adv = adv, .xoff = bx, .yoff = ascent_px - bt, .w = w, .h = h, .bx = bx, .bt = bt, .cost = cost, .segs = segs, .kept = true });
+}
+
+/// `p` without its lines, to be read again when it is filled.
+Plan dropped(Plan p) {
+    return Plan { .g = p.g, .adv = p.adv, .xoff = p.xoff, .yoff = p.yoff, .w = p.w, .h = p.h, .bx = p.bx, .bt = p.bt, .cost = p.cost, .segs = [], .kept = false };
+}
+
+/// Lines kept from measuring for filling, over all glyphs; past this a
+/// glyph's outline is read and flattened again when it is filled, so that
+/// measuring a font holds a bounded number of lines (a real font's
+/// printable glyphs have a few thousand).
+pub Int max_kept_segments() { return 100000; }
+
+/// Fill a measured glyph, from the lines kept when it was measured or,
+/// if they were not kept, from its outline read again.
+Result(Drawn, Str) fill_plan(Ttf t, Plan p, Int ppem) {
+    if (p.w == 0) { return Ok(Drawn { .adv = p.adv, .xoff = 0, .yoff = 0, .w = 0, .h = 0, .cover = [] }); }
+    if (p.kept) { return Ok(Drawn { .adv = p.adv, .xoff = p.xoff, .yoff = p.yoff, .w = p.w, .h = p.h, .cover = fill(p.segs, p.w, p.h) }); }
+    return match (outline_of(t, p.g)) {
+        Ok(o) => Ok(Drawn { .adv = p.adv, .xoff = p.xoff, .yoff = p.yoff, .w = p.w, .h = p.h,
+                            .cover = fill(flatten(o.contours, Xf { .ppem = ppem, .upem = t.upem, .bx = p.bx, .by = p.bt }), p.w, p.h) }),
+        Err(e) => Err(e)
+    };
 }
 
 /// Lines per glyph once its curves are flattened: filling costs every
 /// line on every scanline.
 pub Int max_segments() { return 20000; }
+
+/// What filling one glyph may cost, in `fill_cost` units (about 2 ns
+/// each): some 40 ms. The largest printable glyph of DejaVu Sans at 256
+/// pixels costs 430000, about 1/50 of it.
+pub Int max_glyph_cost() { return 20000000; }
+
+/// What filling all of a font's printable characters may cost: some
+/// 0.4 s. All of DejaVu Sans at 256 pixels costs 8.2 million, about 1/25
+/// of it; at 48 pixels, 1.6 million.
+pub Int max_font_cost() { return 200000000; }
+
+/// What filling `segs` into `h` pixel rows costs: every line is tested
+/// on every scanline, and each crossing is sorted and spanned (weighted
+/// by the sort's log factor for 20000 crossings).
+pub Int fill_cost(List(Seg) segs, Int h) { return segs.len() * h * subscan() + 16 * crossings_in(segs, h, 0, 0); }
+
+/// How many scanline crossings the lines make in `h` rows: for each line,
+/// the scanlines whose centres it spans (as `crossings` counts them).
+Int crossings_in(List(Seg) segs, Int h, Int i, Int acc) {
+    if (i >= segs.len()) { return acc; }
+    Seg s = segs[i];
+    Int ya = if (s.y0 < s.y1) { s.y0 } else { s.y1 };
+    Int yb = if (s.y0 < s.y1) { s.y1 } else { s.y0 };
+    Int step = 256 / subscan();
+    Int lo = max_of(cdiv(ya - step / 2, step), 0);
+    Int hi = min_of(cdiv(yb - step / 2, step), h * subscan());
+    return crossings_in(segs, h, i + 1, acc + if (hi > lo) { hi - lo } else { 0 });
+}
+
+Int max_of(Int a, Int b) { return if (a > b) { a } else { b }; }
+Int min_of(Int a, Int b) { return if (a < b) { a } else { b }; }
 
 /// Whether every point of `cs` lies in the box from (`x0`, `y0`) to
 /// (`x1`, `y1`).
@@ -568,19 +632,52 @@ pub Result(List(Int), Str) ttf_answer(List(Int) bytes, Int ppem) {
     };
 }
 
+/// Measure every glyph, then place them, then check the cost, and only
+/// then fill: a font whose atlas would pass 1 MB, or whose glyphs together
+/// cost more than `max_font_cost`, is refused before a pixel is filled.
+/// A glyph several characters share is measured and filled once.
 Result(List(Int), Str) answer_for(Ttf t, Int ppem) {
     Int ascent = cdiv(t.ascent * ppem, t.upem);
     Int line = ascent + cdiv((0 - t.descent + t.gap) * ppem, t.upem);
-    return match (draw_all(t, ppem, ascent, 32, [])) {
-        Ok(ds) => pack(ds, ascent, line, kerns(t, ppem)),
+    Map(Int, Int) none = {};
+    return match (plan_all(t, ppem, ascent, 32, none, [], [], 0, 0)) {
+        Ok(p) => fill_and_pack(t, ppem, p, ascent, line),
         Err(e) => Err(e)
     };
 }
 
-Result(List(Drawn), Str) draw_all(Ttf t, Int ppem, Int ascent, Int c, List(Drawn) acc) {
-    if (c > 126) { return Ok(acc); }
-    return match (draw_char(t, c, ppem, ascent)) {
-        Ok(d) => draw_all(t, ppem, ascent, c + 1, acc.concat([d])),
+Result(Plans, Str) plan_all(Ttf t, Int ppem, Int ascent, Int c, Map(Int, Int) seen, List(Plan) ps, List(Int) order, Int cost, Int kept) {
+    if (c > 126) { return Ok(Plans { .ps = ps, .order = order, .cost = cost }); }
+    Int g = glyph_of(t, c);
+    Int known = seen.get(g) else { -1 };
+    if (known >= 0) { return plan_all(t, ppem, ascent, c + 1, seen, ps, order.concat([known]), cost, kept); }
+    return match (plan_glyph(t, g, ppem, ascent)) {
+        Ok(p) => plan_more(t, ppem, ascent, c, seen.insert(g, ps.len()), ps, order.concat([ps.len()]), cost + p.cost,
+                           if (kept + p.segs.len() <= max_kept_segments()) { p } else { dropped(p) }, kept),
+        Err(e) => Err(e)
+    };
+}
+
+Result(Plans, Str) plan_more(Ttf t, Int ppem, Int ascent, Int c, Map(Int, Int) seen, List(Plan) ps, List(Int) order, Int cost, Plan p, Int kept) {
+    return plan_all(t, ppem, ascent, c + 1, seen, ps.concat([p]), order, cost, kept + p.segs.len());
+}
+
+Result(List(Int), Str) fill_and_pack(Ttf t, Int ppem, Plans p, Int ascent, Int line) {
+    Int aw = 512;
+    Placed pl = place(p.ps, aw, 0, 0, 0, 0, []);
+    Int ah = if (pl.y + pl.shelf > 0) { pl.y + pl.shelf } else { 1 };
+    if (atlas_offset() + aw * ah > 1048576) { return Err("ttf: the glyphs do not fit the atlas"); }
+    if (p.cost > max_font_cost()) { return Err("ttf: the font costs too much to fill"); }
+    return match (fill_all(t, ppem, p.ps, 0, [])) {
+        Ok(ds) => Ok(pack(ds, p.order, pl.at, aw, ah, ascent, line, kerns(t, ppem))),
+        Err(e) => Err(e)
+    };
+}
+
+Result(List(Drawn), Str) fill_all(Ttf t, Int ppem, List(Plan) ps, Int i, List(Drawn) acc) {
+    if (i >= ps.len()) { return Ok(acc); }
+    return match (fill_plan(t, ps[i], ppem)) {
+        Ok(d) => fill_all(t, ppem, ps, i + 1, acc.concat([d])),
         Err(e) => Err(e)
     };
 }
@@ -613,26 +710,23 @@ List(Int) kern_pairs(Ttf t, Int at, Int n, Int i, Map(Int, Int) want, Int ppem, 
     return kern_pairs(t, at, n, i + 1, want, ppem, acc.concat([a, b, v]));
 }
 
-/// Shelf-pack the glyphs into an atlas `aw` wide and lay out the answer,
-/// which is at most 1 MB, as the native module's is.
-Result(List(Int), Str) pack(List(Drawn) ds, Int ascent, Int line, List(Int) ks) {
-    Int aw = 512;
-    Placed p = place(ds, aw, 0, 0, 0, 0, []);
-    Int ah = if (p.y + p.shelf > 0) { p.y + p.shelf } else { 1 };
-    if (atlas_offset() + aw * ah > 1048576) { return Err("ttf: the glyphs do not fit the atlas"); }
-    List(Int) atlas = blit_all(ds, p.at, aw, 0, zeros(aw * ah, ListBuf()));
+/// Lay out the answer, which is at most 1 MB, as the native module's is:
+/// the glyphs `ds`, placed at `at` in an atlas `aw` x `ah`, and one record
+/// for each printable character, `order` saying which glyph it is.
+List(Int) pack(List(Drawn) ds, List(Int) order, List(Int) at, Int aw, Int ah, Int ascent, Int line, List(Int) ks) {
+    List(Int) atlas = blit_all(ds, at, aw, 0, zeros(aw * ah, ListBuf()));
     ListBuf(Int) h = le(le(le(le(le(le(le(le(ListBuf(), 826689362), 0), ascent), line), aw), ah), 95), ks.len() / 3);
-    ListBuf(Int) g = records(h, ds, p.at, 0);
+    ListBuf(Int) g = records(h, ds, order, at, 0);
     ListBuf(Int) k = kern_slots(g, ks, 0);
-    return Ok(push_all(k, atlas, 0).finish());
+    return push_all(k, atlas, 0).finish();
 }
 
 /// Where each glyph went: two integers each.
 type Placed = { List(Int) at; Int y; Int shelf; };
 
-Placed place(List(Drawn) ds, Int aw, Int i, Int x, Int y, Int shelf, List(Int) at) {
+Placed place(List(Plan) ds, Int aw, Int i, Int x, Int y, Int shelf, List(Int) at) {
     if (i >= ds.len()) { return Placed { .at = at, .y = y, .shelf = shelf }; }
-    Drawn d = ds[i];
+    Plan d = ds[i];
     Bool wrap = x + d.w > aw;
     Int nx = if (wrap) { 0 } else { x };
     Int ny = if (wrap) { y + shelf } else { y };
@@ -654,10 +748,11 @@ List(Int) blit(List(Int) atlas, Drawn d, Int x, Int y, Int aw, Int k) {
 
 ListBuf(Int) le(ListBuf(Int) b, Int v) { return b.push(v & 255).push((v >> 8) & 255).push((v >> 16) & 255).push((v >> 24) & 255); }
 
-ListBuf(Int) records(ListBuf(Int) b, List(Drawn) ds, List(Int) at, Int i) {
-    if (i >= ds.len()) { return b; }
-    Drawn d = ds[i];
-    return records(le(le(le(le(le(le(le(b, d.adv), d.xoff), d.yoff), d.w), d.h), at[2 * i]), at[2 * i + 1]), ds, at, i + 1);
+ListBuf(Int) records(ListBuf(Int) b, List(Drawn) ds, List(Int) order, List(Int) at, Int i) {
+    if (i >= order.len()) { return b; }
+    Int j = order[i];
+    Drawn d = ds[j];
+    return records(le(le(le(le(le(le(le(b, d.adv), d.xoff), d.yoff), d.w), d.h), at[2 * j]), at[2 * j + 1]), ds, order, at, i + 1);
 }
 
 ListBuf(Int) kern_slots(ListBuf(Int) b, List(Int) ks, Int i) {

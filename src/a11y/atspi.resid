@@ -163,12 +163,15 @@ pub List(Int) states(A11y a, Int id) {
     if (id == root_id()) { return base; }
     if (id == frame_id()) { return base.concat([1]); }      // active
     SemNode n = node(a, id);
-    Bool interactive = n.actions != 0;
+    // Scrolled out of view: VISIBLE (it would show, unscrolled) but not
+    // SHOWING, as GTK and Qt say it.
+    List(Int) shown = if ((n.flags & sem_offscreen()) != 0) { [8, 24, 30] } else { base };
+    Bool interactive = (n.actions & (act_activate() | act_focus() | act_set_value())) != 0;
     List(Int) focus = if (interactive) { [11] } else { [] };                                  // focusable
     List(Int) focused = if ((n.flags & sem_focused()) != 0) { [12] } else { [] };
     List(Int) checks = if (n.role == role_checkbox()) { [41].concat(if ((n.flags & sem_checked()) != 0) { [4] } else { [] }) } else { [] };
     List(Int) edit = if ((n.flags & sem_editable()) != 0) { [7, 26] } else { [] };          // editable, single line
-    return base.concat(focus).concat(focused).concat(checks).concat(edit);
+    return shown.concat(focus).concat(focused).concat(checks).concat(edit);
 }
 
 List(DV) state_words(List(Int) ss) { return [DU32(bits(ss, 0, 0, 0)), DU32(bits(ss, 0, 32, 0))]; }
@@ -202,7 +205,10 @@ Rect bounds_all(List(SemNode) t, Int i, Rect acc) {
 /// box holds the point, else the window.
 Int at_point(A11y a, Int x, Int y, Int i, Int found) {
     if (i >= a.tree.len()) { return found; }
-    return at_point(a, x, y, i + 1, if (rect_contains(a.tree[i].bounds, x, y)) { a.tree[i].id } else { found });
+    // an off-screen node's box is where it would be, maybe over another
+    // that shows: it is not at any point
+    Bool here = rect_contains(a.tree[i].bounds, x, y) && (a.tree[i].flags & sem_offscreen()) == 0;
+    return at_point(a, x, y, i + 1, if (here) { a.tree[i].id } else { found });
 }
 
 // ─── Serving ───────────────────────────────────────────────────────
@@ -281,6 +287,15 @@ Served component(A11y a, DMsg m, Int id) {
     if (m.member == "GrabFocus") {
         Bool can = id >= 0 && (node(a, id).actions & act_focus()) != 0;
         return answer(a, m, [DBool(can)], if (can) { [Assist(id, act_focus())] } else { [] });
+    }
+    // ScrollTo(type) and ScrollToPoint(coords, x, y): show this node by
+    // scrolling the Scroll that holds it; where in the view is the
+    // library's choice (the least scroll that shows it). The answer is
+    // whether it is in view or a scroll was asked for.
+    if (m.member == "ScrollTo" || m.member == "ScrollToPoint") {
+        Bool can = id >= 0 && ((node(a, id).flags & sem_offscreen()) == 0 || (node(a, id).actions & act_scroll()) != 0);
+        Bool ask = can && (node(a, id).flags & sem_offscreen()) != 0;
+        return answer(a, m, [DBool(can)], if (ask) { [Assist(id, act_scroll())] } else { [] });
     }
     if (m.member == "GetLayer") { return answer(a, m, [DU32(3)], []); }   // widget layer
     if (m.member == "GetMDIZOrder") { return answer(a, m, [DI16(0)], []); }
@@ -416,7 +431,11 @@ List(DMsg) node_changes(SemNode o, SemNode n, Int s) {
     Bool co = (o.flags & sem_checked()) != 0;
     Bool cn = (n.flags & sem_checked()) != 0;
     List(DMsg) check = if (co != cn) { [event(s3, p, "StateChanged", "checked", if (cn) { 1 } else { 0 }, 0, DI32(0))] } else { [] };
-    return name.concat(value).concat(focus).concat(check);
+    Int s4 = s3 + check.len();
+    Bool so = (o.flags & sem_offscreen()) == 0;
+    Bool sn = (n.flags & sem_offscreen()) == 0;
+    List(DMsg) show = if (so != sn) { [event(s4, p, "StateChanged", "showing", if (sn) { 1 } else { 0 }, 0, DI32(0))] } else { [] };
+    return name.concat(value).concat(focus).concat(check).concat(show);
 }
 
 List(DMsg) signals_gone(A11y old, List(Int) ids, Int i, Int s, List(DMsg) acc) {
@@ -733,4 +752,35 @@ test "a message past 1 MB is skipped as it arrives, and the bus stays open" {
     expect(whole(resid_disp_recv(pair[0], 65536), 0)).toEqual(1);
     _ = resid_disp_close(pair[0]);
     _ = resid_disp_close(pair[1]);
+}
+
+test "an off-screen node is read, not SHOWING, and can only be scrolled to (R3-3)" {
+    // Scroll 0, Column 1, Button "top" 2, Padding 3, Spacer 4, Button "far" 5
+    Widget w = Scroll(0, Column([Button("top", Custom(1)), Padding(200, Spacer), Button("far", Custom(2))]));
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    A11y a = with_tree(sample(), semantics(w, r, ui_new()));
+    // the tree holds it, under the scroll area
+    expect(index_in(children_of(a, 0), 5, 0) >= 0).toEqual(true);
+    List(Int) st = states(a, 5);
+    expect(index_in(st, 25, 0)).toEqual(-1);                  // not showing
+    expect(index_in(st, 30, 0) >= 0).toEqual(true);           // visible
+    expect(index_in(states(a, 2), 25, 0) >= 0).toEqual(true); // "top" shows
+    // clicking it through Action is refused; ScrollTo asks the program to scroll
+    expect(reply_of(serve(a, call(path_of(5), "org.a11y.atspi.Action", "DoAction", [DI32(0)]))).kind).toEqual(msg_error());
+    Served s = serve(a, call(path_of(5), "org.a11y.atspi.Component", "ScrollTo", [DU32(6)]));
+    Bool asked = s.events.len() == 1 && match (s.events[0]) { Assist(n, act) => n == 5 && act == act_scroll(), _ => false };
+    expect(asked).toEqual(true);
+    // one already showing needs no scroll
+    expect(serve(a, call(path_of(2), "org.a11y.atspi.Component", "ScrollTo", [DU32(6)])).events.len()).toEqual(0);
+    // a point over where it would be finds it not
+    Rect fb = node(a, 5).bounds;
+    expect(at_point(a, fb.x + 1, fb.y + 1, 0, -3)).toEqual(-3);
+    // scrolled into view, it says so
+    Served shown = changed(a, semantics(Scroll(400, Column([Button("top", Custom(1)), Padding(200, Spacer), Button("far", Custom(2))])), r, ui_new()));
+    expect(has_state_change(shown.out, "showing", 0)).toEqual(true);
+}
+
+Bool has_state_change(List(DMsg) ms, Str what, Int i) {
+    if (i >= ms.len()) { return false; }
+    return (ms[i].member == "StateChanged" && arg_str(ms[i].body, 0) == what) || has_state_change(ms, what, i + 1);
 }

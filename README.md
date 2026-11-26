@@ -117,7 +117,10 @@ permission manifests. The plan is `PLAN-ui-everywhere.md`.
 Screen readers read a resid-gui window. On Linux the library joins the
 accessibility bus (AT-SPI over D-Bus, `src/a11y/`) and serves the
 semantics tree there: roles, names, states, text, extents, and actions
-that come back as `Assist` events; on other platforms the host shell hands
+that come back as `Assist` events. A widget scrolled out of view is in the
+tree, flagged off screen (not SHOWING), as GTK and Qt do: a reader can
+read it and scroll to it (a `ScrollTo` event), but acts on it only once it
+shows, as the pointer would. On other platforms the host shell hands
 the same tree to the platform's API. Being on that bus means being able to
 read other programs' trees, so it is a capability of its own: a GUI
 program declares `@requires(display, accessibility, ...)`.

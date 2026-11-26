@@ -12,7 +12,10 @@
 // widget 7. Layout-only widgets (Row, Column, Stack, Padding, Align,
 // Spacer) have no node; their children hang off the nearest ancestor that
 // has one. A `Rows` list carries only the rows in view, as it paints only
-// those.
+// those. A widget scrolled out of its `Scroll`, or laid out outside the
+// window, is a node flagged `sem_offscreen`, as GTK and Qt export
+// scrolled-out children: a reader can read it and ask to scroll to it
+// (`act_scroll`), but not act on it until it is shown.
 
 import "../app.resid";
 import "../gfx/color.resid";
@@ -37,22 +40,31 @@ pub Int sem_checked() { return 1; }
 pub Int sem_focused() { return 2; }
 pub Int sem_editable() { return 4; }
 pub Int sem_disabled() { return 8; }
+/// Scrolled out of view or laid out outside the window: in the tree, not
+/// on screen (AT-SPI: not SHOWING).
+pub Int sem_offscreen() { return 16; }
 
 pub Int act_activate() { return 1; }
 pub Int act_focus() { return 2; }
 pub Int act_set_value() { return 4; }
+/// On a scroll area or list: it scrolls. As an `Assist` on any node:
+/// scroll its `Scroll` so that it shows (a `ScrollTo` event). An off-screen
+/// node inside a `Scroll` offers this action and no other.
 pub Int act_scroll() { return 8; }
 
 /// The semantics of `w` laid out in `r`, in the built-in font.
 pub List(SemNode) semantics(Widget w, Rect r, UiState ui) { return semantics_in(w, r, ui, font_builtin()); }
 
-/// `semantics` with text in font `f`. Only what can be seen is a node: a
-/// widget scrolled out of its `Scroll` or `Rows`, laid out outside `r`, or
-/// under a later layer of a `Stack` that would take a click at its centre
-/// is left out, so a screen reader neither reads nor acts on what the
-/// pointer cannot reach (`assist` in input.resid checks the same).
+/// `semantics` with text in font `f`. A widget under a later layer of a
+/// `Stack` that would take a click at its centre is left out, and so are
+/// the rows of a `Rows` out of view (they are not laid out). A widget
+/// scrolled out of its `Scroll` or laid out outside `r` is a node flagged
+/// `sem_offscreen`, whose only action is `act_scroll` (inside a `Scroll`)
+/// or none: a screen reader can read it and scroll to it, but acts only
+/// on what the pointer could reach (`assist` in input.resid checks the
+/// same).
 pub List(SemNode) semantics_in(Widget w, Rect r, UiState ui, Font f) {
-    return sem_node(ListBuf(), w, r, ui, f, 0, -1, r, []).finish();
+    return sem_node(ListBuf(), w, r, ui, f, 0, -1, r, [], false).finish();
 }
 
 /// A later layer of a `Stack`: what is drawn over the earlier ones.
@@ -117,27 +129,36 @@ SemNode mk(Int id, Int parent, Int role, Int flags, Rect r, Int actions, Str lab
     return SemNode { .id = id, .parent = parent, .role = role, .flags = flags, .bounds = r, .actions = actions, .label = label, .value = value };
 }
 
-/// `w`'s nodes, when the part of `r` inside `clip` shows and no layer in
-/// `over` covers it; its children's either way (a child can lie outside
-/// its parent), hanging from the nearest node shown.
-ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Font f, Int id, Int parent, Rect clip, List(Layer) over) {
+/// `w`'s nodes, unless a layer in `over` covers it: flagged off screen
+/// when no part of `r` lies inside `clip`. Its children's either way (a
+/// child can lie outside its parent), hanging from the nearest node.
+/// `scrolled` says a `Scroll` encloses `w`, which could bring it into view.
+ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Font f, Int id, Int parent, Rect clip, List(Layer) over, Bool scrolled) {
     Rect v = rect_intersect(r, clip);
-    Bool own = role_of(w) != 0 && !rect_is_empty(v) && !covered(over, v, f, 0);
-    ListBuf(SemNode) here = if (own) { acc.push(node_of(w, r, ui, id, parent)) } else { acc };
+    Bool shown = !rect_is_empty(v);
+    Bool own = role_of(w) != 0 && !covered(over, if (shown) { v } else { r }, f, 0);
+    ListBuf(SemNode) here = if (own) { acc.push(if (shown) { node_of(w, r, ui, id, parent) } else { offscreen(node_of(w, r, ui, id, parent), scrolled) }) } else { acc };
     Int up = if (own) { id } else { parent };
     return match (w) {
-        Rows(o, rh, xs) => sem_rows(here, xs, r, o, rh, ui, f, rows_in_view(r, o, rh, xs.len()), 0, id + 1, up, v, over),
-        Scroll(o, c) => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up, v, over, false),
-        Stack(xs) => sem_kids(here, xs, child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, over, true),
-        _ => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, over, false)
+        Rows(o, rh, xs) => sem_rows(here, xs, r, o, rh, ui, f, rows_in_view(r, o, rh, xs.len()), 0, id + 1, up, v, over, scrolled),
+        Scroll(o, c) => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up, v, over, false, true),
+        Stack(xs) => sem_kids(here, xs, child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, over, true, scrolled),
+        _ => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, over, false, scrolled)
     };
 }
 
+/// Node `n` off screen: flagged so, and its only action scrolling to it,
+/// when a `Scroll` could.
+SemNode offscreen(SemNode n, Bool scrolled) {
+    return SemNode { .id = n.id, .parent = n.parent, .role = n.role, .flags = n.flags | sem_offscreen(), .bounds = n.bounds,
+                     .actions = if (scrolled) { act_scroll() } else { 0 }, .label = n.label, .value = n.value };
+}
+
 /// The children; in a `Stack` (`layered`) each under the ones after it.
-ListBuf(SemNode) sem_kids(ListBuf(SemNode) acc, List(Widget) xs, List(Rect) rs, UiState ui, Font f, Int i, Int id, Int parent, Rect clip, List(Layer) over, Bool layered) {
+ListBuf(SemNode) sem_kids(ListBuf(SemNode) acc, List(Widget) xs, List(Rect) rs, UiState ui, Font f, Int i, Int id, Int parent, Rect clip, List(Layer) over, Bool layered, Bool scrolled) {
     if (i >= xs.len() || i >= rs.len()) { return acc; }
     List(Layer) above = if (layered) { over.concat(layers(xs, rs, i + 1, ListBuf())) } else { over };
-    return sem_kids(sem_node(acc, xs[i], rs[i], ui, f, id, parent, clip, above), xs, rs, ui, f, i + 1, id + node_count(xs[i]), parent, clip, over, layered);
+    return sem_kids(sem_node(acc, xs[i], rs[i], ui, f, id, parent, clip, above, scrolled), xs, rs, ui, f, i + 1, id + node_count(xs[i]), parent, clip, over, layered, scrolled);
 }
 
 List(Layer) layers(List(Widget) xs, List(Rect) rs, Int i, ListBuf(Layer) acc) {
@@ -145,10 +166,10 @@ List(Layer) layers(List(Widget) xs, List(Rect) rs, Int i, ListBuf(Layer) acc) {
     return layers(xs, rs, i + 1, acc.push(Layer { .w = xs[i], .r = rs[i] }));
 }
 
-ListBuf(SemNode) sem_rows(ListBuf(SemNode) acc, List(Widget) xs, Rect r, Int o, Int rh, UiState ui, Font f, RowSpan span, Int i, Int id, Int parent, Rect clip, List(Layer) over) {
+ListBuf(SemNode) sem_rows(ListBuf(SemNode) acc, List(Widget) xs, Rect r, Int o, Int rh, UiState ui, Font f, RowSpan span, Int i, Int id, Int parent, Rect clip, List(Layer) over, Bool scrolled) {
     if (i >= xs.len() || i >= span.last) { return acc; }
-    ListBuf(SemNode) next = if (i >= span.first) { sem_node(acc, xs[i], row_rect(r, o, rh, i), ui, f, id, parent, clip, over) } else { acc };
-    return sem_rows(next, xs, r, o, rh, ui, f, span, i + 1, id + node_count(xs[i]), parent, clip, over);
+    ListBuf(SemNode) next = if (i >= span.first) { sem_node(acc, xs[i], row_rect(r, o, rh, i), ui, f, id, parent, clip, over, scrolled) } else { acc };
+    return sem_rows(next, xs, r, o, rh, ui, f, span, i + 1, id + node_count(xs[i]), parent, clip, over, scrolled);
 }
 
 /// Whether two nodes say the same thing.
@@ -185,9 +206,10 @@ Str speech_at(List(SemNode) ns, Int i, StrBuf b) {
     Str role = if (n.role >= 0 && n.role < names.len()) { names[n.role] } else { "group" };
     Str checked = if (n.role == role_checkbox()) { if ((n.flags & sem_checked()) != 0) { ", checked" } else { ", not checked" } } else { "" };
     Str focused = if ((n.flags & sem_focused()) != 0) { ", focused" } else { "" };
+    Str off = if ((n.flags & sem_offscreen()) != 0) { ", off screen" } else { "" };
     Str label = if (str_len(n.label) > 0) { f" \"{n.label}\"" } else { "" };
     Str value = if (str_len(n.value) > 0) { f" = {n.value}" } else { "" };
-    return speech_at(ns, i + 1, b.push(f"{role}{label}{value}{checked}{focused}\n"));
+    return speech_at(ns, i + 1, b.push(f"{role}{label}{value}{checked}{focused}{off}\n"));
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────
@@ -240,17 +262,39 @@ test "a diff carries what changed and what went away" {
     expect(sem_diff(a, a).put.len()).toEqual(0);
 }
 
-test "a node scrolled out of view or under a layer that takes clicks is not read" {
+test "a node scrolled out of view is read as off screen; one under a layer that takes clicks is not read" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // a button scrolled 500 pixels above a view 100 tall
     Widget scrolled = Scroll(500, Column([Button("gone", Custom(1)), Text("x")]));
     Str said = sem_speech(semantics(scrolled, r, ui_new()));
-    expect(str_contains(said, "gone")).toEqual(false);
-    expect(str_contains(said, "scroll area")).toEqual(true);
+    expect(said).toEqual("scroll area = 500\nbutton \"gone\", off screen\ntext \"x\", off screen\n");
     // a button drawn over another in a Stack: only the top one is there
     Str stack = sem_speech(semantics(Stack([Button("del", Custom(1)), Button("cover", Custom(2))]), r, ui_new()));
     expect(stack).toEqual("button \"cover\"\n");
     // a layer that takes no clicks hides nothing
     Str text = sem_speech(semantics(Stack([Button("under", Custom(1)), Text("over")]), r, ui_new()));
     expect(text).toEqual("button \"under\"\ntext \"over\"\n");
+}
+
+test "off-screen nodes are flagged, offer only scrolling, and visible ones are not flagged (R3-3)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // Scroll 0, Column 1, Button "top" 2, Spacer 3, Button "far" 4: "far"
+    // lies 400 pixels down a view 100 tall
+    Widget w = Scroll(0, Column([Button("top", Custom(1)), Padding(200, Spacer), Button("far", Custom(2))]));
+    List(SemNode) ns = semantics(w, r, ui_new());
+    SemNode top = ns[1];
+    SemNode far = ns[2];
+    expect(top.label).toEqual("top");
+    expect(top.flags & sem_offscreen()).toEqual(0);
+    expect(top.actions).toEqual(act_activate());
+    expect(far.label).toEqual("far");
+    expect(far.id).toEqual(5);
+    expect(far.parent).toEqual(0);
+    expect((far.flags & sem_offscreen()) != 0).toEqual(true);
+    expect(far.actions).toEqual(act_scroll());
+    // laid out past the window with no Scroll to bring it in: no actions
+    List(SemNode) low = semantics(Column([Padding(200, Spacer), Button("below", Custom(3))]), r, ui_new());
+    expect(low.len()).toEqual(1);
+    expect((low[0].flags & sem_offscreen()) != 0).toEqual(true);
+    expect(low[0].actions).toEqual(0);
 }

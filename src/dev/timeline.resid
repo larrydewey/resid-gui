@@ -57,7 +57,8 @@ pub Str event_lit(Event e) {
         AppMsg(m) => "AppMsg(" + msg_lit(m) + ")",
         TextEdited(m, t, k) => "TextEdited(" + msg_lit(m) + ", " + str_lit(t) + f", {k})",
         SliderSet(m, v) => "SliderSet(" + msg_lit(m) + f", {v})",
-        Assist(n, a) => f"Assist({n}, {a})"
+        Assist(n, a) => f"Assist({n}, {a})",
+        ScrollTo(n, o) => f"ScrollTo({n}, {o})"
     };
 }
 
@@ -208,6 +209,7 @@ Result(Event, Str) to_event(Str n, List(Lit) a) {
     if (n == "TextEdited" && shaped(a, "msi")) { return Ok(TextEdited(to_msg(a[0]), sval(a[1]), ival(a[2]))); }
     if (n == "SliderSet" && shaped(a, "mi")) { return Ok(SliderSet(to_msg(a[0]), ival(a[1]))); }
     if (n == "Assist" && shaped(a, "ii")) { return Ok(Assist(ival(a[0]), ival(a[1]))); }
+    if (n == "ScrollTo" && shaped(a, "ii")) { return Ok(ScrollTo(ival(a[0]), ival(a[1]))); }
     return Err(f"not an event: {n} with {a.len()} argument(s)");
 }
 
@@ -288,7 +290,7 @@ Str items_at(List(Event) es, Int i, StrBuf b) {
 
 List(Event) session() {
     return [TextEdited(Submitted, "Ship \"RSP\"", 10), KeyDown(28, ""), AppMsg(Submitted),
-            TextEdited(Submitted, "Write shell\n", 12), AppMsg(Submitted), PointerMoved(-3, 4), Assist(2, 1), Wheel(0, -1)];
+            TextEdited(Submitted, "Write shell\n", 12), AppMsg(Submitted), PointerMoved(-3, 4), Assist(2, 1), ScrollTo(3, 120), Wheel(0, -1)];
 }
 
 test "every event survives the log, quotes and newlines included" {

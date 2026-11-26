@@ -28,6 +28,8 @@ Gallery gallery_update(Gallery g, Event e) {
         TextEdited(m, t, k) => with_text(g, t, k),
         SliderSet(m, v) => with_level(g, v),
         Wheel(dx, dy) => with_scroll(g, g.scroll + dy * 24),
+        // a screen reader asked to see a line scrolled out of view
+        ScrollTo(n, off) => with_scroll(g, off),
         _ => g
     };
 }

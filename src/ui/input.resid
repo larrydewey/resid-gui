@@ -153,6 +153,7 @@ UiStep none(UiState ui) { return UiStep { .ui = ui, .out = [] }; }
 /// scrolled out of view, under another layer of a `Stack`), does nothing:
 /// a screen reader acts on what is shown, as the pointer does.
 UiStep assist(UiState ui, Widget root, Rect area, Int node, Int act, Font fo) {
+    if ((act & act_scroll()) != 0) { return scroll_to(ui, root, area, node, fo); }
     Found f = find_in(root, area, node, fo);
     if (f.id < 0) { return none(ui); }
     Rect v = rect_intersect(f.r, area);
@@ -163,6 +164,58 @@ UiStep assist(UiState ui, Widget root, Rect area, Int node, Int act, Font fo) {
         TextInput(s, k, m) => if ((act & act_focus()) != 0) { none(ui_with_focus_on(ui, node, m)) } else { none(ui) },
         _ => none(ui)
     };
+}
+
+/// An assistive request to see widget `node`: its nearest `Scroll` moved
+/// just enough that the node's box lies in the scroll's view (its top, when
+/// it is taller than the view), as `ScrollTo(scroll, offset)` for the
+/// program, which owns the offset as it does for `Wheel`. Nothing for a
+/// node a reader is not given (under a layer, a row out of a `Rows`'s
+/// view), one no `Scroll` holds, or one already in view.
+UiStep scroll_to(UiState ui, Widget root, Rect area, Int node, Font fo) {
+    List(SemNode) ns = semantics_in(root, area, ui, fo);
+    Int k = sem_at(ns, node, 0);
+    if (k < 0) { return none(ui); }
+    Int s = scroll_above(ns, ns[k].parent, 0);
+    if (s < 0) { return none(ui); }
+    Found sc = find_in(root, area, ns[s].id, fo);
+    Int o = match (sc.w) { Scroll(off, c) => off, _ => -1 };
+    if (o < 0) { return none(ui); }
+    Rect view = sc.r;
+    Rect t = ns[k].bounds;
+    Int want = if (t.y < view.y || t.h > view.h) { o - (view.y - t.y) }
+               else { if (t.y + t.h > view.y + view.h) { o + (t.y + t.h - view.y - view.h) } else { o } };
+    Int to = max_int(want, 0);
+    return if (to == o) { none(ui) } else { UiStep { .ui = ui, .out = [ScrollTo(ns[s].id, to)] } };
+}
+
+/// The index of node `id` in `ns`, or -1.
+Int sem_at(List(SemNode) ns, Int id, Int i) {
+    if (i >= ns.len()) { return -1; }
+    return if (ns[i].id == id) { i } else { sem_at(ns, id, i + 1) };
+}
+
+/// The index of the nearest scroll area at or above node `id`, or -1.
+/// `depth` bounds the walk by the tree's size.
+Int scroll_above(List(SemNode) ns, Int id, Int depth) {
+    if (id < 0 || depth > ns.len()) { return -1; }
+    Int j = sem_at(ns, id, 0);
+    if (j < 0) { return -1; }
+    return if (ns[j].role == role_scroll()) { j } else { scroll_above(ns, ns[j].parent, depth + 1) };
+}
+
+/// The text inputs Tab moves between: those a click could reach, in
+/// order. An input scrolled out of view, laid out outside the window or
+/// under a layer of a `Stack` is skipped, as the pointer cannot reach it.
+pub List(Int) tab_inputs(Widget root, Rect area, UiState ui, Font fo) {
+    return tab_at(semantics_in(root, area, ui, fo), 0, ListBuf());
+}
+
+List(Int) tab_at(List(SemNode) ns, Int i, ListBuf(Int) acc) {
+    if (i >= ns.len()) { return acc.finish(); }
+    SemNode n = ns[i];
+    Bool ok = n.role == role_textbox() && (n.flags & sem_offscreen()) == 0 && (n.actions & act_focus()) != 0;
+    return tab_at(ns, i + 1, if (ok) { acc.push(n.id) } else { acc });
 }
 
 Bool is_shift(Int code) { return code == key_left_shift() || code == key_right_shift(); }
@@ -285,7 +338,7 @@ UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo)
     Bool typing = str_len(text) > 0;
     if ((is_shift(code) || is_ctrl(code)) && !typing) { return none(mods_after(ui, code, true)); }
     if (code == key_tab() && !typing) {
-        List(Int) ids = inputs(root);
+        List(Int) ids = tab_inputs(root, area, ui, fo);
         Int to = if (ui.shift) { prev_input(ids, ui.focus) } else { next_input(ids, ui.focus) };
         return none(ui_with_focus_on(ui, to, msg_of(find_in(root, area, to, fo).w)));
     }
@@ -578,4 +631,48 @@ test "a release raises nothing when index-keyed rows renumber under it (R3-6)" {
     expect(raised_any(up, 0)).toEqual(false);
     // unchanged rows still click
     expect(raised(ui_event(down.ui, abc, r, PointerUp(x, y, 1)), Custom(1), 0)).toEqual(true);
+}
+
+Bool scrolled_to(UiStep s, Int node, Int off, Int i) {
+    if (i >= s.out.len()) { return false; }
+    Bool hit = match (s.out[i]) { ScrollTo(n, o) => n == node && o == off, _ => false };
+    return hit || scrolled_to(s, node, off, i + 1);
+}
+
+test "a reader can scroll to an off-screen node, but not act on it (R3-3)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // Scroll 0, Column 1, Button "top" 2 (0..32), Padding 3, Spacer 4,
+    // Button "far" 5 at y 436..468
+    Widget w = Scroll(0, Column([Button("top", Custom(1)), Padding(200, Spacer), Button("far", Custom(2))]));
+    Found far = find(w, r, 5);
+    // activating it does nothing; asking to see it scrolls its bottom into view
+    expect(raised(ui_event(ui_new(), w, r, Assist(5, act_activate())), Custom(2), 0)).toEqual(false);
+    UiStep s = ui_event(ui_new(), w, r, Assist(5, act_scroll()));
+    expect(scrolled_to(s, 0, far.r.y + far.r.h - 100, 0)).toEqual(true);
+    // scrolled there, it shows and can be activated; scrolling to it again does nothing
+    Widget there = Scroll(far.r.y + far.r.h - 100, Column([Button("top", Custom(1)), Padding(200, Spacer), Button("far", Custom(2))]));
+    expect(raised(ui_event(ui_new(), there, r, Assist(5, act_activate())), Custom(2), 0)).toEqual(true);
+    expect(ui_event(ui_new(), there, r, Assist(5, act_scroll())).out.len()).toEqual(1);
+    // and back up to "top", which is now above the view: its top at the view's top
+    expect(scrolled_to(ui_event(ui_new(), there, r, Assist(2, act_scroll())), 0, 0, 0)).toEqual(true);
+    // no Scroll, nothing to do
+    expect(ui_event(ui_new(), Column([Padding(200, Spacer), Button("below", Custom(3))]), r, Assist(3, act_scroll())).out.len()).toEqual(1);
+}
+
+test "Tab skips inputs scrolled out of view or covered (R3-3)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // Column 0, TextInput a 1, Scroll 2 (scrolled 500 past its content),
+    // Column 3, Padding 4, Spacer 5, TextInput hidden 6, Stack 7, TextInput covered 8, Button cover 9,
+    // TextInput b 10
+    Widget w = Column([TextInput("a", 1, Custom(1)),
+                       Scroll(500, Column([Padding(100, Spacer), TextInput("hidden", 1, Custom(2))])),
+                       Stack([TextInput("covered", 1, Custom(3)), Button("cover", Custom(4))]),
+                       TextInput("b", 1, Custom(5))]);
+    Rect big = Rect { .x = 0, .y = 0, .w = 200, .h = 400 };
+    UiState on1 = ui_event(ui_new(), w, big, Assist(1, act_focus())).ui;
+    expect(on1.focus).toEqual(1);
+    UiState next = ui_event(on1, w, big, KeyDown(key_tab(), "")).ui;
+    expect(next.focus).toEqual(10);
+    expect(ui_event(next, w, big, KeyDown(key_tab(), "")).ui.focus).toEqual(1);
+    expect(tab_inputs(w, big, ui_new(), font_builtin())).toEqual([1, 10]);
 }

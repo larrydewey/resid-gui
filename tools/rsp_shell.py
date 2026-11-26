@@ -256,6 +256,8 @@ class Shell:
                 parts.append("checked" if n["flags"] & 1 else "not checked")
             if n["flags"] & 2:
                 parts.append("focused")
+            if n["flags"] & 16:
+                parts.append("off screen")
             lines.append(" ".join(parts))
         return lines
 

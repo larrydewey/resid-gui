@@ -8,7 +8,8 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
 type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int)
            | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int)
            | Focused | Blurred | Closed | FrameTick
-           | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int);
+           | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int)
+           | Assist(Int, Int) | ScrollTo(Int, Int);
 
 type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg)
             | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget))

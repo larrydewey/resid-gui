@@ -79,7 +79,9 @@ what the agreed version does not have.
 
 Semantics roles: 1 text, 2 button, 3 checkbox, 4 text field, 5 slider,
 6 image, 7 scroll area, 8 list. Flags: 1 checked, 2 focused, 4 editable,
-8 disabled. Actions: 1 activate, 2 focus, 4 set value, 8 scroll.
+8 disabled, 16 off screen (scrolled out of view or outside the window: in
+the tree, not shown; its only action is scroll, which brings it into
+view). Actions: 1 activate, 2 focus, 4 set value, 8 scroll.
 `src/ui/semantics.resid` defines them.
 
 ## 4. Messages from the shell (opcodes 129–142)

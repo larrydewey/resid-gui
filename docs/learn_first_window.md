@@ -77,7 +77,8 @@ WAYLAND_DISPLAY= ./counter
 type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int)
            | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int)
            | Focused | Blurred | Closed | FrameTick
-           | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int);
+           | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int)
+           | Assist(Int, Int) | ScrollTo(Int, Int);
 ```
 
 Coordinates are logical pixels. Buttons are 1 (left), 2 (middle) and
@@ -88,13 +89,15 @@ keyboard layout.
 `FrameTick` arrives every 500 ms (it also blinks the caret). `Closed` is
 the last event `update` sees.
 
-The last three are widget events, raised by the library:
+The last five are widget events, raised by the library:
 
 | Event | When |
 |---|---|
 | `AppMsg(m)` | a `Button` or `Checkbox` was clicked, or Enter was pressed in a focused `TextInput` |
 | `TextEdited(m, text, caret)` | a focused `TextInput` was edited or its caret moved |
 | `SliderSet(m, value)` | a `Slider` was clicked or dragged to `value` (0 to 100) |
+| `Assist(node, action)` | a screen reader acted on widget `node`; the library has already turned it into the click or focus it means |
+| `ScrollTo(scroll, offset)` | a screen reader asked to see a widget scrolled out of view: set the `Scroll` numbered `scroll` to `offset`, as for `Wheel` |
 
 `m` is the widget's own message, so `Custom(n)` tells many widgets apart:
 

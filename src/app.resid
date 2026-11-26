@@ -28,7 +28,11 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
 ///   on widget number `node` (see `act_*` in ui/semantics.resid). The
 ///   library turns it into what a pointer or keyboard would have done
 ///   (`AppMsg`, focus) and passes it on as well.
-type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int) | Assist(Int, Int);
+/// - `ScrollTo(scroll, offset)`: a screen reader asked to see a widget
+///   scrolled out of view; the `Scroll` numbered `scroll` (pre-order, as
+///   `Assist` numbers widgets) shows it at `offset`. The program owns the
+///   offset, as it does for `Wheel`: one with a single `Scroll` sets it.
+type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int) | Assist(Int, Int) | ScrollTo(Int, Int);
 
 /// What the program wants on screen. A widget is a value, so two equal
 /// models give two equal display lists and therefore identical pixels.

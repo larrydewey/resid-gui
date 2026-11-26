@@ -14,10 +14,23 @@ import "ttf.resid";
 @requires(filesystem(readonly))
 pub List(Font) load_ttf(Str path, Int size) {
     if (!filesystem.exists(path)) { return []; }
+    return match (read_ttf(path, size)) {
+        Ok(fs) => fs,
+        Err(e) => warn_none(f"resid-gui: {path}: {e}")
+    };
+}
+
+/// The largest font file read: 16 MB, what the native module takes.
+pub Int max_font_file() { return 16777216; }
+
+/// `load_ttf`, with the reason when the font cannot be used.
+@requires(filesystem(readonly))
+pub Result(List(Font), Str) read_ttf(Str path, Int size) {
+    if (filesystem.size(path) > max_font_file()) { return Err("larger than 16 MB"); }
     List(Int) bytes = filesystem.read_bytes(path);
     return match (ttf_font(bytes, size, 1)) {
-        Ok(one) => match (ttf_font(bytes, size, 2)) { Ok(two) => [one, two], Err(e) => [one] },
-        Err(e) => warn_none(f"resid-gui: {path}: {e}")
+        Ok(one) => match (ttf_font(bytes, size, 2)) { Ok(two) => Ok([one, two]), Err(e) => Ok([one]) },
+        Err(e) => Err(e)
     };
 }
 

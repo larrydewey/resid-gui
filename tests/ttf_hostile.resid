@@ -9,6 +9,7 @@
 
 import "../src/gfx/font.resid";
 import "../src/gfx/ttf.resid";
+import "../src/gfx/fontfile.resid";
 
 // ─── Building a font ───────────────────────────────────────────────
 
@@ -185,4 +186,51 @@ test "a composite of many components within the budget still reads" {
     List(Int) f = font_of(1000, [[], composite_glyph(2, 16, 1, 0), composite_glyph(3, 16, 1, 0), simple_glyph(0, 0, 500, 500, square(500), true)]);
     Int contours = match (outline_of(opened(f), 1)) { Ok(o) => o.contours.len(), Err(e) => -1 };
     expect(contours).toEqual(256);
+}
+
+// ─── GP-2: a box, a line count and an atlas past what drawing allows ─
+
+test "a glyph whose box claims 25 em is refused, not filled" {
+    // a 500-unit square in a box of 25000 units: 401 pixels a side at 16
+    List(Int) f = font_of(1000, [[], simple_glyph(0, 0, 25000, 25000, square(500), true)]);
+    expect(err_of(ttf_answer(f, 16))).toEqual("ttf: glyph too large for the atlas");
+}
+
+test "a glyph of more lines than a fill can afford is refused" {
+    // 3000 control points, each curve flattened into eight lines
+    List(Int) f = font_of(1000, [[], simple_glyph(0, 0, 1000, 1000, scatter(3000, 0, ListBuf()), false)]);
+    expect(err_of(ttf_answer(f, 16))).toEqual("ttf: the glyph has too many lines");
+}
+
+/// Glyphs 1 to 95 for the printable characters, each a square of 1 em.
+List(List(Int)) squares(Int n, ListBuf(List(Int)) b) {
+    if (n <= 0) { return b.finish(); }
+    return squares(n - 1, b.push(simple_glyph(0, 0, 1000, 1000, square(1000), true)));
+}
+
+test "an atlas past 1 MB is refused, as the native module refuses it" {
+    List(Int) empty = [];
+    List(Int) f = font_with(1000, cmap_map(32, 126, 1), [empty].concat(squares(95, ListBuf())));
+    // at 100 pixels an em the 95 squares fit in about 1 MB; at 120 not
+    expect(err_of(ttf_answer(f, 100))).toEqual("");
+    expect(err_of(ttf_answer(f, 120))).toEqual("ttf: the glyphs do not fit the atlas");
+}
+
+/// `n` zero bytes after `b`.
+List(Int) padded(List(Int) b, Int n) { return pad_at(n, push_all(ListBuf(), b, 0)); }
+
+List(Int) pad_at(Int n, ListBuf(Int) b) {
+    if (n <= 0) { return b.finish(); }
+    return pad_at(n - 1, b.push(0));
+}
+
+@requires(filesystem)
+test "a font file past 16 MB is not read" {
+    List(Int) f = font_of(1000, [[], simple_glyph(0, 0, 500, 500, square(500), true)]);
+    Str small = "/tmp/resid-gui-test-font.ttf";
+    Str big = "/tmp/resid-gui-test-big-font.ttf";
+    expect(filesystem.write_bytes(small, f)).toEqual(true);
+    expect(filesystem.write_bytes(big, padded(f, 16777216))).toEqual(true);
+    expect(load_ttf(small, 15).len()).toEqual(2);
+    expect(load_ttf(big, 15).len()).toEqual(0);
 }

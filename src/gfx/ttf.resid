@@ -20,7 +20,9 @@
 //
 // The file is untrusted: every read is bounds-checked, counts are capped,
 // composites nest at most four deep and expand to at most 1024 components
-// and 20000 points a glyph, and anything malformed is an `Err`.
+// and 20000 points a glyph, a glyph's box is at most two em and its
+// outline 20000 lines, the answer at most 1 MB as the native module's,
+// and anything malformed is an `Err`.
 
 import "color.resid";
 import "font.resid";
@@ -271,7 +273,10 @@ FlagRun read_flags(List(Int) b, Int at, Int stop, Int left, ListBuf(Int) acc) {
     return read_flags(b, at + 2, stop, left - 1 - rep, push_n(acc, f, rep + 1));
 }
 
-ListBuf(Int) push_n(ListBuf(Int) b, Int v, Int n) { return if (n <= 0) { b } else { push_n(b.push(v), v, n - 1) }; }
+ListBuf(Int) push_n(ListBuf(Int) b, Int v, Int n) {
+    if (n <= 0) { return b; }
+    return push_n(b.push(v), v, n - 1);
+}
 
 type CoordRun = { List(Int) vs; Int at; };
 
@@ -428,7 +433,12 @@ ListBuf(Int) fill_rows(List(Seg) segs, Int w, Int h, Int y, ListBuf(Int) acc) {
     return fill_rows(segs, w, h, y + 1, push_cover(acc, row, 0));
 }
 
-List(Int) zeros(Int n, ListBuf(Int) b) { return if (n <= 0) { b.finish() } else { zeros(n - 1, b.push(0)) }; }
+// Written as statements, so the compiler makes the tail call a loop: an
+// atlas is a million zeros, too deep for a stack as recursion.
+List(Int) zeros(Int n, ListBuf(Int) b) {
+    if (n <= 0) { return b.finish(); }
+    return zeros(n - 1, b.push(0));
+}
 
 ListBuf(Int) push_cover(ListBuf(Int) acc, List(Int) row, Int i) {
     if (i >= row.len()) { return acc; }
@@ -516,10 +526,16 @@ Result(Drawn, Str) draw_outline(Outline o, Int ppem, Int upem, Int ascent_px, In
     Int bt = cdiv(o.ymax * ppem, upem);
     Int w = cdiv(o.xmax * ppem, upem) - bx + 1;
     Int h = bt - fdiv(o.ymin * ppem, upem) + 1;
-    if (w > 512 || h > 512) { return Err("ttf: glyph too large for the atlas"); }
+    if (w > 512 || h > 512 || w > 2 * ppem + 2 || h > 2 * ppem + 2) { return Err("ttf: glyph too large for the atlas"); }
     Xf f = Xf { .ppem = ppem, .upem = upem, .bx = bx, .by = bt };
-    return Ok(Drawn { .adv = adv, .xoff = bx, .yoff = ascent_px - bt, .w = w, .h = h, .cover = fill(flatten(o.contours, f), w, h) });
+    List(Seg) segs = flatten(o.contours, f);
+    if (segs.len() > max_segments()) { return Err("ttf: the glyph has too many lines"); }
+    return Ok(Drawn { .adv = adv, .xoff = bx, .yoff = ascent_px - bt, .w = w, .h = h, .cover = fill(segs, w, h) });
 }
+
+/// Lines per glyph once its curves are flattened: filling costs every
+/// line on every scanline.
+pub Int max_segments() { return 20000; }
 
 /// The printable ASCII characters drawn at `ppem` pixels per em, packed in
 /// shelves into an atlas, as the native font module's answer (font.c's
@@ -536,7 +552,7 @@ Result(List(Int), Str) answer_for(Ttf t, Int ppem) {
     Int ascent = cdiv(t.ascent * ppem, t.upem);
     Int line = ascent + cdiv((0 - t.descent + t.gap) * ppem, t.upem);
     return match (draw_all(t, ppem, ascent, 32, [])) {
-        Ok(ds) => Ok(pack(ds, ascent, line, kerns(t, ppem))),
+        Ok(ds) => pack(ds, ascent, line, kerns(t, ppem)),
         Err(e) => Err(e)
     };
 }
@@ -577,16 +593,18 @@ List(Int) kern_pairs(Ttf t, Int at, Int n, Int i, Map(Int, Int) want, Int ppem, 
     return kern_pairs(t, at, n, i + 1, want, ppem, acc.concat([a, b, v]));
 }
 
-/// Shelf-pack the glyphs into an atlas `aw` wide and lay out the answer.
-List(Int) pack(List(Drawn) ds, Int ascent, Int line, List(Int) ks) {
+/// Shelf-pack the glyphs into an atlas `aw` wide and lay out the answer,
+/// which is at most 1 MB, as the native module's is.
+Result(List(Int), Str) pack(List(Drawn) ds, Int ascent, Int line, List(Int) ks) {
     Int aw = 512;
     Placed p = place(ds, aw, 0, 0, 0, 0, []);
     Int ah = if (p.y + p.shelf > 0) { p.y + p.shelf } else { 1 };
+    if (atlas_offset() + aw * ah > 1048576) { return Err("ttf: the glyphs do not fit the atlas"); }
     List(Int) atlas = blit_all(ds, p.at, aw, 0, zeros(aw * ah, ListBuf()));
     ListBuf(Int) h = le(le(le(le(le(le(le(le(ListBuf(), 826689362), 0), ascent), line), aw), ah), 95), ks.len() / 3);
     ListBuf(Int) g = records(h, ds, p.at, 0);
     ListBuf(Int) k = kern_slots(g, ks, 0);
-    return push_all(k, atlas, 0).finish();
+    return Ok(push_all(k, atlas, 0).finish());
 }
 
 /// Where each glyph went: two integers each.
@@ -629,7 +647,10 @@ ListBuf(Int) kern_slots(ListBuf(Int) b, List(Int) ks, Int i) {
     return kern_slots(b.push(ks[3 * i]).push(ks[3 * i + 1]).push(v & 255).push((v >> 8) & 255), ks, i + 1);
 }
 
-ListBuf(Int) push_all(ListBuf(Int) b, List(Int) xs, Int i) { return if (i >= xs.len()) { b } else { push_all(b.push(xs[i]), xs, i + 1) }; }
+ListBuf(Int) push_all(ListBuf(Int) b, List(Int) xs, Int i) {
+    if (i >= xs.len()) { return b; }
+    return push_all(b.push(xs[i]), xs, i + 1);
+}
 
 /// A font from TrueType bytes: `size` logical pixels per em, made for
 /// device `scale`.

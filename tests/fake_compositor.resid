@@ -250,3 +250,33 @@ test "a keymap that claims 2 GB is not read, and the layout stays" {
     expect(g.text).toEqual("a");
     expect(g.closed).toEqual(true);
 }
+
+/// A compositor that never answers but keeps talking: a harmless event
+/// (delete_id of an object the client never made) every 100 ms until
+/// `until`, then it hangs up.
+@requires(display, clock(readonly))
+Bool chatter(Int fd, Int until) {
+    if (clock.monotonic_ns() / 1000000 >= until) { return true; }
+    if (!resid_disp_send(fd, wl_msg(1, 1, wl_words([9999])), -1)) { return false; }
+    _ = resid_disp_poll([fd], [0], 100);
+    return chatter(fd, until);
+}
+
+@requires(display, clock(readonly))
+test "a compositor that talks but never answers cannot hold the start" {
+    List(Int) pair = resid_disp_pair();
+    Int sfd = pair[0];
+    Int cfd = pair[1];
+    Int t0 = clock.monotonic_ns() / 1000000;
+    Result(Int, RegionError) r = spawn (display, clock(readonly)) {
+        Wl w = wl_start_on(cfd, WindowOptions { .title = "x", .width = 10, .height = 10, .resizable = false });
+        // how long the start took to give up, or -1 if it did not
+        return if (w.alive) { -1 } else { clock.monotonic_ns() / 1000000 };
+    };
+    // eight seconds of chatter: longer than the start may take
+    _ = chatter(sfd, t0 + 8000);
+    _ = resid_disp_close(sfd);
+    Int gave_up = r else { -9 };
+    expect(gave_up > 0).toEqual(true);
+    expect(gave_up - t0 < 7000).toEqual(true);
+}

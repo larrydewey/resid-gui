@@ -178,7 +178,7 @@ pub Wl wl_start_on(Int fd, WindowOptions opts) {
                                 .resizable = opts.resizable, .dw = 0, .dh = 0 },
                  .rep = w0.rep, .keys = keys_us(), .px = 0, .py = 0, .buf = [] };
     Wl w2 = send(w1, [wl_display_get_registry(2), wl_display_sync(3)]);
-    Wl w3 = wait_until(w2, 0);
+    Wl w3 = wait_until(w2, 0, clock_ms() + wl_start_ms());
     if (!w3.alive) {
         _ = resid_disp_close(fd);
         return wl_failed(if (str_len(w3.err) > 0) { w3.err } else { "wayland: the compositor closed the connection" });
@@ -217,7 +217,7 @@ pub Wl wl_start_on(Int fd, WindowOptions opts) {
                                 .seat = if (seat.name == 0) { 0 } else { id + 3 }, .cursor_mgr = if (curs.name == 0) { 0 } else { id + 4 },
                                 .surface = id + 5, .xdg_surface = id + 6, .toplevel = id + 7, .pointer = 0, .keyboard = 0, .cursor_dev = 0 });
     Wl w5 = with_sync(with_ids(w4, 9), id + 8, false);
-    Wl w6 = wait_until(send(w5, binds.concat(seat_bind).concat(curs_bind).concat(window).concat(fixed).concat(finish)), 1);
+    Wl w6 = wait_until(send(w5, binds.concat(seat_bind).concat(curs_bind).concat(window).concat(fixed).concat(finish)), 1, clock_ms() + wl_start_ms());
     if (!w6.alive) {
         _ = resid_disp_close(fd);
         return wl_failed(if (str_len(w6.err) > 0) { w6.err } else { "wayland: the compositor did not configure the window" });
@@ -227,21 +227,28 @@ pub Wl wl_start_on(Int fd, WindowOptions opts) {
 
 Int max1(Int v) { return if (v < 1) { 1 } else { v }; }
 
+/// How long each step of starting may take, in all: a compositor that
+/// keeps talking without ever answering must not hold the program.
+pub Int wl_start_ms() { return 5000; }
+
 /// Read and dispatch until the sync callback fires (`what` 0) or the
-/// window is configured with buffers (`what` 1). Five seconds of silence
-/// is a dead compositor.
+/// window is configured with buffers (`what` 1), by `deadline` (a
+/// monotonic time in ms). Past it, or five seconds of silence, is a dead
+/// compositor.
 @requires(display, clock(readonly))
-Wl wait_until(Wl w, Int what) {
+Wl wait_until(Wl w, Int what, Int deadline) {
     if (!w.alive) { return w; }
     if (what == 0 && w.synced) { return w; }
     if (what == 1 && w.win.configured && w.win.dw > 0) { return w; }
-    List(Int) ready = resid_disp_poll([w.fd], [1], 5000);
+    Int left = deadline - clock_ms();
+    if (left <= 0) { return dead(w, "wayland: the compositor stopped answering"); }
+    List(Int) ready = resid_disp_poll([w.fd], [1], left);
     Int bits = if (ready.len() > 0) { ready[0] } else { 0 };
     if ((bits & 1) == 0) { return dead(w, "wayland: the compositor stopped answering"); }
     List(Int) got = resid_disp_recv(w.fd, 65536);
     if (got.len() == 0) { return dead(w, "wayland: the compositor closed the connection"); }
     WlStep s = drain(with_buf(w, w.buf.concat(got)), [], clock_ms());
-    return wait_until(s.w, what);
+    return wait_until(s.w, what, deadline);
 }
 
 @requires(clock(readonly))

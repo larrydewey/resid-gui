@@ -9,7 +9,8 @@
 // delete the log.
 //
 // It needs `filesystem` for the log, so it is for development builds; a
-// release build calls `gui_run`.
+// release build calls `gui_run`. A log holds at most `log_max_events()`
+// events and 16 MB; past that it is not read or added to.
 
 import "../app.resid";
 import "../gui.resid";
@@ -20,6 +21,7 @@ import "timeline.resid";
 @requires(filesystem(readonly))
 pub List(Event) read_log(Str path) {
     if (!filesystem.exists(path)) { return []; }
+    if (filesystem.size(path) > 16777216) { return warn_empty(f"resid-gui: ignoring {path}: larger than 16 MB"); }
     return match (log_parse(filesystem.read_all(path))) {
         Ok(es) => es,
         Err(why) => warn_empty(f"resid-gui: ignoring {path}: {why}")
@@ -42,6 +44,12 @@ pub Int gui_run_dev(WindowOptions opts, Str log_path) {
     if (past.len() > 0) { eprintln(f"resid-gui: restored {past.len()} event(s) from {log_path}"); }
     Recorded(M) r = gui_run_model_recorded(opts, m0, []);
     if (!r.opened) { return 1; }
+    // A log past what replay reads would be ignored next time: keep the
+    // one there is, and say so.
+    if (past.len() + r.log.len() > log_max_events()) {
+        eprintln(f"resid-gui: not adding to {log_path}: it would pass {log_max_events()} events; delete it to start afresh");
+        return 1;
+    }
     if (!filesystem.write_all(log_path, log_text(past.concat(r.log)))) {
         eprintln(f"resid-gui: could not write {log_path}");
         return 1;

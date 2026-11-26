@@ -221,19 +221,29 @@ pub Result(Event, Str) event_parse(Str line) {
 
 /// A whole log. Blank lines are skipped; any other bad line is an error
 /// naming its line number.
-pub Result(List(Event), Str) log_parse(Str text) { return lines_at(text, 0, 0, 1, []); }
+/// A log holds at most this many events: replaying it runs `update` on
+/// each before the window opens.
+pub Int log_max_events() { return 50000; }
 
-Result(List(Event), Str) lines_at(Str t, Int start, Int i, Int line, List(Event) acc) {
-    if (i < str_len(t) && str_char_at(t, i) != 10) { return lines_at(t, start, i + 1, line, acc); }
+pub Result(List(Event), Str) log_parse(Str text) { return lines_at(text, 0, 0, 1, ListBuf(), 0); }
+
+Result(List(Event), Str) lines_at(Str t, Int start, Int i, Int line, ListBuf(Event) acc, Int n) {
+    if (i < str_len(t) && str_char_at(t, i) != 10) { return lines_at(t, start, i + 1, line, acc, n); }
     Str l = str_trim(str_slice(t, start, i));
     if (str_len(l) == 0) {
-        if (i >= str_len(t)) { return Ok(acc); }
-        return lines_at(t, i + 1, i + 1, line + 1, acc);
+        if (i >= str_len(t)) { return Ok(acc.finish()); }
+        return lines_at(t, i + 1, i + 1, line + 1, acc, n);
     }
+    if (n >= log_max_events()) { return refused(acc, f"more than {log_max_events()} events"); }
     return match (event_parse(l)) {
-        Ok(e) => if (i >= str_len(t)) { Ok(acc.concat([e])) } else { lines_at(t, i + 1, i + 1, line + 1, acc.concat([e])) },
-        Err(why) => Err(f"line {line}: {why}")
+        Ok(e) => if (i >= str_len(t)) { Ok(acc.push(e).finish()) } else { lines_at(t, i + 1, i + 1, line + 1, acc.push(e), n + 1) },
+        Err(why) => refused(acc, f"line {line}: {why}")
     };
+}
+
+Result(List(Event), Str) refused(ListBuf(Event) acc, Str why) {
+    _ = acc.finish();
+    return Err(why);
 }
 
 // ─── Replaying ─────────────────────────────────────────────────────
@@ -287,6 +297,19 @@ test "every event survives the log, quotes and newlines included" {
     expect(back.len()).toEqual(es.len());
     expect(log_text(back)).toEqual(log_text(es));
     expect(event_lit(es[0])).toEqual("TextEdited(Submitted, \"Ship \\\"RSP\\\"\", 10)");
+}
+
+/// `n` lines of the same event.
+Str many(Int n, StrBuf b) {
+    if (n <= 0) { return b.finish(); }
+    return many(n - 1, b.push("AppMsg(Clicked)\n"));
+}
+
+test "a log of more events than replay allows is refused" {
+    Bool full = match (log_parse(many(log_max_events(), StrBuf()))) { Ok(es) => es.len() == log_max_events(), Err(e) => false };
+    expect(full).toEqual(true);
+    Str why = match (log_parse(many(log_max_events() + 1, StrBuf()))) { Ok(es) => "", Err(e) => e };
+    expect(why).toEqual("more than 50000 events");
 }
 
 test "a bad line is refused with its line number" {

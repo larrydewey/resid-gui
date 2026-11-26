@@ -40,6 +40,7 @@ import "ui/semantics.resid";
 import "ui/theme.resid";
 import "a11y/atspi.resid";
 import "rsp/client.resid";
+import "rsp/wire.resid";
 
 /// The caret blinks, and `FrameTick` arrives, this often.
 pub Int blink_ms() { return 500; }
@@ -208,12 +209,24 @@ Loop(M) run_loop(B b, Loop(M) st0) {
     // With a screen reader's bus open, wait on it and the display together,
     // then read the display without waiting: a reader's question is
     // answered at once, not at the next caret blink.
-    Int ms = if (a11y_alive(a1)) { wait_both(be_fd(b2), a11y_fd(a1), wait) } else { wait };
+    Int ms = turn_ms(b2, a11y_fd(a1), a11y_alive(a1), wait);
     Pumped(B) p = be_pump(b2, ms);
     A11yStep ax = a11y_pump(a1);
     Loop(M) st3 = fold_events(p.events.concat(ax.events), 0, with_a11y(st2, ax.a), be_scale(p.b), be_width(p.b), be_height(p.b));
     Loop(M) st4 = tick(st3, now_ms());
     return run_loop(p.b, st4);
+}
+
+/// How long this turn waits for input before pumping: not at all while
+/// the backend holds whole messages it has not handled (polling its
+/// descriptor cannot see them, so a wait there would hold a backlog to
+/// one pump per caret blink); with a screen reader's bus open, it waits
+/// on the display and the bus together.
+@needs(Backend(B))
+@requires(display)
+Int turn_ms(B b, Int afd, Bool a11y, Int wait) {
+    Int ms = if (be_pending(b)) { 0 } else { wait };
+    return if (a11y) { wait_both(be_fd(b), afd, ms) } else { ms };
 }
 
 /// Wait up to `ms` for either descriptor; 0 afterwards, so the backend
@@ -348,4 +361,35 @@ test "a caret blink damages only the caret" {
     expect(d.len()).toEqual(1);
     expect(d[0].w).toEqual(1);
     expect(d[0].h).toEqual(16);
+}
+
+/// `n` pointer moves as a shell sends them.
+List(Int) shell_moves(Int n, ListBuf(Int) acc) {
+    if (n <= 0) { return acc.finish(); }
+    return shell_moves(n - 1, push_all(acc, from_shell_bytes(Pointer(ptr_move(), n, n, 0, 0, dev_mouse(), 0)), 0));
+}
+
+ListBuf(Int) push_all(ListBuf(Int) b, List(Int) xs, Int i) { return if (i >= xs.len()) { b } else { push_all(b.push(xs[i]), xs, i + 1) }; }
+
+@requires(display, clock(readonly))
+test "a turn with whole messages already read does not wait for more (R3-1)" {
+    List(Int) pair = resid_disp_pair();
+    List(Int) bus = resid_disp_pair();   // a screen reader's bus, silent
+    Rsp r = rsp_failed("");
+    Rsp r0 = Rsp { .fd = pair[1], .alive = true, .err = "", .buf = [], .win = r.win, .bufs = r.bufs, .frame_ok = true, .sem = [], .sent = 0 };
+    // 1500 moves, under one read's 64 KB: the first pump reads them all,
+    // handles 256, and leaves the rest whole in the buffer
+    _ = resid_disp_send(pair[0], shell_moves(1500, ListBuf()), -1);
+    Int t0 = now_ms();
+    Pumped(Rsp) p1 = be_pump(r0, turn_ms(r0, bus[1], true, 0));
+    Pumped(Rsp) p2 = be_pump(p1.b, turn_ms(p1.b, bus[1], true, 500));
+    Pumped(Rsp) p3 = be_pump(p2.b, turn_ms(p2.b, bus[1], true, 500));
+    Int took = now_ms() - t0;
+    expect(p1.events.len() + p2.events.len() + p3.events.len()).toEqual(3 * rsp_max_per_pump());
+    // the caret's 500 ms is waited only once nothing whole is left
+    expect(took < 250).toEqual(true);
+    _ = resid_disp_close(pair[0]);
+    _ = resid_disp_close(pair[1]);
+    _ = resid_disp_close(bus[0]);
+    _ = resid_disp_close(bus[1]);
 }

@@ -47,6 +47,10 @@ behavior Backend(B) {
     /// The descriptor the backend reads, so the loop can wait on it beside
     /// others (the accessibility bus); -1 when there is none.
     Int be_fd(B b);
+    /// Whether whole messages are already read and wait for a pump: a
+    /// backend that caps the messages one pump handles keeps the rest in
+    /// its buffer, where waiting on `be_fd` cannot see them.
+    Bool be_pending(B b);
     /// Close the window and the connection.
     Bool be_close(B b);
 }

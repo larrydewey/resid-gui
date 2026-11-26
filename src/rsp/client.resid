@@ -356,6 +356,13 @@ pub Bool rsp_alive(Rsp r) { return r.alive; }
 /// high contrast, as the platform reports them.
 pub Int rsp_hints(Rsp r) { return r.win.theme; }
 pub Int rsp_fd(Rsp r) { return r.fd; }
+/// Whether a whole message (or a corrupt one, which the next pump ends the
+/// connection on) is already read: the pump's cap leaves the rest here.
+pub Bool rsp_pending(Rsp r) {
+    if (!r.alive) { return false; }
+    RspIn t = rsp_take(r.buf);
+    return t.ok || t.bad;
+}
 pub Int rsp_width(Rsp r) { return r.win.w; }
 pub Int rsp_height(Rsp r) { return r.win.h; }
 pub Int rsp_scale(Rsp r) { return r.win.scale; }
@@ -363,7 +370,7 @@ pub Int rsp_scale(Rsp r) { return r.win.scale; }
 Backend(Rsp) = {
     .be_pump = rsp_pump, .be_alive = rsp_alive, .be_width = rsp_width, .be_height = rsp_height,
     .be_scale = rsp_scale, .be_ready = rsp_ready, .be_present = rsp_present, .be_close = rsp_close,
-    .be_semantics = rsp_semantics, .be_hints = rsp_hints, .be_fd = rsp_fd
+    .be_semantics = rsp_semantics, .be_hints = rsp_hints, .be_fd = rsp_fd, .be_pending = rsp_pending
 };
 
 test "scrolling becomes notches, at least one for any movement" {

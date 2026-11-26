@@ -352,46 +352,44 @@ Int u32be(List(Int) b, Int i) { return ((b[i] & 255) << 24) | ((b[i + 1] & 255) 
 
 /// A whole message (as `dtake` cut it), decoded.
 pub Result(DMsg, Str) dmsg_decode(List(Int) m) {
-    Head hd = head_of(m);
-    if (!hd.ok) { return Err(hd.why); }
-    DMsg h = hd.h;
-    return match (dec_body(m, 0, hd.bstart, m.len(), hd.sig, 0, [])) {
-        Ok(vs) => Ok(DMsg { .kind = h.kind, .flags = h.flags, .serial = h.serial, .reply_serial = h.reply_serial,
-                            .path = h.path, .iface = h.iface, .member = h.member, .error = h.error,
-                            .dest = h.dest, .sender = h.sender, .body = vs }),
+    if (m.len() < 16 || (m[0] & 255) != 108) { return Err("dbus: not a little-endian message"); }
+    Int kind = m[1] & 255;
+    if (kind < 1 || kind > 4) { return Err("dbus: unknown message type"); }
+    Int body = u32at(m, 4);
+    Int serial = u32at(m, 8);
+    if (serial == 0) { return Err("dbus: serial 0"); }
+    Dec f = ddec(m, 0, 12, "a(yv)", 0, 0);
+    if (!f.ok) { return Err(f.why); }
+    Int bstart = up(f.at, 8);
+    if (bstart + body != m.len()) { return Err("dbus: body length does not match"); }
+    List(DV) fs = match (f.v) { DArr(es, xs) => xs, _ => [] };
+    Str sig = fstr(fs, 8);
+    return match (dec_body(m, 0, bstart, m.len(), sig, 0, [])) {
+        Ok(vs) => Ok(DMsg { .kind = kind, .flags = m[2] & 255, .serial = serial, .reply_serial = fu32(fs, 5),
+                            .path = fstr(fs, 1), .iface = fstr(fs, 2), .member = fstr(fs, 3), .error = fstr(fs, 4),
+                            .dest = fstr(fs, 6), .sender = fstr(fs, 7), .body = vs }),
         Err(e) => Err(e)
     };
 }
 
 /// A whole message's header, with no body: enough to answer a call whose
-/// body does not decode.
+/// body does not decode. (The same steps as `dmsg_decode`, kept apart:
+/// with this compiler, a header carried in a record of its own lost its
+/// strings in some builds.)
 pub Result(DMsg, Str) dmsg_header(List(Int) m) {
-    Head hd = head_of(m);
-    return if (hd.ok) { Ok(hd.h) } else { Err(hd.why) };
-}
-
-/// A header read: the message without its body, where the body starts
-/// and its signature; `ok` false with `why` when malformed.
-type Head = { Bool ok; Str why; DMsg h; Int bstart; Str sig; };
-
-Head no_head(Str why) { return Head { .ok = false, .why = why, .h = dcall(1, "", "", "", "", []), .bstart = 0, .sig = "" }; }
-
-Head head_of(List(Int) m) {
-    if (m.len() < 16 || (m[0] & 255) != 108) { return no_head("dbus: not a little-endian message"); }
+    if (m.len() < 16 || (m[0] & 255) != 108) { return Err("dbus: not a little-endian message"); }
     Int kind = m[1] & 255;
-    if (kind < 1 || kind > 4) { return no_head("dbus: unknown message type"); }
+    if (kind < 1 || kind > 4) { return Err("dbus: unknown message type"); }
     Int body = u32at(m, 4);
     Int serial = u32at(m, 8);
-    if (serial == 0) { return no_head("dbus: serial 0"); }
+    if (serial == 0) { return Err("dbus: serial 0"); }
     Dec f = ddec(m, 0, 12, "a(yv)", 0, 0);
-    if (!f.ok) { return no_head(f.why); }
-    Int bstart = up(f.at, 8);
-    if (bstart + body != m.len()) { return no_head("dbus: body length does not match"); }
+    if (!f.ok) { return Err(f.why); }
+    if (up(f.at, 8) + body != m.len()) { return Err("dbus: body length does not match"); }
     List(DV) fs = match (f.v) { DArr(es, xs) => xs, _ => [] };
-    DMsg h = DMsg { .kind = kind, .flags = m[2] & 255, .serial = serial, .reply_serial = fu32(fs, 5),
-                    .path = fstr(fs, 1), .iface = fstr(fs, 2), .member = fstr(fs, 3), .error = fstr(fs, 4),
-                    .dest = fstr(fs, 6), .sender = fstr(fs, 7), .body = [] };
-    return Head { .ok = true, .why = "", .h = h, .bstart = bstart, .sig = fstr(fs, 8) };
+    return Ok(DMsg { .kind = kind, .flags = m[2] & 255, .serial = serial, .reply_serial = fu32(fs, 5),
+                     .path = fstr(fs, 1), .iface = fstr(fs, 2), .member = fstr(fs, 3), .error = fstr(fs, 4),
+                     .dest = fstr(fs, 6), .sender = fstr(fs, 7), .body = [] });
 }
 
 DV fval(List(DV) fs, Int code, Int i) {

@@ -92,23 +92,36 @@ type RspGot = { Rsp r; Bool got; FromShell m; };
 /// The next whole message, waiting up to `ms` for bytes.
 @requires(display)
 RspGot next_msg(Rsp r, Int ms) {
+    RspGot g = buffered(r);
+    if (g.got || !g.r.alive) { return g; }
+    Rsp r2 = read_once(r, ms);
+    if (!r2.alive || r2.buf.len() == r.buf.len()) { return RspGot { .r = r2, .got = false, .m = FrameDone }; }
+    return next_msg(r2, 0);
+}
+
+/// The next whole message already read, without reading.
+RspGot buffered(Rsp r) {
     if (!r.alive) { return RspGot { .r = r, .got = false, .m = FrameDone }; }
     RspIn t = rsp_take(r.buf);
     if (t.bad) { return RspGot { .r = dead(r, "rsp: corrupt stream from the shell"), .got = false, .m = FrameDone }; }
-    if (t.ok) {
-        Rsp rest = with_buf(r, t.rest);
-        return match (from_shell_decode(t.msg)) {
-            Ok(m) => RspGot { .r = rest, .got = true, .m = m },
-            Err(e) => RspGot { .r = dead(rest, e), .got = false, .m = FrameDone }
-        };
-    }
+    if (!t.ok) { return RspGot { .r = r, .got = false, .m = FrameDone }; }
+    Rsp rest = with_buf(r, t.rest);
+    return match (from_shell_decode(t.msg)) {
+        Ok(m) => RspGot { .r = rest, .got = true, .m = m },
+        Err(e) => RspGot { .r = dead(rest, e), .got = false, .m = FrameDone }
+    };
+}
+
+/// One read of whatever the shell sent, waiting up to `ms` for it.
+@requires(display)
+Rsp read_once(Rsp r, Int ms) {
     List(Int) ready = resid_disp_poll([r.fd], [1], ms);
     Int bits = if (ready.len() > 0) { ready[0] } else { 0 };
-    if ((bits & 8) != 0) { return RspGot { .r = dead(r, "rsp: the connection failed"), .got = false, .m = FrameDone }; }
-    if ((bits & 1) == 0) { return RspGot { .r = r, .got = false, .m = FrameDone }; }
+    if ((bits & 8) != 0) { return dead(r, "rsp: the connection failed"); }
+    if ((bits & 1) == 0) { return r; }
     List(Int) got = resid_disp_recv(r.fd, 65536);
-    if (got.len() == 0) { return RspGot { .r = dead(r, "rsp: the shell closed the connection"), .got = false, .m = FrameDone }; }
-    return next_msg(with_buf(r, r.buf.concat(got)), 0);
+    if (got.len() == 0) { return dead(r, "rsp: the shell closed the connection"); }
+    return with_buf(r, r.buf.concat(got));
 }
 
 /// Greet the shell over a connected socket and open the window: `Hello`,
@@ -191,21 +204,35 @@ Rsp attach(Rsp r) {
 
 type RspStep = { Rsp r; List(Event) events; };
 
-/// Wait up to `ms` for the shell, then decode every whole message.
+/// Messages handled in one pump, at most: a shell that sends faster than
+/// the core draws gets the rest at the next pump, after a frame.
+pub Int rsp_max_per_pump() { return 256; }
+
+/// Handle what has already arrived, then wait up to `ms` for the shell
+/// and read once: a shell that never stops sending cannot keep the core
+/// from drawing.
 @requires(display)
 pub Pumped(Rsp) rsp_pump(Rsp r, Int ms) {
     if (!r.alive) { return Pumped { .b = r, .events = [] }; }
-    RspStep s = drain(r, ms, []);
+    RspStep s = drain(r, ms, true, 0, ListBuf());
     return Pumped { .b = s.r, .events = s.events };
 }
 
 @requires(display)
-RspStep drain(Rsp r, Int ms, List(Event) acc) {
-    RspGot g = next_msg(r, ms);
-    if (!g.r.alive) { return RspStep { .r = g.r, .events = acc.concat([Closed]) }; }
-    if (!g.got) { return RspStep { .r = g.r, .events = acc }; }
-    RspStep s = dispatch(g.r, g.m);
-    return drain(s.r, 0, acc.concat(s.events));
+RspStep drain(Rsp r, Int ms, Bool may_read, Int n, ListBuf(Event) acc) {
+    if (n >= rsp_max_per_pump()) { return RspStep { .r = r, .events = acc.finish() }; }
+    RspGot g = buffered(r);
+    if (!g.r.alive) { return RspStep { .r = g.r, .events = acc.push(Closed).finish() }; }
+    if (g.got) {
+        RspStep s = dispatch(g.r, g.m);
+        return drain(s.r, 0, may_read, n + 1, push_events(acc, s.events, 0));
+    }
+    if (!may_read) { return RspStep { .r = g.r, .events = acc.finish() }; }
+    return drain(read_once(g.r, ms), 0, false, n, acc);
+}
+
+ListBuf(Event) push_events(ListBuf(Event) acc, List(Event) es, Int i) {
+    return if (i >= es.len()) { acc } else { push_events(acc.push(es[i]), es, i + 1) };
 }
 
 RspStep quiet(Rsp r) { return RspStep { .r = r, .events = [] }; }
@@ -358,4 +385,38 @@ test "a late release of an older buffer frees nothing" {
     Rsp r = with_bufs(rsp_failed(""), RspBufs { .h0 = 1, .h1 = 2, .s0 = slot_sent(slot_new(1, 4, 4)), .s1 = slot_new(2, 4, 4), .gen = 3 });
     expect(released(r, 0).bufs.s0.busy).toEqual(true);
     expect(released(r, 6).bufs.s0.busy).toEqual(false);
+}
+
+/// `n` pointer moves as the shell sends them.
+List(Int) moves(Int n, ListBuf(Int) acc) {
+    if (n <= 0) { return acc.finish(); }
+    return moves(n - 1, push_bytes(acc, from_shell_bytes(Pointer(ptr_move(), n, n, 0, 0, dev_mouse(), 0)), 0));
+}
+
+ListBuf(Int) push_bytes(ListBuf(Int) b, List(Int) xs, Int i) { return if (i >= xs.len()) { b } else { push_bytes(b.push(xs[i]), xs, i + 1) }; }
+
+/// Pump until no event comes; the events, counted.
+@requires(display)
+Int pump_count(Rsp r, Int total, Int pumps) {
+    if (pumps <= 0) { return total; }
+    Pumped(Rsp) p = rsp_pump(r, 0);
+    if (p.events.len() == 0) { return total; }
+    return pump_count(p.b, total + p.events.len(), pumps - 1);
+}
+
+@requires(display)
+test "a shell that floods the core is handled a pump's worth at a time" {
+    List(Int) pair = resid_disp_pair();
+    Rsp r = Rsp { .fd = pair[1], .alive = true, .err = "", .buf = [],
+                  .win = RspWin { .w = 10, .h = 10, .scale = 1, .theme = 0, .platform = 0, .shell = "fake" },
+                  .bufs = bufs_none(), .frame_ok = true, .sem = [], .sent = 0 };
+    // three thousand moves, in the socket before the core reads
+    _ = resid_disp_send(pair[0], moves(3000, ListBuf()), -1);
+    Pumped(Rsp) p = rsp_pump(r, 0);
+    expect(p.b.alive).toEqual(true);
+    expect(p.events.len()).toEqual(rsp_max_per_pump());
+    // the rest come at the following pumps, none lost
+    expect(pump_count(p.b, p.events.len(), 100)).toEqual(3000);
+    _ = resid_disp_close(pair[0]);
+    _ = resid_disp_close(pair[1]);
 }

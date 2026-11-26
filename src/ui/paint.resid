@@ -9,6 +9,7 @@ import "../app.resid";
 import "../gfx/color.resid";
 import "../gfx/draw.resid";
 import "../gfx/font.resid";
+import "../gfx/image.resid";
 import "layout.resid";
 import "state.resid";
 import "theme.resid";
@@ -117,7 +118,9 @@ List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id, Font f, Theme t) {
         Checkbox(s, on, m) => paint_check(r, s, on, ui.pressed == id, f, t),
         TextInput(s, caret, m) => paint_input(r, s, caret, ui.focus == id, ui.caret_on, if (ui.focus == id) { ui.anchor } else { -1 }, f, t),
         Slider(v, m) => paint_slider(r, v, t),
-        Bitmap(bw, bh, px) => [OpImage(r.x, r.y, bw, bh, px)],
+        // an image whose pixels do not fill its claimed size draws nothing,
+        // so no claimed size reaches damage or the rasterizer (R4-7)
+        Bitmap(bw, bh, px) => if (image_whole(Image { .w = bw, .h = bh, .px = px })) { [OpImage(r.x, r.y, bw, bh, px)] } else { [] },
         _ => []
     };
 }

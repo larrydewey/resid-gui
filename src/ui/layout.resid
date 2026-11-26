@@ -39,11 +39,11 @@ pub Size pref_size_in(Widget w, Font f) {
         Row(xs) => Size { .w = sum_w(xs, 0, 0, f) + gaps(xs), .h = max_h(xs, 0, 0, f) },
         Column(xs) => Size { .w = max_w(xs, 0, 0, f), .h = sum_h(xs, 0, 0, f) + gaps(xs) },
         Stack(xs) => Size { .w = max_w(xs, 0, 0, f), .h = max_h(xs, 0, 0, f) },
-        Padding(n, c) => pad_size(pref_size_in(c, f), n),
+        Padding(n, c) => pad_size(pref_size_in(c, f), pad_of(n)),
         Align(ax, ay, c) => pref_size_in(c, f),
         Scroll(o, c) => pref_size_in(c, f),
         Rows(o, rh, xs) => Size { .w = 0, .h = 0 },
-        Bitmap(bw, bh, px) => Size { .w = max_int(bw, 0), .h = max_int(bh, 0) },
+        Bitmap(bw, bh, px) => Size { .w = clamp_int(bw, 0, dim_limit()), .h = clamp_int(bh, 0, dim_limit()) },
         Slider(v, m) => Size { .w = 120, .h = lh },
         Spacer => Size { .w = 0, .h = 0 },
         Themed(t, c) => pref_size_in(c, f)
@@ -51,6 +51,14 @@ pub Size pref_size_in(Widget w, Font f) {
 }
 
 Size pad_size(Size s, Int n) { return Size { .w = s.w + 2 * n, .h = s.h + 2 * n }; }
+
+/// The largest size a widget asks for, and the most padding, scroll
+/// offset or row height taken: 2^24 pixels (offsets 2^40). A view can say
+/// anything (an image's claimed size, an offset counted without bound);
+/// what layout adds and multiplies stays far from overflow (R4-7).
+pub Int dim_limit() { return 1 << 24; }
+Int pad_of(Int n) { return clamp_int(n, 0 - dim_limit(), dim_limit()); }
+Int off_of(Int o) { return clamp_coord(o); }
 
 pub Int max_int(Int a, Int b) { return if (a > b) { a } else { b }; }
 pub Int min_int(Int a, Int b) { return if (a < b) { a } else { b }; }
@@ -131,13 +139,19 @@ pub List(Rect) child_rects_in(Widget w, Rect r, Font f) {
         Row(xs) => row_rects(xs, r, share(r.w - sum_w(xs, 0, 0, f) - gaps(xs), count_x(xs, 0, 0)), 0, r.x, [], f),
         Column(xs) => col_rects(xs, r, share(r.h - sum_h(xs, 0, 0, f) - gaps(xs), count_y(xs, 0, 0)), 0, r.y, [], f),
         Stack(xs) => same_rects(xs.len(), r, 0, []),
-        Padding(n, c) => [Rect { .x = r.x + n, .y = r.y + n, .w = max_int(r.w - 2 * n, 0), .h = max_int(r.h - 2 * n, 0) }],
+        Padding(n0, c) => pad_rect(r, pad_of(n0)),
         Align(ax, ay, c) => [align_rect(pref_size_in(c, f), r, ax, ay)],
-        Scroll(o, c) => [Rect { .x = r.x, .y = r.y - o, .w = r.w, .h = max_int(pref_size_in(c, f).h, r.h) }],
+        Scroll(o, c) => [Rect { .x = r.x, .y = clamp_coord(r.y) - off_of(o), .w = r.w, .h = max_int(pref_size_in(c, f).h, r.h) }],
         Rows(o, rh, xs) => all_row_rects(r, o, rh, xs.len(), 0, ListBuf()),
         Themed(t, c) => [r],
         _ => []
     };
+}
+
+List(Rect) pad_rect(Rect r, Int n) {
+    Int x = clamp_coord(r.x);
+    Int y = clamp_coord(r.y);
+    return [Rect { .x = x + n, .y = y + n, .w = max_int(clamp_coord(r.w) - 2 * n, 0), .h = max_int(clamp_coord(r.h) - 2 * n, 0) }];
 }
 
 /// Each stretching child's share of `free` pixels; none when nothing is free.
@@ -173,7 +187,8 @@ pub Rect align_rect(Size s, Rect r, Int ax, Int ay) {
 /// are numbered in pre-order, so a subtree's numbers are contiguous.
 /// Row `i` of a `Rows(offset, row_h, _)` occupying `r`.
 pub Rect row_rect(Rect r, Int offset, Int row_h, Int i) {
-    return Rect { .x = r.x, .y = r.y - offset + i * max_int(row_h, 1), .w = r.w, .h = max_int(row_h, 1) };
+    Int h = clamp_int(row_h, 1, dim_limit());
+    return Rect { .x = r.x, .y = clamp_coord(r.y) - off_of(offset) + clamp_int(i, 0, dim_limit()) * h, .w = r.w, .h = h };
 }
 
 /// The rows of a `Rows` in view in `r`: from `first` up to, not including,
@@ -181,9 +196,10 @@ pub Rect row_rect(Rect r, Int offset, Int row_h, Int i) {
 pub type RowSpan = { Int first; Int last; };
 
 pub RowSpan rows_in_view(Rect r, Int offset, Int row_h, Int n) {
-    Int h = max_int(row_h, 1);
-    Int first = clamp_int(offset / h, 0, n);
-    Int last = clamp_int((offset + max_int(r.h, 0) + h - 1) / h, first, n);
+    Int h = clamp_int(row_h, 1, dim_limit());
+    Int o = off_of(offset);
+    Int first = clamp_int(o / h, 0, n);
+    Int last = clamp_int((o + clamp_coord(max_int(r.h, 0)) + h - 1) / h, first, n);
     return RowSpan { .first = first, .last = last };
 }
 

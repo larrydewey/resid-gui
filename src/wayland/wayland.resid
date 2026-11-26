@@ -161,6 +161,7 @@ Global global_of(List(Global) gs, Str iface, Int i) {
 /// names. Not alive, with an empty `err`, when there is none.
 @requires(display, clock(readonly))
 pub Wl wl_start(WindowOptions opts) {
+    if (window_options_err(opts) != "") { return wl_failed(window_options_err(opts)); }
     Int fd = resid_disp_connect_wayland();
     if (fd < 0) { return wl_failed(""); }
     return wl_start_on(fd, opts);
@@ -169,6 +170,10 @@ pub Wl wl_start(WindowOptions opts) {
 /// `wl_start` over a connected socket.
 @requires(display, clock(readonly))
 pub Wl wl_start_on(Int fd, WindowOptions opts) {
+    if (window_options_err(opts) != "") {
+        _ = resid_disp_close(fd);
+        return wl_failed(window_options_err(opts));
+    }
     Wl w0 = wl_failed("");
     Wl w1 = Wl { .fd = fd, .alive = true, .err = "", .next_id = 4, .sync_cb = 3, .synced = false, .globals = [],
                  .o = WlObjs { .registry = 2, .compositor = 0, .shm = 0, .wm_base = 0, .seat = 0, .cursor_mgr = 0,

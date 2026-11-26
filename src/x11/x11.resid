@@ -66,6 +66,7 @@ List(Int) latin1_at(Str s, Int n, Int i, ListBuf(Int) b) {
 /// Open a window on the display the environment names.
 @requires(display)
 pub X11 x11_start(WindowOptions opts) {
+    if (window_options_err(opts) != "") { return x11_failed(-1, window_options_err(opts)); }
     Session s = x11_open();
     if (s.fd < 0 || str_len(s.err) > 0) {
         _ = x11_close_fd(s.fd);
@@ -79,6 +80,10 @@ pub X11 x11_start(WindowOptions opts) {
 pub X11 x11_start_on(Session s, WindowOptions opts) {
     Int fd = s.fd;
     Setup st = s.setup;
+    if (window_options_err(opts) != "") {
+        _ = x11_close_fd(fd);
+        return x11_failed(-1, window_options_err(opts));
+    }
     if (st.root_depth != 24 || st.bpp24 != 32) {
         _ = x11_close_fd(fd);
         return x11_failed(-1, f"x11: unsupported screen (depth {st.root_depth}, {st.bpp24} bits per pixel)");
@@ -103,6 +108,10 @@ pub X11 x11_start_on(Session s, WindowOptions opts) {
     Int scale = x11_scale(st);
     Int w = max1(opts.width) * scale;
     Int h = max1(opts.height) * scale;
+    if (w > window_max_side() || h > window_max_side() || w * h * 4 > 268435456) {
+        _ = x11_close_fd(fd);
+        return x11_failed(-1, f"x11: a {w}x{h} window at scale {scale} is past 16384 pixels a side or 256 MB");
+    }
     Int wid = st.id_base + 1;
     Int gc = st.id_base + 2;
     List(Int) title = utf8_bytes(opts.title);

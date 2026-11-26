@@ -11,6 +11,22 @@ pub type Rect = { Int x; Int y; Int w; Int h; };
 /// An opaque colour from its red, green and blue components.
 pub Color rgb(Int r, Int g, Int b) { return Color { .b = b & 255, .g = g & 255, .r = r & 255, .a = 255 }; }
 
+/// How far from the origin a coordinate or size is taken to reach, in
+/// either direction: 2^40 pixels. A rectangle held to it can be scaled by
+/// a device scale up to `scale_limit()` and added to another without
+/// overflow (R4-7).
+pub Int coord_limit() { return 1 << 40; }
+/// The largest device scale multiplied in.
+pub Int scale_limit() { return 64; }
+pub Int clamp_coord(Int v) { return if (v < 0 - coord_limit()) { 0 - coord_limit() } else { if (v > coord_limit()) { coord_limit() } else { v } }; }
+
+/// `r` in device pixels at scale `s`: each field held to `coord_limit()`
+/// and `s` to 1..`scale_limit()` before they are multiplied.
+pub Rect rect_scaled(Rect r, Int s0) {
+    Int s = if (s0 < 1) { 1 } else { if (s0 > scale_limit()) { scale_limit() } else { s0 } };
+    return Rect { .x = clamp_coord(r.x) * s, .y = clamp_coord(r.y) * s, .w = clamp_coord(r.w) * s, .h = clamp_coord(r.h) * s };
+}
+
 /// The rectangle with no area.
 pub Rect rect_none() { return Rect { .x = 0, .y = 0, .w = 0, .h = 0 }; }
 

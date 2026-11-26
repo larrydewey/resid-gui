@@ -129,6 +129,10 @@ Rsp read_once(Rsp r, Int ms) {
 /// Five seconds without an answer is a dead shell.
 @requires(display)
 pub Rsp rsp_start_on(Int fd, WindowOptions opts) {
+    if (window_options_err(opts) != "") {
+        _ = resid_disp_close(fd);
+        return rsp_failed(window_options_err(opts));
+    }
     Rsp r0 = Rsp { .fd = fd, .alive = true, .err = "", .buf = [],
                    .win = RspWin { .w = 0, .h = 0, .scale = 1, .theme = 0, .platform = 0, .shell = "" },
                    .bufs = bufs_none(), .frame_ok = false, .sem = [], .sent = 0 };
@@ -330,7 +334,7 @@ List(SemNode) to_device(List(SemNode) ns, Int s, Int i, ListBuf(SemNode) acc) {
     SemNode n = ns[i];
     Rect b = n.bounds;
     return to_device(ns, s, i + 1, acc.push(SemNode { .id = n.id, .parent = n.parent, .role = n.role, .flags = n.flags,
-        .bounds = Rect { .x = b.x * s, .y = b.y * s, .w = b.w * s, .h = b.h * s }, .actions = n.actions, .label = n.label, .value = n.value }));
+        .bounds = rect_scaled(b, s), .actions = n.actions, .label = n.label, .value = n.value }));
 }
 
 List(ToShell) puts(List(SemNode) ns, Int i, ListBuf(ToShell) acc) {

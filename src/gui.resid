@@ -393,3 +393,32 @@ test "a turn with whole messages already read does not wait for more (R3-1)" {
     _ = resid_disp_close(bus[0]);
     _ = resid_disp_close(bus[1]);
 }
+
+test "an image whose size is a lie is not multiplied into damage (R4-7)" {
+    List(Rect) d = scale_all(damage_rects_in([], [OpImage(0, 0, 1 << 62, 1, [])], font_builtin()), 2, 0, []);
+    expect(d.len() <= 1).toEqual(true);
+    List(DrawOp) ops = paint(Row([Bitmap(1 << 62, 1 << 62, []), Bitmap(1 << 62, 3, [1, 2, 3])]), Rect { .x = 0, .y = 0, .w = 100, .h = 100 }, ui_new());
+    expect(ops.len()).toEqual(0);
+    List(SemNode) sem = semantics(Padding(1 << 62, Padding(1 << 62, Bitmap(1 << 62, 1, []))), Rect { .x = 0, .y = 0, .w = 100, .h = 100 }, ui_new());
+    expect(sem.len()).toEqual(1);
+}
+
+@requires(display, clock(readonly))
+test "a window past 16384 pixels a side is refused before it is asked for (R4-7)" {
+    WindowOptions big = WindowOptions { .title = "big", .width = 1 << 31, .height = 100, .resizable = true };
+    expect(window_options_err(big) != "").toEqual(true);
+    expect(window_options_err(WindowOptions { .title = "ok", .width = 16384, .height = 16384, .resizable = false })).toEqual("");
+    X11 x = x11_start(big);
+    expect(x.alive).toEqual(false);
+    expect(str_contains(x.err, "16384")).toEqual(true);
+    List(Int) pair = resid_disp_pair();
+    Wl w = wl_start_on(pair[1], big);
+    expect(w.alive).toEqual(false);
+    expect(str_contains(w.err, "16384")).toEqual(true);
+    List(Int) pair2 = resid_disp_pair();
+    Rsp r = rsp_start_on(pair2[1], WindowOptions { .title = "big", .width = 10, .height = 1 << 40, .resizable = true });
+    expect(r.alive).toEqual(false);
+    expect(str_contains(r.err, "16384")).toEqual(true);
+    _ = resid_disp_close(pair[0]);
+    _ = resid_disp_close(pair2[0]);
+}

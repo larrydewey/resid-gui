@@ -4,8 +4,9 @@
 // `App(M)` instance (initial model, a pure step over events, a pure view)
 // and the `WindowOptions` it opens with.
 
-import "ui/theme.resid"; The library owns the display, the
-// loop and the pixels.
+// The library owns the display, the loop and the pixels.
+
+import "ui/theme.resid";
 
 /// A message a widget raises. Widgets carry these as values, never
 /// closures: a closure cannot be compared, and value equality is what
@@ -74,6 +75,20 @@ behavior App(M) {
 type WindowOptions = {
     Str title; Int width; Int height; Bool resizable;
 };
+
+/// The most pixels a side a window may ask for, logical or device.
+pub Int window_max_side() { return 16384; }
+
+/// Why a window cannot be opened with `o`, or "": a side past
+/// `window_max_side()` is refused before any backend multiplies it by a
+/// scale or allocates for it (R4-7). A side below 1 is taken as 1.
+pub Str window_options_err(WindowOptions o) {
+    if (o.width > window_max_side() || o.height > window_max_side()) {
+        Str w = if (o.width > window_max_side()) { "width" } else { "height" };
+        return f"resid-gui: the window's {w} is past {window_max_side()} pixels";
+    }
+    return "";
+}
 
 /// Message equality, field by field.
 pub Bool msg_eq(Msg a, Msg b) {

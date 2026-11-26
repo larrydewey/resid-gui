@@ -30,7 +30,7 @@ Canvas blit_rows(Canvas c, Image im, Int x0, Int y0, Rect a, Int y, Int x) {
 /// Whether `im` has a size and pixels for all of it. Checked by division:
 /// a size such as 1 << 62 must not overflow w * h * 4 (or, at a scale,
 /// cells_in's w * k) on its way to being refused.
-Bool image_whole(Image im) {
+pub Bool image_whole(Image im) {
     return im.w > 0 && im.h > 0 && im.px.len() / 4 / im.w >= im.h;
 }
 

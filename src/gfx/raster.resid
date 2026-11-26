@@ -57,11 +57,16 @@ pub Canvas raster_frame_rect(Frame fr, Rect r, Color bg) {
 }
 
 /// A logical rectangle in device pixels.
-pub Rect scale_up(Rect r, Int s) { return Rect { .x = r.x * s, .y = r.y * s, .w = r.w * s, .h = r.h * s }; }
+/// Its fields are held to `coord_limit()` first: an op's box can say
+/// anything (an image's claimed size), and a multiply must not overflow.
+pub Rect scale_up(Rect r, Int s) { return rect_scaled(r, s); }
 
 /// A logical rectangle in the device pixels of a canvas whose origin is
 /// device pixel (`ox`, `oy`).
-Rect place(Rect r, Int s, Int ox, Int oy) { return Rect { .x = r.x * s - ox, .y = r.y * s - oy, .w = r.w * s, .h = r.h * s }; }
+Rect place(Rect r, Int s, Int ox, Int oy) {
+    Rect d = rect_scaled(r, s);
+    return Rect { .x = d.x - clamp_coord(ox), .y = d.y - clamp_coord(oy), .w = d.w, .h = d.h };
+}
 
 Canvas raster_ops(Canvas c, List(DrawOp) ops, Int i, List(Rect) clips, Int s, Int ox, Int oy, Font f) {
     if (i >= ops.len()) { return c; }

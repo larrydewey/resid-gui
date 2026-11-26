@@ -771,6 +771,8 @@ ListBuf(Int) push_all(ListBuf(Int) b, List(Int) xs, Int i) {
 /// device `scale`.
 pub Result(Font, Str) ttf_font(List(Int) bytes, Int size, Int scale) {
     Int s = if (scale < 1) { 1 } else { scale };
+    // both checked before they are multiplied (R4-7)
+    if (size < 1 || size > 256 || s > 64) { return Err("ttf: pixel size or scale out of range"); }
     return match (ttf_answer(bytes, size * s)) {
         Ok(a) => font_parse(a, s),
         Err(e) => Err(e)
@@ -817,4 +819,11 @@ test "garbage and truncated fonts are errors, never a crash" {
     expect(otf).toEqual(true);
     Bool e3 = match (ttf_answer([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 3)) { Ok(t) => false, Err(e) => true };
     expect(e3).toEqual(true);
+}
+
+test "a pixel size is checked before it is multiplied by the scale (R4-7)" {
+    Bool refused = match (ttf_font([], 1 << 62, 4)) { Ok(f) => false, Err(e) => true };
+    expect(refused).toEqual(true);
+    Bool big_scale = match (ttf_font([], 16, 1 << 61)) { Ok(f) => false, Err(e) => true };
+    expect(big_scale).toEqual(true);
 }

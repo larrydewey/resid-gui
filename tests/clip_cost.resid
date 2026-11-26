@@ -21,6 +21,39 @@ Int now_ms() { return clock.monotonic_ns() / 1000000; }
 /// clipped one takes is far below.
 Int budget_ms() { return 2000; }
 
+// ─── UI-2: rounded corners ─────────────────────────────────────────
+
+/// The colour pixel (`px`, `py`) gets from a corner of radius `rad`
+/// centred on (`cx`, `cy`), drawn over `bg`.
+Color corner_pixel(Int px, Int py, Int cx, Int cy, Int rad, Color ink, Color bg) {
+    Int a = coverage(px, py, cx, cy, rad);
+    Canvas one = canvas_filled(1, 1, bg);
+    return pixel_at(if (a == 0) { one } else { blend_pixel_clip(one, 0, 0, ink, a, canvas_bounds(one)) }, 0, 0);
+}
+
+Bool column_matches(Canvas c, Int x, Int y, Int n, Int rad, Color ink, Color bg) {
+    if (n <= 0) { return true; }
+    return color_eq(pixel_at(c, x, y), corner_pixel(x, y, rad, rad, rad, ink, bg)) && column_matches(c, x, y + 1, n - 1, rad, ink, bg);
+}
+
+@requires(clock(readonly))
+test "a huge rounded rectangle drawn into a thin strip costs the strip" {
+    Color bg = rgb(255, 255, 255);
+    Color ink = rgb(10, 20, 30);
+    Canvas c = canvas_filled(600, 600, bg);
+    // the top-left corner's edge passes x = 586 near y = 586 for radius
+    // 2000; the canvas shows only that corner of the 16000-pixel shape
+    Rect strip = Rect { .x = 586, .y = 580, .w = 1, .h = 16 };
+    Canvas small = fill_round_clip(c, Rect { .x = 0, .y = 0, .w = 4000, .h = 4000 }, 2000, ink, strip);
+    expect(column_matches(small, 586, 580, 16, 2000, ink, bg)).toEqual(true);
+    Int t0 = now_ms();
+    Canvas d = fill_round_clip(c, Rect { .x = 0, .y = 0, .w = 16000, .h = 16000 }, 8000, ink, strip);
+    Int took = now_ms() - t0;
+    expect(column_matches(d, 586, 580, 16, 8000, ink, bg)).toEqual(true);
+    expect(color_eq(pixel_at(d, 585, 590), bg)).toEqual(true);
+    expect(took < budget_ms()).toEqual(true);
+}
+
 // ─── GP-4: a glyph far larger than the clip ────────────────────────
 
 ListBuf(Int) put_le(ListBuf(Int) b, Int v) { return b.push(v & 255).push((v >> 8) & 255).push((v >> 16) & 255).push((v >> 24) & 255); }

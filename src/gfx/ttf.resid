@@ -20,9 +20,10 @@
 //
 // The file is untrusted: every read is bounds-checked, counts are capped,
 // composites nest at most four deep and expand to at most 1024 components
-// and 20000 points a glyph, a glyph's box is at most two em and its
-// outline 20000 lines, the answer at most 1 MB as the native module's,
-// and anything malformed is an `Err`.
+// and 20000 points a glyph, a glyph's box is at most two em and its points
+// within an em of it (so no product overflows), its outline at most 20000
+// lines, the answer at most 1 MB as the native module's, and anything
+// malformed is an `Err`.
 
 import "color.resid";
 import "font.resid";
@@ -527,6 +528,12 @@ Result(Drawn, Str) draw_outline(Outline o, Int ppem, Int upem, Int ascent_px, In
     Int w = cdiv(o.xmax * ppem, upem) - bx + 1;
     Int h = bt - fdiv(o.ymin * ppem, upem) + 1;
     if (w > 512 || h > 512 || w > 2 * ppem + 2 || h > 2 * ppem + 2) { return Err("ttf: glyph too large for the atlas"); }
+    // The box comes from the glyph's header and the points from its data:
+    // a point far outside the box would make coordinates whose products
+    // overflow while filling.
+    if (!inside(o.contours, o.xmin - upem, o.ymin - upem, o.xmax + upem, o.ymax + upem, 0)) {
+        return Err("ttf: a point lies far outside the glyph's box");
+    }
     Xf f = Xf { .ppem = ppem, .upem = upem, .bx = bx, .by = bt };
     List(Seg) segs = flatten(o.contours, f);
     if (segs.len() > max_segments()) { return Err("ttf: the glyph has too many lines"); }
@@ -536,6 +543,19 @@ Result(Drawn, Str) draw_outline(Outline o, Int ppem, Int upem, Int ascent_px, In
 /// Lines per glyph once its curves are flattened: filling costs every
 /// line on every scanline.
 pub Int max_segments() { return 20000; }
+
+/// Whether every point of `cs` lies in the box from (`x0`, `y0`) to
+/// (`x1`, `y1`).
+Bool inside(List(List(Pt)) cs, Int x0, Int y0, Int x1, Int y1, Int i) {
+    if (i >= cs.len()) { return true; }
+    return pts_inside(cs[i], x0, y0, x1, y1, 0) && inside(cs, x0, y0, x1, y1, i + 1);
+}
+
+Bool pts_inside(List(Pt) ps, Int x0, Int y0, Int x1, Int y1, Int i) {
+    if (i >= ps.len()) { return true; }
+    Pt p = ps[i];
+    return p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1 && pts_inside(ps, x0, y0, x1, y1, i + 1);
+}
 
 /// The printable ASCII characters drawn at `ppem` pixels per em, packed in
 /// shelves into an atlas, as the native font module's answer (font.c's

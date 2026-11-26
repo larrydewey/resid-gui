@@ -234,3 +234,21 @@ test "a font file past 16 MB is not read" {
     expect(load_ttf(small, 15).len()).toEqual(2);
     expect(load_ttf(big, 15).len()).toEqual(0);
 }
+
+// ─── GP-3: coordinates whose products overflow ─────────────────────
+
+/// Sixty steps of 32767 units right, then sixty up: a contour whose
+/// closing line runs about two million units, so that crossing it with a
+/// scanline at 16 units an em and 256 pixels multiplies two numbers near
+/// 2^33. The box says the glyph is one unit square.
+List(Int) runaway(Int i, ListBuf(Int) b) {
+    if (i > 120) { return b.finish(); }
+    Int x = if (i <= 60) { i * 32767 } else { 60 * 32767 };
+    Int y = if (i <= 60) { 0 } else { (i - 60) * 32767 };
+    return runaway(i + 1, b.push(x).push(y));
+}
+
+test "points far outside the glyph's box are refused, never an overflow" {
+    List(Int) f = font_of(16, [[], simple_glyph(0, 0, 1, 1, runaway(0, ListBuf()), true)]);
+    expect(err_of(ttf_answer(f, 256))).toEqual("ttf: a point lies far outside the glyph's box");
+}

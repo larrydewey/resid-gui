@@ -533,11 +533,18 @@ WlStep on_keyboard(Wl w, Int op, List(Int) m, Int now) {
         return quiet(with_input(w, mods_from_mask(held, locked), w.px, w.py));
     }
     if (op == 5) {
+        // Repeat rate (a second) and delay (ms) as the compositor asks,
+        // within what a keyboard does: a rate past 100 or a negative
+        // delay would repeat on every pump, a busy loop.
         WlRepeat r = w.rep;
-        return quiet(with_rep(w, WlRepeat { .key = r.key, .text = r.text, .next = r.next, .rate = wl_i32(m, 8), .delay = wl_i32(m, 12) }));
+        Int rate = clamp_to(wl_i32(m, 8), 0, 100);
+        Int delay = clamp_to(wl_i32(m, 12), 0, 10000);
+        return quiet(with_rep(w, WlRepeat { .key = r.key, .text = r.text, .next = r.next, .rate = rate, .delay = delay }));
     }
     return quiet(w);
 }
+
+Int clamp_to(Int v, Int lo, Int hi) { return if (v < lo) { lo } else { if (v > hi) { hi } else { v } }; }
 
 WlRepeat stop_repeat(WlRepeat r) { return WlRepeat { .key = 0, .text = "", .next = 0, .rate = r.rate, .delay = r.delay }; }
 
@@ -628,4 +635,17 @@ test "a registry event becomes a global" {
     expect(w.globals[0].version).toEqual(2);
     expect(global_of(w.globals, "wl_shm", 0).name).toEqual(5);
     expect(global_of(w.globals, "wl_seat", 0).name).toEqual(0);
+}
+
+@requires(display)
+test "a key repeat faster than 100 a second or with a negative delay is clamped" {
+    // repeat_info: a billion a second, after -5 ms
+    Wl w = on_keyboard(wl_failed(""), 5, wl_msg(9, 5, wl_words([1000000000, 4294967291])), 0).w;
+    expect(w.rep.rate).toEqual(100);
+    expect(w.rep.delay).toEqual(0);
+    // key 30 held at 1000: it repeats, and not again for 10 ms
+    Wl held = on_keyboard(w, 3, wl_msg(9, 3, wl_words([1, 0, 30, 1])), 1000).w;
+    WlStep r = repeat(held, 1000, []);
+    expect(r.events.len()).toEqual(1);
+    expect(r.w.rep.next >= 1010).toEqual(true);
 }

@@ -1,0 +1,188 @@
+// ttf_hostile.resid — the pure-Resid TrueType reader against fonts built
+// to hurt it.
+//
+// Each font is made here, byte by byte: the seven tables `ttf_open` needs,
+// a format 4 `cmap` that maps "A" to glyph 1 (every other character to the
+// empty glyph 0), and whatever glyphs the test wants. A hostile font must
+// come back as an `Err`, quickly and without an abort; an honest one made
+// the same way must still draw.
+
+import "../src/gfx/font.resid";
+import "../src/gfx/ttf.resid";
+
+// ─── Building a font ───────────────────────────────────────────────
+
+List(Int) be16(Int v) { return [(v >> 8) & 255, v & 255]; }
+List(Int) be32(Int v) { return be16((v >> 16) & 65535).concat(be16(v & 65535)); }
+
+List(Int) zeros(Int n, ListBuf(Int) b) {
+    if (n <= 0) { return b.finish(); }
+    return zeros(n - 1, b.push(0));
+}
+
+/// `b` padded with zeros to a multiple of four bytes.
+List(Int) pad4(List(Int) b) {
+    if (b.len() % 4 == 0) { return b; }
+    return pad4(b.concat([0]));
+}
+
+/// A glyph's header: contour count (negative for a composite) and box.
+List(Int) glyph_head(Int nc, Int x0, Int y0, Int x1, Int y1) {
+    return be16(nc & 65535).concat(be16(x0 & 65535)).concat(be16(y0 & 65535)).concat(be16(x1 & 65535)).concat(be16(y1 & 65535));
+}
+
+/// A simple glyph of one contour through `pts` (x, y pairs, absolute),
+/// every point on the curve when `on`, every point a control point if not;
+/// coordinates are stored as word deltas.
+List(Int) simple_glyph(Int x0, Int y0, Int x1, Int y1, List(Int) pts, Bool on) {
+    Int n = pts.len() / 2;
+    List(Int) head = glyph_head(1, x0, y0, x1, y1).concat(be16(n - 1)).concat(be16(0));
+    List(Int) flags = repeat_byte(if (on) { 1 } else { 0 }, n, ListBuf());
+    return head.concat(flags).concat(deltas(pts, 0, 0, ListBuf())).concat(deltas(pts, 1, 0, ListBuf()));
+}
+
+List(Int) repeat_byte(Int v, Int n, ListBuf(Int) b) {
+    if (n <= 0) { return b.finish(); }
+    return repeat_byte(v, n - 1, b.push(v));
+}
+
+/// Coordinate `k` (0 for x, 1 for y) of each point, as word deltas.
+List(Int) deltas(List(Int) pts, Int i, Int prev, ListBuf(Int) b) {
+    if (i >= pts.len()) { return b.finish(); }
+    Int d = (pts[i] - prev) & 65535;
+    return deltas(pts, i + 2, pts[i], b.push((d >> 8) & 255).push(d & 255));
+}
+
+/// A composite glyph: `n` copies of glyph `g`, each moved by (`dx`, `dy`).
+List(Int) composite_glyph(Int g, Int n, Int dx, Int dy) {
+    return glyph_head(-1, 0, 0, 1000, 1000).concat(components(g, n, dx, dy, ListBuf()));
+}
+
+List(Int) components(Int g, Int n, Int dx, Int dy, ListBuf(Int) b) {
+    if (n <= 0) { return b.finish(); }
+    // words (1), x/y offsets (2), and more to come (32) on all but the last
+    Int flags = 3 + if (n > 1) { 32 } else { 0 };
+    List(Int) c = be16(flags).concat(be16(g)).concat(be16(dx & 65535)).concat(be16(dy & 65535));
+    return components(g, n - 1, dx, dy, push_all(b, c, 0));
+}
+
+ListBuf(Int) push_all(ListBuf(Int) b, List(Int) xs, Int i) {
+    if (i >= xs.len()) { return b; }
+    return push_all(b.push(xs[i]), xs, i + 1);
+}
+
+/// A format 4 cmap: characters `first` to `last` are glyphs `g`
+/// onwards, nothing else is mapped.
+List(Int) cmap_map(Int first, Int last, Int g) {
+    List(Int) sub = be16(4).concat(be16(32)).concat(be16(0)).concat(be16(4)).concat(be16(4)).concat(be16(1)).concat(be16(0))
+        .concat(be16(last)).concat(be16(65535)).concat(be16(0))
+        .concat(be16(first)).concat(be16(65535))
+        .concat(be16((g - first) & 65535)).concat(be16(1))
+        .concat(be16(0)).concat(be16(0));
+    return be16(0).concat(be16(1)).concat(be16(3)).concat(be16(1)).concat(be32(12)).concat(sub);
+}
+
+/// "A" is glyph 1.
+List(Int) cmap_a() { return cmap_map(65, 65, 1); }
+
+/// A whole font: units per em `upem` and these glyphs (glyph 0 first),
+/// "A" glyph 1.
+List(Int) font_of(Int upem, List(List(Int)) glyphs) { return font_with(upem, cmap_a(), glyphs); }
+
+List(Int) font_with(Int upem, List(Int) cmap, List(List(Int)) glyphs) {
+    Int n = glyphs.len();
+    List(Int) head = be32(65536).concat(zeros(14, ListBuf())).concat(be16(upem)).concat(zeros(30, ListBuf())).concat(be16(1)).concat(be16(0));
+    List(Int) hhea = be32(65536).concat(be16((upem * 4) / 5)).concat(be16((0 - upem / 5) & 65535)).concat(be16(0)).concat(zeros(24, ListBuf())).concat(be16(1));
+    List(Int) maxp = be32(20480).concat(be16(n));
+    List(Int) hmtx = be16(upem / 2).concat(be16(0));
+    List(Int) glyf = glyf_of(glyphs, 0, []);
+    List(Int) loca = loca_of(glyphs, 0, 0, []);
+    List(List(Int)) tables = [cmap, glyf, head, hhea, hmtx, loca, maxp];
+    List(Str) tags = ["cmap", "glyf", "head", "hhea", "hmtx", "loca", "maxp"];
+    Int at = 12 + 16 * tables.len();
+    List(Int) dir = be32(65536).concat(be16(tables.len())).concat(be16(0)).concat(be16(0)).concat(be16(0));
+    return directory(dir, tables, tags, 0, at, []);
+}
+
+List(Int) glyf_of(List(List(Int)) gs, Int i, List(Int) acc) {
+    if (i >= gs.len()) { return acc; }
+    return glyf_of(gs, i + 1, acc.concat(pad4(gs[i])));
+}
+
+List(Int) loca_of(List(List(Int)) gs, Int i, Int at, List(Int) acc) {
+    if (i >= gs.len()) { return acc.concat(be32(at)); }
+    return loca_of(gs, i + 1, at + pad4(gs[i]).len(), acc.concat(be32(at)));
+}
+
+List(Int) directory(List(Int) dir, List(List(Int)) ts, List(Str) tags, Int i, Int at, List(Int) body) {
+    if (i >= ts.len()) { return dir.concat(body); }
+    Str t = tags[i];
+    List(Int) e = [str_char_at(t, 0), str_char_at(t, 1), str_char_at(t, 2), str_char_at(t, 3)]
+        .concat(be32(0)).concat(be32(at)).concat(be32(ts[i].len()));
+    List(Int) tb = pad4(ts[i]);
+    return directory(dir.concat(e), ts, tags, i + 1, at + tb.len(), body.concat(tb));
+}
+
+/// A square of side `s` at the origin, its corners on the curve.
+List(Int) square(Int s) { return [0, 0, 0, s, s, s, s, 0]; }
+
+/// `n` points scattered through a 1000-unit box.
+List(Int) scatter(Int n, Int i, ListBuf(Int) b) {
+    if (i >= n) { return b.finish(); }
+    return scatter(n, i + 1, b.push(100 + (i * 37) % 800).push(100 + (i * 53) % 800));
+}
+
+/// The font's tables; a font that does not open is a test failure, shown
+/// as a font with no glyphs.
+Ttf opened(List(Int) f) {
+    return match (ttf_open(f)) {
+        Ok(t) => t,
+        Err(e) => Ttf { .b = [], .upem = 1000, .loca_long = 1, .nglyphs = 0, .nhm = 1, .ascent = 0, .descent = 0, .gap = 0,
+                        .cmap = 0, .loca = 0, .glyf = 0, .hmtx = 0, .kern = -1 }
+    };
+}
+
+Bool is_err(Result(List(Int), Str) r) { return match (r) { Ok(a) => false, Err(e) => true }; }
+
+Str err_of(Result(List(Int), Str) r) { return match (r) { Ok(a) => "", Err(e) => e }; }
+
+// ─── An honest font made the same way ──────────────────────────────
+
+test "a font built here draws, so the hostile ones below fail for their own reasons" {
+    // glyph 1 ("A") is a composite of two squares
+    List(Int) f = font_of(1000, [[], composite_glyph(2, 2, 100, 0), simple_glyph(0, 0, 500, 500, square(500), true)]);
+    Ttf t = opened(f);
+    expect(glyph_of(t, 65)).toEqual(1);
+    Int contours = match (outline_of(t, 1)) { Ok(o) => o.contours.len(), Err(e) => -1 };
+    expect(contours).toEqual(2);
+    Result(List(Int), Str) a = ttf_answer(f, 16);
+    expect(err_of(a)).toEqual("");
+    Bool parsed = match (a) { Ok(b) => match (font_parse(b, 1)) { Ok(font) => glyph_field(font, 65, 3) > 0, Err(e) => false }, Err(e) => false };
+    expect(parsed).toEqual(true);
+}
+
+// ─── GP-1: composites that multiply ────────────────────────────────
+
+/// Glyph 1 is 16 copies of glyph 2, which is 16 of glyph 3, which is 16
+/// of glyph 4, a simple glyph of ten points: 4368 components and 40960
+/// points from a font of a few hundred bytes. One more level of the same
+/// (four are allowed) makes it 655360 points; ten thousand points in the
+/// simple glyph, 655 million.
+List(Int) exploding_font() {
+    return font_of(1000, [[], composite_glyph(2, 16, 1, 0), composite_glyph(3, 16, 1, 0), composite_glyph(4, 16, 1, 0),
+                          simple_glyph(0, 0, 1000, 1000, scatter(10, 0, ListBuf()), true)]);
+}
+
+test "composites that multiply are refused, not expanded" {
+    Ttf t = opened(exploding_font());
+    Str why = match (outline_of(t, 1)) { Ok(o) => "", Err(e) => e };
+    expect(why).toEqual("ttf: the glyph has too many components or points");
+    expect(err_of(ttf_answer(exploding_font(), 16))).toEqual("ttf: the glyph has too many components or points");
+}
+
+test "a composite of many components within the budget still reads" {
+    // 16 x 16 copies of a square: 256 components, 1024 points
+    List(Int) f = font_of(1000, [[], composite_glyph(2, 16, 1, 0), composite_glyph(3, 16, 1, 0), simple_glyph(0, 0, 500, 500, square(500), true)]);
+    Int contours = match (outline_of(opened(f), 1)) { Ok(o) => o.contours.len(), Err(e) => -1 };
+    expect(contours).toEqual(256);
+}

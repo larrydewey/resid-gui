@@ -19,7 +19,8 @@
 // every pixel is exact. Integers only, so a glyph is the same everywhere.
 //
 // The file is untrusted: every read is bounds-checked, counts are capped,
-// composites nest at most four deep, and anything malformed is an `Err`.
+// composites nest at most four deep and expand to at most 1024 components
+// and 20000 points a glyph, and anything malformed is an `Err`.
 
 import "color.resid";
 import "font.resid";
@@ -163,8 +164,52 @@ Span glyph_span(Ttf t, Int g) {
 
 Outline no_outline() { return Outline { .contours = [], .xmin = 0, .ymin = 0, .xmax = 0, .ymax = 0 }; }
 
-/// Glyph `g`'s outline: contours of points in font units.
-pub Result(Outline, Str) outline_of(Ttf t, Int g) { return outline_at(t, g, 0); }
+/// Glyph `g`'s outline: contours of points in font units. A glyph whose
+/// composites would expand past `max_components` components or
+/// `max_points` points is refused before anything is built: four levels
+/// of sixteen components each already make 65536 copies of one outline.
+pub Result(Outline, Str) outline_of(Ttf t, Int g) {
+    Cost c = cost_at(t, g, 0, Cost { .comps = 0, .points = 0 });
+    if (over(c)) { return Err("ttf: the glyph has too many components or points"); }
+    return outline_at(t, g, 0);
+}
+
+/// Components and points per glyph, composites expanded.
+pub Int max_components() { return 1024; }
+pub Int max_points() { return 20000; }
+
+/// What expanding a glyph costs so far.
+type Cost = { Int comps; Int points; };
+
+Bool over(Cost c) { return c.comps > max_components() || c.points > max_points(); }
+
+/// The cost of glyph `g` added to `c`, from the glyph headers alone: a
+/// simple glyph's last contour end, one count per component. It stops as
+/// soon as the budget is spent, so it reads at most `max_components()`
+/// component records whatever the font says. Malformed glyphs cost
+/// nothing here; `outline_at` refuses them.
+Cost cost_at(Ttf t, Int g, Int depth, Cost c) {
+    if (over(c) || depth > 4) { return c; }
+    Span s = glyph_span(t, g);
+    if (s.len < 10) { return c; }
+    Int nc = i16(t.b, s.at);
+    if (nc > 0) {
+        Int last = s.at + 10 + 2 * (nc - 1);
+        Int n = if (last + 2 <= s.at + s.len) { u16(t.b, last) + 1 } else { 0 };
+        return Cost { .comps = c.comps, .points = c.points + n };
+    }
+    if (nc == 0) { return c; }
+    return cost_parts(t, s.at + 10, s.at + s.len, depth, c);
+}
+
+Cost cost_parts(Ttf t, Int at, Int stop, Int depth, Cost c) {
+    if (over(c) || at + 4 > stop) { return c; }
+    Int flags = u16(t.b, at);
+    Int argsz = if ((flags & 1) != 0) { 4 } else { 2 };
+    Int scale = if ((flags & 8) != 0) { 2 } else { if ((flags & 64) != 0) { 4 } else { if ((flags & 128) != 0) { 8 } else { 0 } } };
+    Cost c2 = cost_at(t, u16(t.b, at + 2), depth + 1, Cost { .comps = c.comps + 1, .points = c.points });
+    return if ((flags & 32) != 0) { cost_parts(t, at + 4 + argsz + scale, stop, depth, c2) } else { c2 };
+}
 
 Result(Outline, Str) outline_at(Ttf t, Int g, Int depth) {
     if (depth > 4) { return Err("ttf: composite glyphs nest too deep"); }
@@ -174,7 +219,7 @@ Result(Outline, Str) outline_at(Ttf t, Int g, Int depth) {
     Int nc = i16(t.b, s.at);
     Outline box = Outline { .contours = [], .xmin = i16(t.b, s.at + 2), .ymin = i16(t.b, s.at + 4), .xmax = i16(t.b, s.at + 6), .ymax = i16(t.b, s.at + 8) };
     if (nc >= 0) { return simple(t.b, s, nc, box); }
-    return composite(t, s.at + 10, s.at + s.len, box, depth, []);
+    return composite(t, s.at + 10, s.at + s.len, box, depth, ListBuf());
 }
 
 /// A simple glyph: contour ends, instructions (skipped), flags, x and y.
@@ -195,7 +240,7 @@ Result(Outline, Str) simple(List(Int) b, Span s, Int nc, Outline box) {
     if (xs.at < 0) { return Err("ttf: x coordinates overrun the glyph"); }
     CoordRun ys = read_coords(b, xs.at, stop, fr.flags, 4, 32, 0, 0, ListBuf());
     if (ys.at < 0) { return Err("ttf: y coordinates overrun the glyph"); }
-    return Ok(Outline { .contours = split(fr.flags, xs.vs, ys.vs, ends, 0, 0, []), .xmin = box.xmin, .ymin = box.ymin, .xmax = box.xmax, .ymax = box.ymax });
+    return Ok(Outline { .contours = split(fr.flags, xs.vs, ys.vs, ends, 0, 0, ListBuf()), .xmin = box.xmin, .ymin = box.ymin, .xmax = box.xmax, .ymax = box.ymax });
 }
 
 List(Int) u16s(List(Int) b, Int at, Int n, ListBuf(Int) acc) {
@@ -246,10 +291,10 @@ CoordRun read_coords(List(Int) b, Int at, Int stop, List(Int) flags, Int short, 
     return read_coords(b, at + need, stop, flags, short, same, i + 1, v + d, acc.push(v + d));
 }
 
-List(List(Pt)) split(List(Int) flags, List(Int) xs, List(Int) ys, List(Int) ends, Int c, Int start, List(List(Pt)) acc) {
-    if (c >= ends.len()) { return acc; }
+List(List(Pt)) split(List(Int) flags, List(Int) xs, List(Int) ys, List(Int) ends, Int c, Int start, ListBuf(List(Pt)) acc) {
+    if (c >= ends.len()) { return acc.finish(); }
     Int stop = ends[c] + 1;
-    return split(flags, xs, ys, ends, c + 1, stop, acc.concat([pts(flags, xs, ys, start, stop, ListBuf())]));
+    return split(flags, xs, ys, ends, c + 1, stop, acc.push(pts(flags, xs, ys, start, stop, ListBuf())));
 }
 
 List(Pt) pts(List(Int) flags, List(Int) xs, List(Int) ys, Int i, Int stop, ListBuf(Pt) acc) {
@@ -259,29 +304,40 @@ List(Pt) pts(List(Int) flags, List(Int) xs, List(Int) ys, Int i, Int stop, ListB
 
 /// A composite glyph: its components' outlines, each moved by its offset.
 /// Scales are read past and not applied (rare in the ASCII range).
-Result(Outline, Str) composite(Ttf t, Int at, Int stop, Outline box, Int depth, List(List(Pt)) acc) {
-    if (at + 4 > stop) { return Err("ttf: composite overruns the glyph"); }
+Result(Outline, Str) composite(Ttf t, Int at, Int stop, Outline box, Int depth, ListBuf(List(Pt)) acc) {
+    if (at + 4 > stop) {
+        _ = acc.finish();
+        return Err("ttf: composite overruns the glyph");
+    }
     Int flags = u16(t.b, at);
     Int g = u16(t.b, at + 2);
     Bool words = (flags & 1) != 0;
     Int argsz = if (words) { 4 } else { 2 };
-    if (at + 4 + argsz > stop) { return Err("ttf: composite overruns the glyph"); }
+    if (at + 4 + argsz > stop) {
+        _ = acc.finish();
+        return Err("ttf: composite overruns the glyph");
+    }
     Int dx = if ((flags & 2) == 0) { 0 } else { if (words) { i16(t.b, at + 4) } else { sbyte(u8at(t.b, at + 4)) } };
     Int dy = if ((flags & 2) == 0) { 0 } else { if (words) { i16(t.b, at + 6) } else { sbyte(u8at(t.b, at + 5)) } };
     Int scale = if ((flags & 8) != 0) { 2 } else { if ((flags & 64) != 0) { 4 } else { if ((flags & 128) != 0) { 8 } else { 0 } } };
     Int next = at + 4 + argsz + scale;
     return match (outline_at(t, g, depth + 1)) {
-        Ok(o) => if ((flags & 32) != 0) { composite(t, next, stop, box, depth, acc.concat(moved(o.contours, dx, dy, 0, []))) }
-                 else { Ok(Outline { .contours = acc.concat(moved(o.contours, dx, dy, 0, [])), .xmin = box.xmin, .ymin = box.ymin, .xmax = box.xmax, .ymax = box.ymax }) },
-        Err(e) => Err(e)
+        Ok(o) => if ((flags & 32) != 0) { composite(t, next, stop, box, depth, moved(o.contours, dx, dy, 0, acc)) }
+                 else { Ok(Outline { .contours = moved(o.contours, dx, dy, 0, acc).finish(), .xmin = box.xmin, .ymin = box.ymin, .xmax = box.xmax, .ymax = box.ymax }) },
+        Err(e) => fail_with(acc, e)
     };
+}
+
+Result(Outline, Str) fail_with(ListBuf(List(Pt)) acc, Str e) {
+    _ = acc.finish();
+    return Err(e);
 }
 
 Int sbyte(Int v) { return if (v >= 128) { v - 256 } else { v }; }
 
-List(List(Pt)) moved(List(List(Pt)) cs, Int dx, Int dy, Int i, List(List(Pt)) acc) {
+ListBuf(List(Pt)) moved(List(List(Pt)) cs, Int dx, Int dy, Int i, ListBuf(List(Pt)) acc) {
     if (i >= cs.len()) { return acc; }
-    return moved(cs, dx, dy, i + 1, acc.concat([move_pts(cs[i], dx, dy, 0, ListBuf())]));
+    return moved(cs, dx, dy, i + 1, acc.push(move_pts(cs[i], dx, dy, 0, ListBuf())));
 }
 
 List(Pt) move_pts(List(Pt) ps, Int dx, Int dy, Int i, ListBuf(Pt) acc) {

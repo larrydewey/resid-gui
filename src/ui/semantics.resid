@@ -46,9 +46,41 @@ pub Int act_scroll() { return 8; }
 /// The semantics of `w` laid out in `r`, in the built-in font.
 pub List(SemNode) semantics(Widget w, Rect r, UiState ui) { return semantics_in(w, r, ui, font_builtin()); }
 
-/// `semantics` with text in font `f`.
+/// `semantics` with text in font `f`. Only what can be seen is a node: a
+/// widget scrolled out of its `Scroll` or `Rows`, laid out outside `r`, or
+/// under a later layer of a `Stack` that would take a click at its centre
+/// is left out, so a screen reader neither reads nor acts on what the
+/// pointer cannot reach (`assist` in input.resid checks the same).
 pub List(SemNode) semantics_in(Widget w, Rect r, UiState ui, Font f) {
-    return sem_node(ListBuf(), w, r, ui, f, 0, -1).finish();
+    return sem_node(ListBuf(), w, r, ui, f, 0, -1, r, []).finish();
+}
+
+/// A later layer of a `Stack`: what is drawn over the earlier ones.
+type Layer = { Widget w; Rect r; };
+
+/// Whether a widget takes the pointer (`interactive` in input.resid).
+Bool takes_input(Widget w) {
+    Int role = role_of(w);
+    return role == role_button() || role == role_checkbox() || role == role_textbox() || role == role_slider();
+}
+
+/// Whether a click at (`x`, `y`) would land on something in `w` laid out
+/// in `r`.
+Bool hit_any(Widget w, Rect r, Int x, Int y, Font f) {
+    if (!rect_contains(r, x, y)) { return false; }
+    if (takes_input(w)) { return true; }
+    return hit_any_kids(children(w), child_rects_in(w, r, f), x, y, 0, f);
+}
+
+Bool hit_any_kids(List(Widget) xs, List(Rect) rs, Int x, Int y, Int i, Font f) {
+    if (i >= xs.len() || i >= rs.len()) { return false; }
+    return hit_any(xs[i], rs[i], x, y, f) || hit_any_kids(xs, rs, x, y, i + 1, f);
+}
+
+/// Whether the centre of `v` is under a layer that takes clicks.
+Bool covered(List(Layer) over, Rect v, Font f, Int i) {
+    if (i >= over.len()) { return false; }
+    return hit_any(over[i].w, over[i].r, v.x + v.w / 2, v.y + v.h / 2, f) || covered(over, v, f, i + 1);
 }
 
 /// The role of a widget, or 0 for one with no node of its own.
@@ -85,25 +117,38 @@ SemNode mk(Int id, Int parent, Int role, Int flags, Rect r, Int actions, Str lab
     return SemNode { .id = id, .parent = parent, .role = role, .flags = flags, .bounds = r, .actions = actions, .label = label, .value = value };
 }
 
-ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Font f, Int id, Int parent) {
-    Bool own = role_of(w) != 0;
+/// `w`'s nodes, when the part of `r` inside `clip` shows and no layer in
+/// `over` covers it; its children's either way (a child can lie outside
+/// its parent), hanging from the nearest node shown.
+ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Font f, Int id, Int parent, Rect clip, List(Layer) over) {
+    Rect v = rect_intersect(r, clip);
+    Bool own = role_of(w) != 0 && !rect_is_empty(v) && !covered(over, v, f, 0);
     ListBuf(SemNode) here = if (own) { acc.push(node_of(w, r, ui, id, parent)) } else { acc };
     Int up = if (own) { id } else { parent };
     return match (w) {
-        Rows(o, rh, xs) => sem_rows(here, xs, r, o, rh, ui, f, rows_in_view(r, o, rh, xs.len()), 0, id + 1, up),
-        _ => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up)
+        Rows(o, rh, xs) => sem_rows(here, xs, r, o, rh, ui, f, rows_in_view(r, o, rh, xs.len()), 0, id + 1, up, v, over),
+        Scroll(o, c) => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up, v, over, false),
+        Stack(xs) => sem_kids(here, xs, child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, over, true),
+        _ => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, over, false)
     };
 }
 
-ListBuf(SemNode) sem_kids(ListBuf(SemNode) acc, List(Widget) xs, List(Rect) rs, UiState ui, Font f, Int i, Int id, Int parent) {
+/// The children; in a `Stack` (`layered`) each under the ones after it.
+ListBuf(SemNode) sem_kids(ListBuf(SemNode) acc, List(Widget) xs, List(Rect) rs, UiState ui, Font f, Int i, Int id, Int parent, Rect clip, List(Layer) over, Bool layered) {
     if (i >= xs.len() || i >= rs.len()) { return acc; }
-    return sem_kids(sem_node(acc, xs[i], rs[i], ui, f, id, parent), xs, rs, ui, f, i + 1, id + node_count(xs[i]), parent);
+    List(Layer) above = if (layered) { over.concat(layers(xs, rs, i + 1, ListBuf())) } else { over };
+    return sem_kids(sem_node(acc, xs[i], rs[i], ui, f, id, parent, clip, above), xs, rs, ui, f, i + 1, id + node_count(xs[i]), parent, clip, over, layered);
 }
 
-ListBuf(SemNode) sem_rows(ListBuf(SemNode) acc, List(Widget) xs, Rect r, Int o, Int rh, UiState ui, Font f, RowSpan span, Int i, Int id, Int parent) {
+List(Layer) layers(List(Widget) xs, List(Rect) rs, Int i, ListBuf(Layer) acc) {
+    if (i >= xs.len() || i >= rs.len()) { return acc.finish(); }
+    return layers(xs, rs, i + 1, acc.push(Layer { .w = xs[i], .r = rs[i] }));
+}
+
+ListBuf(SemNode) sem_rows(ListBuf(SemNode) acc, List(Widget) xs, Rect r, Int o, Int rh, UiState ui, Font f, RowSpan span, Int i, Int id, Int parent, Rect clip, List(Layer) over) {
     if (i >= xs.len() || i >= span.last) { return acc; }
-    ListBuf(SemNode) next = if (i >= span.first) { sem_node(acc, xs[i], row_rect(r, o, rh, i), ui, f, id, parent) } else { acc };
-    return sem_rows(next, xs, r, o, rh, ui, f, span, i + 1, id + node_count(xs[i]), parent);
+    ListBuf(SemNode) next = if (i >= span.first) { sem_node(acc, xs[i], row_rect(r, o, rh, i), ui, f, id, parent, clip, over) } else { acc };
+    return sem_rows(next, xs, r, o, rh, ui, f, span, i + 1, id + node_count(xs[i]), parent, clip, over);
 }
 
 /// Whether two nodes say the same thing.
@@ -193,4 +238,19 @@ test "a diff carries what changed and what went away" {
     expect(d.put.len()).toEqual(1);
     expect(d.put[0].id).toEqual(6);
     expect(sem_diff(a, a).put.len()).toEqual(0);
+}
+
+test "a node scrolled out of view or under a layer that takes clicks is not read" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // a button scrolled 500 pixels above a view 100 tall
+    Widget scrolled = Scroll(500, Column([Button("gone", Custom(1)), Text("x")]));
+    Str said = sem_speech(semantics(scrolled, r, ui_new()));
+    expect(str_contains(said, "gone")).toEqual(false);
+    expect(str_contains(said, "scroll area")).toEqual(true);
+    // a button drawn over another in a Stack: only the top one is there
+    Str stack = sem_speech(semantics(Stack([Button("del", Custom(1)), Button("cover", Custom(2))]), r, ui_new()));
+    expect(stack).toEqual("button \"cover\"\n");
+    // a layer that takes no clicks hides nothing
+    Str text = sem_speech(semantics(Stack([Button("under", Custom(1)), Text("over")]), r, ui_new()));
+    expect(text).toEqual("button \"under\"\ntext \"over\"\n");
 }

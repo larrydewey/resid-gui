@@ -149,10 +149,14 @@ UiStep none(UiState ui) { return UiStep { .ui = ui, .out = [] }; }
 
 /// An assistive action on widget `node`: activating a button or checkbox
 /// raises its message as a click would; focusing a text input focuses it.
-/// Anything else, or a node that is not on screen, does nothing.
+/// Anything else, or a node a click could not reach (outside the window,
+/// scrolled out of view, under another layer of a `Stack`), does nothing:
+/// a screen reader acts on what is shown, as the pointer does.
 UiStep assist(UiState ui, Widget root, Rect area, Int node, Int act, Font fo) {
     Found f = find_in(root, area, node, fo);
     if (f.id < 0) { return none(ui); }
+    Rect v = rect_intersect(f.r, area);
+    if (rect_is_empty(v) || hit_in(root, area, v.x + v.w / 2, v.y + v.h / 2, fo).id != node) { return none(ui); }
     return match (f.w) {
         Button(s, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
         Checkbox(s, c, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
@@ -422,4 +426,26 @@ test "an assistive activation clicks; an assistive focus focuses" {
     expect(clicked).toEqual(true);
     expect(ui_event(ui_new(), v, r, Assist(2, act_focus())).ui.focus).toEqual(2);
     expect(ui_event(ui_new(), v, r, Assist(9, act_activate())).out.len()).toEqual(1);
+}
+
+/// Whether the step raised `m`.
+Bool raised(UiStep s, Msg m, Int i) {
+    if (i >= s.out.len()) { return false; }
+    Bool hit = match (s.out[i]) { AppMsg(x) => msg_eq(x, m), _ => false };
+    return hit || raised(s, m, i + 1);
+}
+
+test "an assistive action reaches only what a click could" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // Stack 0, Button "del" 1, Button "cover" 2: cover is drawn over del
+    Widget stacked = Stack([Button("del", Custom(1)), Button("cover", Custom(2))]);
+    expect(raised(ui_event(ui_new(), stacked, r, Assist(1, act_activate())), Custom(1), 0)).toEqual(false);
+    expect(raised(ui_event(ui_new(), stacked, r, Assist(2, act_activate())), Custom(2), 0)).toEqual(true);
+    // Scroll 0, Column 1, Button 2, scrolled 500 above a view 100 tall
+    Widget scrolled = Scroll(500, Column([Button("gone", Custom(1)), Text("x")]));
+    expect(raised(ui_event(ui_new(), scrolled, r, Assist(2, act_activate())), Custom(1), 0)).toEqual(false);
+    // a text input laid out past the window's bottom cannot be focused
+    Widget below = Column([Spacer, TextInput("x", 1, Custom(3))]);
+    UiStep low = ui_event(ui_new(), below, Rect { .x = 0, .y = 0, .w = 200, .h = 0 }, Assist(2, act_focus()));
+    expect(low.ui.focus).toEqual(-1);
 }

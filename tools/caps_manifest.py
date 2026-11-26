@@ -51,33 +51,91 @@ NO_HONEST_ENTITLEMENT = {
 }
 
 
+def _ident(ch):
+    return ch.isalnum() or ch == "_"
+
+
+def _string_end(source, i, kind):
+    """The index just past the string literal whose opening quote is at `i`.
+    `kind` is "" (plain or byte), "r" (no escapes) or "f" (holes, which are
+    expressions and may hold strings of their own: f"{g("a}")}")."""
+    n = len(source)
+    j = i + 1
+    while j < n:
+        ch = source[j]
+        if ch == "\\" and kind != "r":
+            j += 2
+        elif ch == '"':
+            return j + 1
+        elif kind == "f" and source.startswith("{{", j):
+            j += 2
+        elif kind == "f" and ch == "{":
+            j = _hole_end(source, j + 1)
+        else:
+            j += 1
+    return n
+
+
+def _hole_end(source, j):
+    """The index just past the `}` closing an f-string hole whose text starts at `j`."""
+    n = len(source)
+    depth = 1
+    while j < n:
+        k = _literal_at(source, j)
+        if k is not None:
+            j = k
+            continue
+        ch = source[j]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return n
+
+
+def _literal_at(source, i):
+    """If a string or character literal starts at `i`, the index just past
+    it; otherwise None."""
+    n = len(source)
+    c = source[i]
+    if c == '"':
+        return _string_end(source, i, "")
+    if c in "frb" and i + 1 < n and source[i + 1] == '"' and (i == 0 or not _ident(source[i - 1])):
+        return _string_end(source, i + 1, "r" if c == "r" else "f" if c == "f" else "")
+    if c == "'":
+        if source.startswith("\\", i + 1):
+            k = source.find("'", i + 3)
+            if 0 <= k <= i + 6:
+                return k + 1
+        elif i + 2 < n and source[i + 2] == "'":
+            return i + 3
+    return None
+
+
 def code_only(source):
-    """`source` with comments and string literals blanked (same length), so
-    a `@requires` or an `Int main()` in either is not taken for code."""
+    """`source` with comments and string and character literals blanked (same
+    length, newlines kept), so a `@requires` or an `Int main()` in any of
+    them is not taken for code."""
     out = []
     i, n = 0, len(source)
     while i < n:
-        c = source[i]
         if source.startswith("//", i):
             j = source.find("\n", i)
             j = n if j < 0 else j
-            out.append(" " * (j - i))
-            i = j
         elif source.startswith("/*", i):
             j = source.find("*/", i + 2)
             j = n if j < 0 else j + 2
-            out.append("".join(ch if ch == "\n" else " " for ch in source[i:j]))
-            i = j
-        elif c == '"':
-            j = i + 1
-            while j < n and source[j] != '"':
-                j += 2 if source[j] == "\\" else 1
-            j = min(j + 1, n)
-            out.append('"' + " " * (j - i - 2) + '"' if j - i >= 2 else " " * (j - i))
-            i = j
         else:
-            out.append(c)
-            i += 1
+            j = _literal_at(source, i)
+            if j is None:
+                out.append(source[i])
+                i += 1
+                continue
+        out.append("".join(ch if ch == "\n" else " " for ch in source[i:j]))
+        i = j
     return "".join(out)
 
 
@@ -149,6 +207,15 @@ def self_test():
               "/* @requires(clock(readonly))\nInt main() */\n"
               "@requires(display, filesystem)\nInt main() { return 0; }\n")
     assert requires_of_main(fooled) == [("display", None), ("filesystem", None)], requires_of_main(fooled)
+    # an f-string's hole holds strings of its own; a raw string has no
+    # escapes; a character literal may be a quote (R3-5)
+    for trick in ('Str s() { return f"{g("@requires(filesystem) Int main()")} {{"; }\n',
+                  'Str s() { return f"{ {"a}": 1}["a}"] }@requires(process) Int main()"; }\n',
+                  'Str s() { return r"C:\\"; } Str t() { return "@requires(device) Int main()"; }\n',
+                  "Bool q(Byte c) { return c == '\"'; } Str t() { return \"@requires(device) Int main()\"; }\n",
+                  "Bool q(Byte c) { return c == '\\''; } Str t() { return \"@requires(device) Int main()\"; }\n"):
+        got = requires_of_main(trick + "@requires(display)\nInt main() { return 0; }\n")
+        assert got == [("display", None)], (trick, got)
     print("caps_manifest: self-test passed")
     return 0
 

@@ -92,6 +92,14 @@ if ! python3 -I "$ROOT/tools/caps_manifest.py" --self-test >"$OUT/caps.log" 2>&1
     fail=$((fail + 1))
 fi
 
+# The reference shell against a core that lies about its buffers.
+total=$((total + 1))
+if ! python3 -I "$ROOT/tools/rsp_shell.py" --self-test >"$OUT/shell.log" 2>&1; then
+    cat "$OUT/shell.log"
+    echo "FAILED: tools/rsp_shell.py --self-test"
+    fail=$((fail + 1))
+fi
+
 # The documents: their programs type-check and their signatures exist.
 total=$((total + 1))
 if ! python3 -I "$ROOT/tools/check_docs.py" "$RESIDC"; then

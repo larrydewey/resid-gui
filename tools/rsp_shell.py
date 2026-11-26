@@ -6,8 +6,9 @@ show the protocol is implementable by a shell author who never reads the
 core. It does what a macOS or Windows shell does, minus the window:
 
   * starts the core program with RSP_SOCKET naming its end of a socket pair,
-  * answers Hello and Window, takes the buffers' descriptors and maps them,
-  * on every Present, reads the buffer (saved as a PNG when asked),
+  * answers Hello and Window, takes the buffers' descriptors (checking
+    each is as large as its Attach says),
+  * on every Present, copies the buffer out (saved as a PNG when asked),
     releases it and paces the next frame,
   * keeps the semantics tree and prints what a screen reader would say,
   * drives a script: click a node by its label, act on it as an assistive
@@ -28,7 +29,6 @@ Actions: wait:TEXT  click:LABEL  assist:LABEL  type:TEXT  key:CODE
 """
 
 import argparse
-import mmap
 import os
 import socket
 import struct
@@ -40,6 +40,9 @@ MAX_MESSAGE = 4 * 1024 * 1024
 MAX_STRING = 65536
 MAX_BYTES = 1024 * 1024
 MAX_WORDS = 16384
+MAX_BUFFERS = 8          # attached at once; the core uses two
+MAX_NODES = 65536        # semantics nodes kept
+MAX_FDS = 16             # descriptors waiting for their Attach
 
 TO_SHELL = {1: ("Hello", "is"), 2: ("Window", "siiiii"), 3: ("Attach", "iiii"), 4: ("Present", "ia"),
             5: ("Detach", "i"), 6: ("Cursor", "i"), 7: ("TextInputState", "iiiiiisii"), 8: ("SemReset", ""),
@@ -115,6 +118,12 @@ def decode(msg):
     return name, out
 
 
+def printable(text):
+    """`text` safe to print on a terminal: control characters (escape
+    sequences included) shown as \\xNN, never sent."""
+    return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" for c in text)
+
+
 class Shell:
     def __init__(self, core, size, scale, out_dir, theme=0):
         self.size, self.scale, self.out_dir, self.theme = size, scale, out_dir, theme
@@ -141,9 +150,13 @@ class Shell:
         except socket.timeout:
             return
         if not data:
+            for fd in fds:
+                os.close(fd)
             self.bye = True
             return
         self.fds.extend(fds)
+        while len(self.fds) > MAX_FDS:
+            os.close(self.fds.pop(0))
         self.buf += data
         while len(self.buf) >= 8:
             size, op = struct.unpack_from("<II", self.buf, 0)
@@ -152,7 +165,11 @@ class Shell:
             if len(self.buf) < size:
                 break
             msg, self.buf = self.buf[:size], self.buf[size:]
-            self.handle(*decode(msg))
+            try:
+                self.handle(*decode(msg))
+            except (struct.error, ValueError, IndexError, KeyError, TypeError, OSError) as e:
+                # whatever the core sent, the shell reports it, never a traceback
+                raise ProtocolError(f"bad message from the core: {e}") from None
 
     # ─── messages ───
     def handle(self, name, f):
@@ -170,22 +187,40 @@ class Shell:
             fd = self.fds.pop(0)
             bid, w, h, stride = f
             if w < 1 or h < 1 or stride < 4 * w or stride * h > 256 * 1024 * 1024:
+                os.close(fd)
                 raise ProtocolError("impossible buffer")
-            self.buffers[bid] = (mmap.mmap(fd, stride * h, prot=mmap.PROT_READ), w, h, stride)
-            os.close(fd)
+            # The buffer is the core's memory, and the core may shrink it at
+            # any time: a mapping would then fault (SIGBUS) on the next read.
+            # Keep the descriptor and copy the pixels out with pread, which
+            # comes back short instead.
+            if os.fstat(fd).st_size < stride * h:
+                os.close(fd)
+                raise ProtocolError("buffer smaller than its Attach says")
+            old = self.buffers.pop(bid, None)
+            if old:
+                os.close(old[0])
+            if len(self.buffers) >= MAX_BUFFERS:
+                os.close(fd)
+                raise ProtocolError("too many buffers attached")
+            self.buffers[bid] = (fd, w, h, stride)
         elif name == "Detach":
             entry = self.buffers.pop(f[0], None)
             if entry:
-                entry[0].close()
+                os.close(entry[0])
         elif name == "Present":
             if f[0] not in self.buffers:
                 raise ProtocolError("Present of a buffer never attached")
-            mem, w, h, stride = self.buffers[f[0]]
-            self.last_frame = (bytes(mem[:stride * h]), w, h, stride)
+            fd, w, h, stride = self.buffers[f[0]]
+            pixels = os.pread(fd, stride * h, 0)
+            if len(pixels) < stride * h:
+                raise ProtocolError("buffer shrank under the shell")
+            self.last_frame = (pixels, w, h, stride)
             self.presents += 1
             self.send("Release", f[0])
             self.send("FrameDone")
         elif name == "SemPut":
+            if f[0] not in self.pending and len(self.tree) + len(self.pending) >= MAX_NODES:
+                raise ProtocolError("too many semantics nodes")
             self.pending[f[0]] = dict(id=f[0], parent=f[1], role=f[2], flags=f[3], x=f[4], y=f[5], w=f[6], h=f[7],
                                       actions=f[8], label=f[9], value=f[10])
         elif name == "SemRemove":
@@ -205,9 +240,9 @@ class Shell:
             role = ROLES[n["role"]] if 0 <= n["role"] < len(ROLES) else "group"
             parts = [role]
             if n["label"]:
-                parts.append(f'"{n["label"]}"')
+                parts.append(f'"{printable(n["label"])}"')
             if n["value"]:
-                parts.append(f'= {n["value"]}')
+                parts.append(f'= {printable(n["value"])}')
             if n["role"] == 3:
                 parts.append("checked" if n["flags"] & 1 else "not checked")
             if n["flags"] & 2:
@@ -298,7 +333,60 @@ class Shell:
             self.pump(0.05)
 
 
+def self_test():
+    """A core that lies, without a core: messages handed to the shell."""
+    sh = Shell.__new__(Shell)
+    sh.size, sh.scale, sh.out_dir, sh.theme = None, 1, ".", 0
+    sh.sock, sh.buf, sh.fds = None, b"", []
+    sh.buffers, sh.tree, sh.pending, sh.gone = {}, {}, {}, set()
+    sh.presents, sh.last_frame, sh.bye, sh.title = 0, None, False, ""
+    sent = []
+    sh.send = lambda name, *fields: sent.append(name)
+
+    def refused(name, fields, why):
+        try:
+            sh.handle(name, fields)
+        except ProtocolError as e:
+            assert why in str(e), e
+            return
+        raise AssertionError(f"{name} {fields} was accepted")
+
+    # a 4 x 4 buffer (64 bytes) whose memory is 16 bytes: refused, where a
+    # mapping would fault on the first Present
+    small = os.memfd_create("rsp-self-test")
+    os.ftruncate(small, 16)
+    sh.fds.append(small)
+    refused("Attach", [1, 4, 4, 16], "smaller than its Attach")
+    # an honest one, then the core shrinks it: the Present is refused
+    fd = os.memfd_create("rsp-self-test")
+    os.ftruncate(fd, 64)
+    sh.fds.append(fd)
+    sh.handle("Attach", [2, 4, 4, 16])
+    sh.handle("Present", [2, []])
+    assert sh.presents == 1 and len(sh.last_frame[0]) == 64
+    os.ftruncate(fd, 8)
+    refused("Present", [2, []], "shrank")
+    # a second Attach of the same id replaces the first, closing it
+    fd2 = os.memfd_create("rsp-self-test")
+    os.ftruncate(fd2, 64)
+    sh.fds.append(fd2)
+    sh.handle("Attach", [2, 4, 4, 16])
+    try:
+        os.fstat(fd)
+        raise AssertionError("the replaced buffer's descriptor is still open")
+    except OSError:
+        pass
+    # a label that is a terminal escape is spoken, not obeyed
+    sh.handle("SemPut", [1, -1, 2, 0, 0, 0, 10, 10, 1, "\x1b[2Jok\x9b", ""])
+    sh.handle("SemCommit", [])
+    assert sh.speech() == ['button "\\x1b[2Jok\\x9b"'], sh.speech()
+    print("rsp_shell: self-test passed")
+    return 0
+
+
 def main():
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("core")
     ap.add_argument("--size", default="")

@@ -130,6 +130,7 @@ pub Result(Font, Str) font_parse(List(Int) b, Int scale) {
     ListBuf(Int) gb = ListBuf();
     List(Int) glyphs = read_glyphs(b, 0, gb);
     if (!glyphs_ok(glyphs, aw, ah, 0)) { return Err("font: a glyph lies outside the atlas"); }
+    if (!glyphs_fit(glyphs, line, 0)) { return Err("font: a glyph is too large for its line"); }
     Map(Int, Int) none = {};
     return Ok(Font { .scale = if (scale < 1) { 1 } else { scale }, .px = line, .ascent = ascent, .line = line, .glyphs = glyphs,
                      .kern = read_kern(b, kerns, 0, none), .aw = aw, .ah = ah, .atlas = b[atlas_offset()..(atlas_offset() + aw * ah)] });
@@ -147,6 +148,14 @@ Bool glyphs_ok(List(Int) g, Int aw, Int ah, Int i) {
         && g[k + 5] >= 0 && g[k + 6] >= 0 && g[k + 5] + g[k + 3] <= aw && g[k + 6] + g[k + 4] <= ah
         && g[k + 1] > -1024 && g[k + 1] < 1024 && g[k + 2] > -1024 && g[k + 2] < 2048;
     return ok && glyphs_ok(g, aw, ah, i + 1);
+}
+
+/// Every glyph at most four lines wide and two lines tall: drawing a
+/// glyph costs its pixels, so a glyph's size is bounded by the line's.
+Bool glyphs_fit(List(Int) g, Int line, Int i) {
+    if (i >= 95) { return true; }
+    Int k = i * 7;
+    return g[k + 3] <= 4 * line && g[k + 4] <= 2 * line && glyphs_fit(g, line, i + 1);
 }
 
 Map(Int, Int) read_kern(List(Int) b, Int n, Int i, Map(Int, Int) m) {

@@ -41,17 +41,19 @@ Canvas atlas_chars(Canvas c, Int pen, Int y0, Str s, Int n, Color col, Rect clip
     Int gw = glyph_field(f, ch, 3);
     Int gh = glyph_field(f, ch, 4);
     Bool visible = !rect_is_empty(rect_intersect(clip, Rect { .x = gx, .y = gy, .w = gw * k, .h = gh * k }));
-    Canvas next = if (visible) { atlas_glyph(c, gx, gy, glyph_field(f, ch, 5), glyph_field(f, ch, 6), gw, gh, col, clip, k, f, 0, 0) } else { c };
+    Rect cells = cells_in(clip, gx, gy, gw, gh, k);
+    Canvas next = if (visible && !rect_is_empty(cells)) { atlas_glyph(c, gx, gy, glyph_field(f, ch, 5), glyph_field(f, ch, 6), cells, col, clip, k, f, cells.x, cells.y) } else { c };
     Int adv = glyph_field(f, ch, 0) + if (i + 1 < n) { kern_of(f, ch, str_char_at(s, i + 1)) } else { 0 };
     return atlas_chars(next, pen + adv * k, y0, s, n, col, clip, k, f, i + 1);
 }
 
-Canvas atlas_glyph(Canvas c, Int gx, Int gy, Int ax, Int ay, Int gw, Int gh, Color col, Rect clip, Int k, Font f, Int x, Int y) {
-    if (y >= gh) { return c; }
-    if (x >= gw) { return atlas_glyph(c, gx, gy, ax, ay, gw, gh, col, clip, k, f, 0, y + 1); }
+/// The glyph's pixels in `cells` (the ones the clip shows), row by row.
+Canvas atlas_glyph(Canvas c, Int gx, Int gy, Int ax, Int ay, Rect cells, Color col, Rect clip, Int k, Font f, Int x, Int y) {
+    if (y >= cells.y + cells.h) { return c; }
+    if (x >= cells.x + cells.w) { return atlas_glyph(c, gx, gy, ax, ay, cells, col, clip, k, f, cells.x, y + 1); }
     Int a = f.atlas[(ay + y) * f.aw + ax + x];
     Canvas next = if (a == 0) { c } else { if (k == 1) { blend_pixel_clip(c, gx + x, gy + y, col, a, clip) } else { blend_block(c, gx + x * k, gy + y * k, k, col, a, clip, 0) } };
-    return atlas_glyph(next, gx, gy, ax, ay, gw, gh, col, clip, k, f, x + 1, y);
+    return atlas_glyph(next, gx, gy, ax, ay, cells, col, clip, k, f, x + 1, y);
 }
 
 Canvas blend_block(Canvas c, Int x, Int y, Int k, Color col, Int a, Rect clip, Int i) {

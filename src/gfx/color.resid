@@ -47,6 +47,19 @@ pub Rect rect_union(Rect a, Rect b) {
     return Rect { .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 };
 }
 
+/// Which cells of a grid `cols` x `rows` cells of `k` x `k` pixels, its
+/// corner at (`x0`, `y0`), touch `clip`: as a rectangle of cell indices,
+/// empty when none do. Drawing only those cells costs what the clip
+/// shows, not what the grid holds.
+pub Rect cells_in(Rect clip, Int x0, Int y0, Int cols, Int rows, Int k) {
+    Int s = if (k < 1) { 1 } else { k };
+    Rect d = rect_intersect(clip, Rect { .x = x0, .y = y0, .w = cols * s, .h = rows * s });
+    if (rect_is_empty(d)) { return rect_none(); }
+    Int cx = (d.x - x0) / s;
+    Int cy = (d.y - y0) / s;
+    return Rect { .x = cx, .y = cy, .w = (d.x + d.w - x0 + s - 1) / s - cx, .h = (d.y + d.h - y0 + s - 1) / s - cy };
+}
+
 /// Whether the point lies inside the rectangle.
 pub Bool rect_contains(Rect r, Int x, Int y) {
     return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;

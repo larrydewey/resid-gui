@@ -1,0 +1,76 @@
+// clip_cost.resid — drawing costs what the clip shows.
+//
+// A frame redraws its damaged rectangles, often a strip a pixel wide (a
+// caret) or a few rows. Each case here draws a shape far larger than such
+// a strip into it. The pixels must be the ones the whole shape gives
+// there, and the time must be the strip's, not the shape's: each case
+// takes seconds when every pixel of the shape is visited, and
+// milliseconds when only the clipped ones are.
+
+import "../src/gfx/canvas.resid";
+import "../src/gfx/color.resid";
+import "../src/gfx/font.resid";
+import "../src/gfx/text.resid";
+import "../src/gfx/image.resid";
+import "../src/gfx/shapes.resid";
+
+@requires(clock(readonly))
+Int now_ms() { return clock.monotonic_ns() / 1000000; }
+
+/// What the slow path takes is far above this on any machine; what the
+/// clipped one takes is far below.
+Int budget_ms() { return 2000; }
+
+// ─── GP-4: a glyph far larger than the clip ────────────────────────
+
+ListBuf(Int) put_le(ListBuf(Int) b, Int v) { return b.push(v & 255).push((v >> 8) & 255).push((v >> 16) & 255).push((v >> 24) & 255); }
+
+ListBuf(Int) put_n(ListBuf(Int) b, Int v, Int n) {
+    if (n <= 0) { return b; }
+    return put_n(b.push(v), v, n - 1);
+}
+
+ListBuf(Int) records(ListBuf(Int) b, Int i, Int gw, Int gh) {
+    if (i >= 95) { return b; }
+    // "A" (65) is a gw x gh block at the atlas's corner; the rest are empty
+    Bool big = i + 32 == 65;
+    ListBuf(Int) r = put_le(put_le(put_le(put_le(put_le(put_le(put_le(b, 10), 0), 0), if (big) { gw } else { 0 }), if (big) { gh } else { 0 }), 0), 0);
+    return records(r, i + 1, gw, gh);
+}
+
+/// A font answer whose "A" is a fully covered `gw` x `gh` block, on a
+/// line `line` pixels tall.
+List(Int) block_font(Int gw, Int gh, Int line) {
+    ListBuf(Int) h = put_le(put_le(put_le(put_le(put_le(put_le(put_le(put_le(ListBuf(), 826689362), 0), line / 2), line), gw), gh), 95), 0);
+    return put_n(put_n(records(h, 0, gw, gh), 0, 1024 * 4), 255, gw * gh).finish();
+}
+
+Font parsed(List(Int) a, Int scale) { return font_parse(a, scale) else { font_builtin() }; }
+
+@requires(clock(readonly))
+test "a glyph of half a million pixels drawn into one pixel costs the pixel" {
+    // 1024 x 512 on a 256-pixel line: four lines wide, two tall
+    Font f = parsed(block_font(1024, 512, 256), 1);
+    expect(font_is_builtin(f)).toEqual(false);
+    Color bg = rgb(255, 255, 255);
+    Canvas c = canvas_filled(64, 64, bg);
+    Rect one = Rect { .x = 40, .y = 40, .w = 1, .h = 1 };
+    Int t0 = now_ms();
+    // drawn at device scale 32 over an atlas made for 1: each glyph pixel
+    // a 32 x 32 block, half a billion blends for the whole glyph
+    Canvas d = render_text_font(c, 0, 0, "A", rgb(0, 0, 0), one, 32, f);
+    Int took = now_ms() - t0;
+    expect(pixel_at(d, 40, 40).r).toEqual(0);
+    expect(pixel_at(d, 41, 40).r).toEqual(255);
+    expect(pixel_at(d, 39, 40).r).toEqual(255);
+    expect(took < budget_ms()).toEqual(true);
+}
+
+test "a glyph taller than two lines is refused" {
+    Bool refused = match (font_parse(block_font(4, 2000, 20), 1)) { Ok(f) => false, Err(e) => e == "font: a glyph is too large for its line" };
+    expect(refused).toEqual(true);
+    Bool wide = match (font_parse(block_font(100, 10, 20), 1)) { Ok(f) => false, Err(e) => true };
+    expect(wide).toEqual(true);
+    Bool fits = match (font_parse(block_font(80, 40, 20), 1)) { Ok(f) => true, Err(e) => false };
+    expect(fits).toEqual(true);
+}

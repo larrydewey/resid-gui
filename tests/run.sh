@@ -38,7 +38,9 @@ for f in $(find "$ROOT/src" "$ROOT/tests" -name '*.resid' | sort); do
     rel=${f#"$ROOT"/}
     if grep -q '^Int main()' "$f"; then
         # shellcheck disable=SC2046
-        if ! "$RESIDC" "$f" -o "$OUT/prog" $(extra "$f") >/dev/null || ! "$OUT/prog"; then
+        # (no accessibility bus: tests/soak_bounded.resid measures the
+        # loop alone, and no test program needs one)
+        if ! "$RESIDC" "$f" -o "$OUT/prog" $(extra "$f") >/dev/null || ! env -u AT_SPI_BUS_ADDRESS -u DBUS_SESSION_BUS_ADDRESS "$OUT/prog"; then
             echo "FAILED: $rel"
             fail=$((fail + 1))
         fi

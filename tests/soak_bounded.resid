@@ -1,0 +1,31 @@
+// soak_bounded.resid — a short soak of the whole loop, held to fixed
+// memory bounds (bench/soak_counter.resid is the long one, which prints).
+//
+// The counter runs as a real program over the Wayland backend against
+// bench/soak_lib.resid's compositor: 120000 events, batches of pointer
+// moves and a click, some 6000 frames. The resident set is read at 10k,
+// 20k, 40k, 80k events and at the end. With this Resid compiler it sits
+// at about 13.4 MB from the first checkpoint on (17.3 MB with the one
+// bench/soak_counter.resid was first measured with).
+//
+// The bounds: the client exits 0 having drawn at least one frame per 100
+// events; the resident set after the 10k-event warm-up grows by less
+// than 4 MB to the end (a leak of one 64-byte record per turn would add
+// about 0.4 MB here, a display list per turn far more); the peak stays
+// under 64 MB. tests/run.sh runs it with no accessibility bus.
+
+import "../bench/soak_lib.resid";
+
+@requires(display, accessibility, clock(readonly), filesystem(readonly))
+Int main() {
+    Int total = 120000;
+    Soaked s = soak(total);
+    Int peak = status_kb("VmHWM:");
+    Int warm = if (s.marks.len() > 0) { s.marks[0] } else { -1 };
+    Int end = if (s.marks.len() > 0) { s.marks[s.marks.len() - 1] } else { -1 };
+    println(f"soak_bounded: {s.events} events, {s.frames} frames; rss {warm} kB after 10k, {end} kB at the end, peak {peak} kB");
+    Bool ok = s.code == 0 && s.events >= total && s.frames >= total / 100 && s.marks.len() >= 5
+              && warm > 0 && end - warm < 4096 && peak > 0 && peak < 65536;
+    if (!ok) { println("soak_bounded: FAILED"); }
+    return if (ok) { 0 } else { 1 };
+}

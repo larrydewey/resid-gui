@@ -185,8 +185,8 @@ UiStep assist(UiState ui, Widget root, Rect area, Int node, Int act, Font fo) {
     return match (f.w) {
         Button(s, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
         Checkbox(s, c, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
-        TextInput(s, k, m) => if ((act & act_focus()) != 0) { none(focus_on(ui, node, f.w)) } else { none(ui) },
-        PasswordInput(s, k, m) => if ((act & act_focus()) != 0) { none(focus_on(ui, node, f.w)) } else { none(ui) },
+        TextInput(s, k, m) => if ((act & act_focus()) != 0) { none(focus_on(ui, root, node, f.w)) } else { none(ui) },
+        PasswordInput(s, k, m) => if ((act & act_focus()) != 0) { none(focus_on(ui, root, node, f.w)) } else { none(ui) },
         _ => none(ui)
     };
 }
@@ -255,8 +255,8 @@ UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     Found f = hit_in(root, area, x, y, fo);
     UiState pressed = ui_with_press(ui, f.id, msg_of(f.w), label_of(f.w), f.r, if (f.id >= 0) { press_print(root, f.id) } else { 0 });
     return match (f.w) {
-        TextInput(s, k, m) => press_input(pressed, f.id, s, k, m, caret_at_in(f.r, s, k, x, fo)),
-        PasswordInput(s, k, m) => press_password(pressed, f.id, s, k, m, caret_at_in(f.r, password_bullets(s), k, x, fo)),
+        TextInput(s, k, m) => press_input(pressed, root, f.id, f.w, s, k, m, caret_at_in(f.r, s, k, x, fo)),
+        PasswordInput(s, k, m) => press_password(pressed, root, f.id, f.w, s, k, m, caret_at_in(f.r, password_bullets(s), k, x, fo)),
         Slider(v, m) => UiStep { .ui = ui_with_focus(pressed, -1), .out = [SliderSet(m, slider_value_at(f.r, x))] },
         _ => UiStep { .ui = ui_with_focus(pressed, -1), .out = [] }
     };
@@ -265,16 +265,16 @@ UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
 /// A press in an input puts the caret under the pointer and the anchor
 /// there too, so a drag selects; with Shift held the press extends the
 /// selection from where it was anchored, or from the old caret.
-UiStep press_input(UiState ui, Int id, Str s, Int k, Msg m, Int c) {
+UiStep press_input(UiState ui, Widget root, Int id, Widget w, Str s, Int k, Msg m, Int c) {
     Int keep = if (ui.focus == id && ui.anchor >= 0) { ui.anchor } else { k };
-    UiState u = ui_with_anchor(ui_with_focus_msg(ui, id, m, echoes(m, s)), if (ui.shift) { keep } else { c });
+    UiState u = ui_with_anchor(focus_on(ui, root, id, w), if (ui.shift) { keep } else { c });
     return UiStep { .ui = u, .out = [TextEdited(m, s, c)] };
 }
 
 /// `press_input` for a password: the caret placed among its bullets.
-UiStep press_password(UiState ui, Int id, Secret(Str) s, Int k, Msg m, Int c) {
+UiStep press_password(UiState ui, Widget root, Int id, Widget w, Secret(Str) s, Int k, Msg m, Int c) {
     Int keep = if (ui.focus == id && ui.anchor >= 0) { ui.anchor } else { k };
-    UiState u = ui_with_anchor(ui_with_focus_msg(ui, id, m, false), if (ui.shift) { keep } else { c });
+    UiState u = ui_with_anchor(focus_on(ui, root, id, w), if (ui.shift) { keep } else { c });
     return UiStep { .ui = u, .out = [PasswordEdited(m, s, c)] };
 }
 
@@ -383,54 +383,78 @@ Fp fp_kids(List(Widget) xs, Int i, Int upto, Fp acc) {
 /// Whether message `m` echoes text `s`: `Changed(s)`.
 Bool echoes(Msg m, Str s) { return match (m) { Changed(x) => x == s, _ => false }; }
 
-/// Focus on widget `id`, `w`, remembering its message and whether that
-/// message echoes the input's text.
-UiState focus_on(UiState ui, Int id, Widget w) {
-    return match (w) {
-        TextInput(s, k, m) => ui_with_focus_msg(ui, id, m, echoes(m, s)),
+/// Focus on widget `id`, `w` (in view `root`): its kind, its message,
+/// whether that message echoes the input's text, and its place among the
+/// inputs that match it, which is how it is found again (`ui_refocus`).
+UiState focus_on(UiState ui, Widget root, Int id, Widget w) {
+    UiState u = match (w) {
+        TextInput(s, k, m) => ui_with_focus_input(ui, id, m, echoes(m, s), false, 0),
         // a password's message is compared whole: its text cannot be read
-        PasswordInput(s, k, m) => ui_with_focus_msg(ui, id, m, false),
+        PasswordInput(s, k, m) => ui_with_focus_input(ui, id, m, false, true, 0),
         _ => ui_with_focus_on(ui, id, msg_of(w))
     };
+    if (id < 0) { return u; }
+    return ui_with_focus_input(u, id, u.fmsg, u.fecho, u.fpw, matches_before(root, u, 0, id, 0));
 }
 
-/// Whether an input with message `m` and text `s` is the focused one. Its
-/// message must equal the one it had when focused, payload and all, so
-/// that `Changed("name")` and `Changed("email")` are two inputs (R4-6);
-/// only an input whose message echoed its own text then (`Changed(text)`,
-/// which typing changes) is matched by still echoing its text.
+/// Whether an input with message `m` and text `s` has the focused
+/// input's message: equal to the one it had when focused, payload and
+/// all, so that `Changed("name")` and `Changed("email")` are two inputs
+/// (R4-6); an input whose message echoed its own text then
+/// (`Changed(text)`, which typing changes) also matches by still echoing
+/// its text.
 pub Bool focus_matches(UiState ui, Msg m, Str s) {
-    return if (ui.fecho) { echoes(m, s) } else { msg_eq(m, ui.fmsg) };
+    return msg_eq(m, ui.fmsg) || (ui.fecho && echoes(m, s));
+}
+
+/// Whether widget `w` matches the focused input: the same kind (a
+/// password's keys never go to a text input, nor a text input's to a
+/// password, R5-1) and message (`focus_matches`).
+pub Bool focus_like(UiState ui, Widget w) {
+    return match (w) {
+        TextInput(s, k, m) => !ui.fpw && focus_matches(ui, m, s),
+        PasswordInput(s, k, m) => ui.fpw && msg_eq(m, ui.fmsg),
+        _ => false
+    };
 }
 
 /// Keep focus on the input that was focused. The view can renumber widgets
 /// between events (a line inserted above, a row removed), and the number
 /// in `ui.focus` may then name another input: keys must not go to it. The
-/// focused input is followed to its new number when exactly one input has
-/// its message; otherwise focus is dropped.
+/// focused input is the one at its place (`ui.ford`) among the inputs
+/// like it, in pre-order: a line inserted above moves its number, not its
+/// place (R5-5). When there is no input at that place, focus is dropped.
 pub UiState ui_refocus(UiState ui, Widget root, Rect area, Font fo) {
     if (ui.focus < 0) { return ui; }
-    Found f = find_in(root, area, ui.focus, fo);
-    Bool same = match (f.w) { TextInput(s, k, m) => focus_matches(ui, m, s), PasswordInput(s, k, m) => focus_matches(ui, m, ""), _ => false };
-    if (same) { return ui; }
-    List(Int) at = inputs_with(root, ui, 0, []);
-    return if (at.len() == 1) { ui_with_focus_moved(ui, at[0]) } else { ui_with_focus(ui, -1) };
+    Int at = seek_like(root, ui, 0, Seek { .seen = 0, .at = -1 }).at;
+    if (at == ui.focus) { return ui; }
+    return if (at < 0) { ui_with_focus(ui, -1) } else { ui_with_focus_moved(ui, at) };
 }
 
-/// The numbers of the inputs that match the focused one, stopping at two.
-List(Int) inputs_with(Widget w, UiState ui, Int id, List(Int) acc) {
-    if (acc.len() >= 2) { return acc; }
-    List(Int) here = match (w) {
-        TextInput(s, k, x) => if (focus_matches(ui, x, s)) { acc.concat([id]) } else { acc },
-        PasswordInput(s, k, x) => if (focus_matches(ui, x, "")) { acc.concat([id]) } else { acc },
-        _ => acc
-    };
-    return inputs_with_kids(children(w), ui, 0, id + 1, here);
+/// How many inputs like the focused one are numbered before `upto`.
+Int matches_before(Widget w, UiState ui, Int id, Int upto, Int n) {
+    if (id >= upto) { return n; }
+    return matches_before_kids(children(w), ui, 0, id + 1, upto, if (focus_like(ui, w)) { n + 1 } else { n });
 }
 
-List(Int) inputs_with_kids(List(Widget) xs, UiState ui, Int i, Int id, List(Int) acc) {
-    if (i >= xs.len() || acc.len() >= 2) { return acc; }
-    return inputs_with_kids(xs, ui, i + 1, id + node_count(xs[i]), inputs_with(xs[i], ui, id, acc));
+Int matches_before_kids(List(Widget) xs, UiState ui, Int i, Int id, Int upto, Int n) {
+    if (i >= xs.len() || id >= upto) { return n; }
+    return matches_before_kids(xs, ui, i + 1, id + node_count(xs[i]), upto, matches_before(xs[i], ui, id, upto, n));
+}
+
+/// A search for the input at place `ford`: how many like it were passed,
+/// and its number once found (-1 until then).
+type Seek = { Int seen; Int at; };
+
+Seek seek_like(Widget w, UiState ui, Int id, Seek s) {
+    if (s.at >= 0) { return s; }
+    Seek here = if (focus_like(ui, w)) { Seek { .seen = s.seen + 1, .at = if (s.seen == ui.ford) { id } else { -1 } } } else { s };
+    return seek_kids(children(w), ui, 0, id + 1, here);
+}
+
+Seek seek_kids(List(Widget) xs, UiState ui, Int i, Int id, Seek s) {
+    if (i >= xs.len() || s.at >= 0) { return s; }
+    return seek_kids(xs, ui, i + 1, id + node_count(xs[i]), seek_like(xs[i], ui, id, s));
 }
 
 UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
@@ -464,7 +488,7 @@ UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo)
     if (code == key_tab() && !typing) {
         List(Int) ids = tab_inputs(root, area, ui, fo);
         Int to = if (ui.shift) { prev_input(ids, ui.focus) } else { next_input(ids, ui.focus) };
-        return none(focus_on(ui, to, find_in(root, area, to, fo).w));
+        return none(focus_on(ui, root, to, find_in(root, area, to, fo).w));
     }
     if (ui.focus < 0) { return none(ui); }
     if (code == key_esc() && !typing) { return none(ui_with_focus(ui, -1)); }
@@ -952,4 +976,57 @@ test "a release still clicks when only text before the button changed (R5-3)" {
     expect(press_print(before, 3)).toEqual(press_print(after, 3));
     // but not one whose own label changed
     expect(press_print(before, 3) == press_print(Column([Text("x"), Checkbox("loud", false, Custom(2)), Button("Delete", Custom(1))]), 3)).toEqual(false);
+}
+
+/// Whether the step passed a raw `KeyDown` on.
+Bool raw_key(UiStep s, Int i) {
+    if (i >= s.out.len()) { return false; }
+    Bool hit = match (s.out[i]) { KeyDown(c, t) => true, _ => false };
+    return hit || raw_key(s, i + 1);
+}
+
+Bool pw_edited(UiStep s, Int i) {
+    if (i >= s.out.len()) { return false; }
+    Bool hit = match (s.out[i]) { PasswordEdited(m, x, k) => true, _ => false };
+    return hit || pw_edited(s, i + 1);
+}
+
+@requires(declassify)
+test "a password's keys never go to a text input that takes its number (R5-1)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    // Column 0, TextInput 1, PasswordInput 2: both raise Submitted
+    Widget before = Column([TextInput("ann", 3, Submitted), PasswordInput(password_empty(), 0, Submitted)]);
+    UiState on2 = ui_event(ui_new(), before, r, Assist(2, act_focus())).ui;
+    expect(on2.focus).toEqual(2);
+    // Enter was wrong: a line appears at the top, and number 2 is the user name
+    Widget after = Column([Text("Wrong password"), TextInput("ann", 3, Submitted), PasswordInput(password_empty(), 0, Submitted)]);
+    UiStep typed = ui_event(on2, after, r, KeyDown(30, "x"));
+    expect(edited(typed, Submitted, 0)).toEqual(false);
+    expect(raw_key(typed, 0)).toEqual(false);
+    expect(typed.ui.focus == -1 || typed.ui.focus == 3).toEqual(true);
+    // and a text input's keys do not go to a password now numbered as it was
+    UiState on1 = ui_event(ui_new(), before, r, Assist(1, act_focus())).ui;
+    Widget swapped = Column([PasswordInput(password_empty(), 0, Submitted), TextInput("ann", 3, Submitted)]);
+    UiStep t2 = ui_event(on1, swapped, r, KeyDown(30, "x"));
+    expect(pw_edited(t2, 0)).toEqual(false);
+    expect(t2.ui.focus == -1 || t2.ui.focus == 2).toEqual(true);
+}
+
+@requires(declassify)
+test "inputs whose messages echo their text keep their own focus (R5-5)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    Widget before = Column([TextInput("ann", 3, Changed("ann")), TextInput("a@b", 3, Changed("a@b"))]);
+    UiState on2 = ui_event(ui_new(), before, r, Assist(2, act_focus())).ui;
+    Widget after = Column([Text("new"), TextInput("ann", 3, Changed("ann")), TextInput("a@b", 3, Changed("a@b"))]);
+    UiStep typed = ui_event(on2, after, r, KeyDown(30, "x"));
+    expect(edited(typed, Changed("ann"), 0)).toEqual(false);
+    expect(edited(typed, Changed("a@b"), 0)).toEqual(true);
+    expect(typed.ui.focus).toEqual(3);
+    // a fixed tag that happened to equal the text when focused keeps focus
+    // as the text changes
+    UiState on = ui_event(ui_new(), Column([TextInput("name", 4, Changed("name"))]), r, Assist(1, act_focus())).ui;
+    UiStep k1 = ui_event(on, Column([TextInput("name", 4, Changed("name"))]), r, KeyDown(30, "x"));
+    UiStep k2 = ui_event(k1.ui, Column([TextInput("namex", 5, Changed("name"))]), r, KeyDown(30, "y"));
+    expect(edited(k2, Changed("name"), 0)).toEqual(true);
+    expect(k2.ui.focus).toEqual(1);
 }

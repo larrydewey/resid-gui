@@ -101,7 +101,11 @@ Bool hit_any_kids(List(Widget) xs, List(Rect) rs, Int x, Int y, Int i, Font f) {
     return hit_any(xs[i], rs[i], x, y, f) || hit_any_kids(xs, rs, x, y, i + 1, f);
 }
 
-/// Whether the centre of `v` is under a layer that takes clicks.
+/// Whether the centre of `v` is under a layer that takes clicks. Only
+/// the centre counts: a layer over part of a widget, not its centre,
+/// leaves it in the tree, as a click and a reader's action (input.resid's
+/// `assist`, which acts at the same centre) still reach it. A partial
+/// overlay hides a widget only when it covers that centre.
 Bool covered(List(Layer) over, Rect v, Font f, Int i) {
     if (i >= over.len()) { return false; }
     return hit_any(over[i].w, over[i].r, v.x + v.w / 2, v.y + v.h / 2, f) || covered(over, v, f, i + 1);

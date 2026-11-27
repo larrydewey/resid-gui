@@ -177,7 +177,39 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
         Blurred => [],
         _ => s.ui.pwkeys
     };
-    return UiStep { .ui = ui_with_pwkeys(s.ui, held), .out = if (withheld) { s.out } else { [e].concat(s.out) } };
+    // The modifiers the program saw go down. When focus enters a password
+    // while one is held, the program is told it came up, and its real
+    // release (and anything after, until then) is withheld: otherwise the
+    // program would see Shift stuck, or see it come up in the middle of
+    // the password and learn which characters were shifted (L8-2). A
+    // modifier let go there is never seen; one held on as focus leaves
+    // the password is not seen going down either.
+    List(Int) seen = if (withheld) { ui.mods } else {
+        match (e) {
+            KeyDown(code, text) => if (is_modifier(code)) { held_add(ui.mods, code) } else { ui.mods },
+            KeyUp(code) => without_int(ui.mods, code, 0, ListBuf()),
+            Blurred => [],
+            _ => ui.mods
+        }
+    };
+    Bool entering = s.ui.focus >= 0 && s.ui.fpw && !(ui.focus >= 0 && ui.fpw);
+    List(Event) lifted = if (entering) { key_ups(seen, 0, ListBuf()) } else { [] };
+    List(Int) held2 = if (entering) { held_all(held, seen, 0) } else { held };
+    UiState next = ui_with_keys(s.ui, held2, if (entering) { [] } else { seen });
+    return UiStep { .ui = next, .out = (if (withheld) { [] } else { [e] }).concat(lifted).concat(s.out) };
+}
+
+/// Whether `code` is a modifier: Shift, Ctrl, Alt, AltGr or Super.
+Bool is_modifier(Int code) { return is_shift(code) || is_ctrl(code) || code == key_left_alt() || code == 100 || code == 125 || code == 126; }
+
+List(Event) key_ups(List(Int) codes, Int i, ListBuf(Event) acc) {
+    if (i >= codes.len()) { return acc.finish(); }
+    return key_ups(codes, i + 1, acc.push(KeyUp(codes[i])));
+}
+
+List(Int) held_all(List(Int) ks, List(Int) codes, Int i) {
+    if (i >= codes.len()) { return ks; }
+    return held_all(held_add(ks, codes[i]), codes, i + 1);
 }
 
 /// The keys a focused password passes on raw: Tab, Enter, Escape, the
@@ -1451,4 +1483,24 @@ test "a drag does not move onto another row's slider (L8-3)" {
     // its own value changing beside it does not stop the drag
     Widget m3 = Column([Row([Text("Alice"), Slider(50, Custom(0)), Text("50%")]), Row([Text("Bob"), Slider(70, Custom(1)), Text("70%")])]);
     expect(ui_event(down.ui, m3, r, PointerMoved(s.r.x + 40, s.r.y + 2)).out.len()).toEqual(2);
+}
+
+@requires(declassify)
+test "a modifier held as focus enters a password is let go first (L8-2)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
+    // Shift goes down with nothing focused: passed on
+    UiStep sh = ui_event(ui_new(), login, r, KeyDown(key_left_shift(), ""));
+    expect(raw_key(sh, 0)).toEqual(true);
+    // focus enters the password: the program is told Shift came up
+    UiStep on = ui_event(sh.ui, login, r, Assist(2, act_focus()));
+    expect(on.ui.focus).toEqual(2);
+    expect(raw_up(on, key_left_shift(), 0)).toEqual(true);
+    // and is told nothing of it after: not its real release, not its next press
+    expect(on.ui.shift).toEqual(true);
+    UiStep up = ui_event(on.ui, login, r, KeyUp(key_left_shift()));
+    expect(raw_up(up, key_left_shift(), 0)).toEqual(false);
+    expect(up.ui.shift).toEqual(false);
+    // a modifier released in the password that never went down is withheld too
+    expect(raw_up(ui_event(on.ui, login, r, KeyUp(key_left_ctrl())), key_left_ctrl(), 0)).toEqual(false);
 }

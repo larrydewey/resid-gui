@@ -216,7 +216,10 @@ and announces one bullet per character, and never passes on the keys
 that typed it: while a password has focus, `update` sees only the keys
 that say nothing of it (Tab, Enter, Escape, the arrows, Home, End,
 Backspace and Delete), and no key's text. Not even Shift, Ctrl, Alt or
-Super pass: a held Shift or AltGr says which characters were shifted. A key that
+Super pass: a held Shift or AltGr says which characters were shifted.
+A modifier held as focus enters the password is reported released at
+that moment, and its real release is withheld, so `update` never sees
+one stuck down. A key that
 went down in the password has its release withheld wherever focus has
 moved, until the window loses focus: a release that arrives after that
 is passed on (with its key code, never text).

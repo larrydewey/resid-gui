@@ -664,11 +664,13 @@ test "a focused input keeps reader focus while the text beside it changes (R7-2)
     Served s = changed(a1, exported_focus(v3, 2));
     expect(path_in(s.a, 2)).toEqual(path_in(a1, 2));
     // a focused node that does get a new path is said to be focused there
-    Widget u1 = Column([Row([TextInput("x", 1, Custom(1)), Button("Undo 1", Custom(2))])]);
-    Widget u2 = Column([Row([TextInput("x", 1, Custom(1)), Button("Undo 2", Custom(2))])]);
-    A11y b1 = changed(reader_a11y(), exported_focus(u1, 2)).a;
-    Served moved = changed(b1, exported_focus(u2, 2));
-    expect(path_in(moved.a, 2) == path_in(b1, 2)).toEqual(false);
+    // (its row's name changes: since R9-1 only the name before an input,
+    // without digits, is its context)
+    Widget u1 = Column([Row([Text("Ann"), TextInput("x", 1, Custom(1))])]);
+    Widget u2 = Column([Row([Text("Bob"), TextInput("x", 1, Custom(1))])]);
+    A11y b1 = changed(reader_a11y(), exported_focus(u1, 3)).a;
+    Served moved = changed(b1, exported_focus(u2, 3));
+    expect(path_in(moved.a, 3) == path_in(b1, 3)).toEqual(false);
     expect(says_focused(moved.out, 0)).toEqual(true);
     // the counter's and the gallery's buttons keep their paths as they are used
     Widget c0 = Column([Text("count: 0"), Button("+1", Clicked)]);
@@ -715,4 +717,19 @@ test "named rows holding an input or a slider keep their names as context (L8-1)
     Widget m3 = Column([Row([Text("Alice"), Slider(50, Custom(0)), Text("50%")]), Row([Text("Bob"), Slider(90, Custom(1)), Text("90%")]),
                         Row([Text("Carol"), Slider(50, Custom(2)), Text("50%")])]);
     expect(node_tokens(m3)[7]).toEqual(node_tokens(m1)[7]);
+}
+
+test "a count before or beside an input does not move its path or its row's button's (R9-1, R9-3)" {
+    // Column 0, Row 1, Text 2, TextInput 3, Text 4, Button 5
+    Widget v2 = Column([Row([Text("2/80"), TextInput("ab", 2, Custom(1)), Text("78 left"), Button("Send", Custom(2))])]);
+    Widget v3 = Column([Row([Text("3/80"), TextInput("abc", 3, Custom(1)), Text("77 left"), Button("Send", Custom(2))])]);
+    A11y a1 = changed(reader_a11y(), exported_focus(v2, 3)).a;
+    A11y a2 = changed(a1, exported_focus(v3, 3)).a;
+    expect(path_in(a2, 3)).toEqual(path_in(a1, 3));
+    expect(path_in(a2, 5)).toEqual(path_in(a1, 5));
+    // the name before it still tells rows apart (L8-1)
+    Widget alice = Column([Row([Text("Alice"), TextInput("", 0, Custom(1)), Button("Remove", Custom(1))])]);
+    Widget bob = Column([Row([Text("Bob"), TextInput("", 0, Custom(1)), Button("Remove", Custom(1))])]);
+    expect(node_tokens(alice)[3] == node_tokens(bob)[3]).toEqual(false);
+    expect(node_tokens(alice)[4] == node_tokens(bob)[4]).toEqual(false);
 }

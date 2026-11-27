@@ -433,10 +433,10 @@ pub Int shape_print(Widget root, Int upto) { return fp_node(root, 0, upto, Fp { 
 ///   context, so a count beside a button changes nothing;
 /// - nor does text outside the nearest Row: a clock in a flat Column, or
 ///   a list's other rows;
-/// - for a Slider or an input, Text after it in its Row is left out (it
-///   is usually the value echoed: "57%", "6/80"); Text before it (a name)
-///   counts, and so does all of a Button's or Checkbox's Row, inputs or
-///   not (L8-1).
+/// - for a Slider or an input, only the Row's first Text counts (its
+///   name, L8-1), without its digits (a value echoed there, R9-1); a
+///   Button or Checkbox in a Row with a Slider or an input counts its
+///   Row's labels and Text without digits (R9-3); see `row_context`.
 ///
 /// So a program whose records are told apart by an index should keep each
 /// record in a Row of its own, with the text that names it first: a
@@ -450,9 +450,70 @@ pub Int context_print(Widget root, Int n) {
     return row_context(widget_at(root, 0, rid), rid, w, n);
 }
 
-/// The text of `row`, numbered `rid`, around keyed control `w`, numbered
-/// `n` (`context_print`).
-Int row_context(Widget row, Int rid, Widget w, Int n) { return content_ids(row, rid, if (shows_value(w)) { n } else { -1 }, 19); }
+/// The text of `row`, numbered `rid`, around keyed control `w`
+/// (`context_print`). A program shows a slider's or an input's value
+/// beside it as a number ("Bob: 57%", "6/80", "78 left"), before it or
+/// after it, and that text changes as the control is used (R9-1):
+///
+/// - for a Slider or an input, the context is the first Text before it in
+///   its Row (its name), with its digits left out, so "Bob: 30%" and
+///   "Bob: 57%" are one context and "Carol: 57%" another; Text after it is
+///   left out (L8-1);
+/// - for a Button or Checkbox in a Row holding a Slider or an input, it is
+///   every label and Text with their digits left out (R9-3);
+/// - for one in any other Row, every label and Text, digits and all.
+///
+/// The cost: rows told apart only by digits ("Track 1", "Track 2") have
+/// one context where a slider or an input is involved.
+Int row_context(Widget row, Int rid, Widget w, Int n) {
+    if (shows_value(w)) { return first_before(row, rid, n, 31); }
+    return content_mode(row, holds_input(row), 19);
+}
+
+/// The first Text in `w` (numbered `id`) numbered before `n`, its
+/// digits left out, from `h`; `h` if there is none.
+Int first_before(Widget w, Int id, Int n, Int h) {
+    if (id >= n) { return h; }
+    return match (w) {
+        Text(s) => fp_text(fp_mix(h, 201), s, 0, true),
+        _ => first_kids(children(w), 0, id + 1, n, h)
+    };
+}
+
+Int first_kids(List(Widget) xs, Int i, Int id, Int n, Int h) {
+    if (i >= xs.len() || id >= n) { return h; }
+    Int f = first_before(xs[i], id, n, h);
+    return if (f != h) { f } else { first_kids(xs, i + 1, id + node_count(xs[i]), n, h) };
+}
+
+/// `content_print`, with digits left out of Text when `masked`.
+Int content_mode(Widget w, Bool masked, Int h) {
+    Int own = match (w) {
+        Text(s) => fp_text(fp_mix(h, 201), s, 0, masked),
+        Button(s, m) => fp_str(fp_mix(h, 202), s, 0),
+        Checkbox(s, c, m) => fp_str(fp_mix(h, 203), s, 0),
+        _ => fp_mix(h, 200)
+    };
+    return mode_kids(children(w), 0, masked, own);
+}
+
+Int mode_kids(List(Widget) xs, Int i, Bool masked, Int h) {
+    if (i >= xs.len()) { return h; }
+    return mode_kids(xs, i + 1, masked, content_mode(xs[i], masked, h));
+}
+
+/// `fp_str` of `s`, without its digits when `masked`.
+Int fp_text(Int h, Str s, Int i, Bool masked) {
+    if (i >= str_len(s)) { return fp_mix(h, 0); }
+    Int c = str_char_at(s, i);
+    Bool skip = masked && c >= 48 && c <= 57;
+    return fp_text(if (skip) { h } else { fp_mix(h, c) }, s, i + 1, masked);
+}
+
+/// Whether `w` holds a Slider or an input.
+Bool holds_input(Widget w) { return shows_value(w) || any_input(children(w), 0); }
+
+Bool any_input(List(Widget) xs, Int i) { return i < xs.len() && (holds_input(xs[i]) || any_input(xs, i + 1)); }
 
 /// Whether `w` sets a value a program often shows beside it.
 Bool shows_value(Widget w) {
@@ -468,25 +529,7 @@ Bool keyed(Widget w) {
 /// Every Text's text and every Button's and Checkbox's label in `w`, in
 /// pre-order (not an input's text or a checkbox's mark, which using the
 /// widgets changes).
-pub Int content_print(Widget w) { return content_ids(w, 0, -1, 19); }
-
-/// `content_print` from `h` of `w`, numbered `id`, leaving out the text
-/// of every Text numbered after `after` (none when it is -1).
-Int content_ids(Widget w, Int id, Int after, Int h) {
-    Bool text = after < 0 || id < after;
-    Int own = match (w) {
-        Text(s) => if (text) { fp_str(fp_mix(h, 201), s, 0) } else { fp_mix(h, 201) },
-        Button(s, m) => fp_str(fp_mix(h, 202), s, 0),
-        Checkbox(s, c, m) => fp_str(fp_mix(h, 203), s, 0),
-        _ => fp_mix(h, 200)
-    };
-    return content_kids(children(w), 0, id + 1, after, own);
-}
-
-Int content_kids(List(Widget) xs, Int i, Int id, Int after, Int h) {
-    if (i >= xs.len()) { return h; }
-    return content_kids(xs, i + 1, id + node_count(xs[i]), after, content_ids(xs[i], id, after, h));
-}
+pub Int content_print(Widget w) { return content_mode(w, false, 19); }
 
 Bool is_row(Widget w) { return match (w) { Row(xs) => true, _ => false }; }
 
@@ -546,9 +589,9 @@ type Ctx = { Widget row; Int rid; Int all; };
 Tok tok_node(Widget w, Ctx c, Tok t) {
     Int h = fp_one(t.h, w);
     // as context_print gives it, for the widget numbered t.n
-    Int ctx = if (!keyed(w) || c.rid < 0) { 0 } else { if (shows_value(w)) { content_ids(c.row, c.rid, t.n, 19) } else { c.all } };
+    Int ctx = if (!keyed(w) || c.rid < 0) { 0 } else { if (shows_value(w)) { first_before(c.row, c.rid, t.n, 31) } else { c.all } };
     Int mine = node_token(fp_mix(fp_str(h, label_of(w), 0), ctx));
-    Ctx inner = if (is_row(w)) { Ctx { .row = w, .rid = t.n, .all = content_ids(w, t.n, -1, 19) } } else { c };
+    Ctx inner = if (is_row(w)) { Ctx { .row = w, .rid = t.n, .all = content_mode(w, holds_input(w), 19) } } else { c };
     return tok_kids(children(w), 0, inner, Tok { .h = h, .n = t.n + 1, .acc = t.acc.insert(t.n, mine) });
 }
 
@@ -1503,4 +1546,27 @@ test "a modifier held as focus enters a password is let go first (L8-2)" {
     expect(up.ui.shift).toEqual(false);
     // a modifier released in the password that never went down is withheld too
     expect(raw_up(ui_event(on.ui, login, r, KeyUp(key_left_ctrl())), key_left_ctrl(), 0)).toEqual(false);
+}
+
+@requires(declassify)
+test "a drag goes on when its value is shown before it (R9-1)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 300, .h = 200 };
+    // Column 0, Row 1, Text 2, Slider 3
+    Widget at30 = Column([Row([Text("Bob: 30%"), Slider(30, Custom(1))])]);
+    Widget at57 = Column([Row([Text("Bob: 57%"), Slider(57, Custom(1))])]);
+    Found s = find(at30, r, 3);
+    UiStep down = ui_event(ui_new(), at30, r, PointerDown(s.r.x + s.r.w / 3, s.r.y + 2, 1));
+    expect(down.ui.pressed).toEqual(3);
+    UiStep moved = ui_event(down.ui, at57, r, PointerMoved(s.r.x + s.r.w / 2, s.r.y + 2));
+    Bool set = moved.out.len() == 2 && match (moved.out[1]) { SliderSet(m, v) => true, _ => false };
+    expect(set).toEqual(true);
+    // another row's slider rotated into its place stops the drag
+    Widget carol = Column([Row([Text("Carol: 57%"), Slider(57, Custom(1))])]);
+    expect(ui_event(down.ui, carol, r, PointerMoved(s.r.x + s.r.w / 2, s.r.y + 2)).out.len()).toEqual(1);
+    // a count before an input does not stop a selection drag
+    Widget c2 = Column([Row([Text("6/80"), TextInput("abcdef", 0, Custom(1))])]);
+    Widget c3 = Column([Row([Text("16/80"), TextInput("abcdef", 3, Custom(1))])]);
+    Found t = find(c2, r, 3);
+    UiStep td = ui_event(ui_new(), c2, r, PointerDown(t.r.x + 6, t.r.y + 4, 1));
+    expect(edited(ui_event(td.ui, c3, r, PointerMoved(t.r.x + 30, t.r.y + 4)), Custom(1), 0)).toEqual(true);
 }

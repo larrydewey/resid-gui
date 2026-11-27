@@ -41,9 +41,13 @@ widgets by that number. A number can name another widget once the view
 changes, so a press, a screen reader's object and a shell's action also
 carry a print of the widget (`press_print`, `node_tokens`): the
 structure before it, its label and, for a control whose message carries
-a payload (`Custom`, `Changed`), the labels and text of the nearest
-`Row` holding it (without Text when that Row holds a slider or an
-input). **Keep each record of a list keyed by index in a `Row` of its
+a payload (`Custom`, `Changed`), the text around it in the nearest
+`Row` holding it: for a slider or an input, the first Text before it
+(its name) without digits, as its value is often shown as a number
+before or after it; for a button or checkbox, every label and Text in
+the Row, without digits when the Row holds a slider or an input. Rows
+told apart only by digits ("Track 1", "Track 2") are not told apart
+there. **Keep each record of a list keyed by index in a `Row` of its
 own, with the text that names it**: a record laid out flat in a
 `Column` has no text around it, and a feed that drops one record and
 appends another can then put a different record's button under a

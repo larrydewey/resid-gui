@@ -203,7 +203,7 @@ Loop(M) run_loop(B b, Loop(M) st0) {
     Int s = be_scale(b);
     List(SemNode) sem = semantics_in(st.view, Rect { .x = 0, .y = 0, .w = be_width(b) / s, .h = be_height(b) / s }, st.ui, st.font);
     B bs = be_semantics(b, sem);
-    A11y a1 = a11y_tree(st.a11y, sem);
+    A11y a1 = a11y_tree(st.a11y, sem, view_shape(st.view));
     Bool show = st.pending.len() > 0 && be_ready(bs);
     B b2 = if (show) { be_present(bs, Frame { .ops = st.ops, .scale = st.scale, .font = st.font }, st.pending) } else { bs };
     Loop(M) st2 = with_a11y(if (show) { with_pending(st, []) } else { st }, a1);
@@ -476,4 +476,45 @@ test "a reader's action after the view renumbered hits its widget or nothing (R4
                          Row([Text("D"), Button("Dismiss", Custom(2))])]);
     expect(assist_current(es[0], ps[0], abd)).toEqual(true);
     expect(assist_current(FrameTick, -1, bc)).toEqual(true);
+}
+
+/// A reader's call on `path`, as the bus delivers it.
+DMsg reader_call(Str path, Str iface, Str member, List(DV) body) {
+    DMsg m = dcall(99, ":1.7", path, iface, member, body);
+    return DMsg { .kind = m.kind, .flags = 0, .serial = 99, .reply_serial = 0, .path = path, .iface = iface, .member = member,
+                  .error = "", .dest = ":1.7", .sender = ":1.42", .body = body };
+}
+
+test "a reader's path from before the rows changed names nothing (R5-4)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...
+    Widget abc = Column([Row([Text("A"), Button("Dismiss", Custom(0))]), Row([Text("B"), Button("Dismiss", Custom(1))]),
+                         Row([Text("C"), Button("Dismiss", Custom(2))])]);
+    A11y a0 = A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Rows", .tree = [], .skip = 0, .gen = 0, .shape = 0 };
+    A11y a1 = changed_shape(a0, semantics(abc, r, ui_new()), view_shape(abc)).a;
+    // the reader holds B's Dismiss
+    Str b6 = path_in(a1, 6);
+    Served first = serve(a1, reader_call(b6, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    Bool acts = first.events.len() == 1 && match (first.events[0]) { Assist(n, act) => n == 6, _ => false };
+    expect(acts).toEqual(true);
+    // A is removed: number 6 is now C's Dismiss, Custom(1)
+    Widget bc = Column([Row([Text("B"), Button("Dismiss", Custom(0))]), Row([Text("C"), Button("Dismiss", Custom(1))])]);
+    Served moved = changed_shape(a1, semantics(bc, r, ui_new()), view_shape(bc));
+    Served stale = serve(moved.a, reader_call(b6, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    expect(stale.events.len()).toEqual(0);
+    expect(stale.out[0].error).toEqual("org.freedesktop.DBus.Error.UnknownObject");
+    // the reader was told the old objects went and the new ones came
+    expect(moved.out.len()).toEqual(6 + 4);
+    expect(arg_str(moved.out[0].body, 0)).toEqual("remove");
+    expect(arg_str(moved.out[6].body, 0)).toEqual("add");
+    // and the new tree's paths act on what they now name
+    Served fresh = serve(moved.a, reader_call(path_in(moved.a, 6), "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    expect(fresh.events.len()).toEqual(1);
+    // text changing, or scrolling, keeps the shape and every path
+    Widget bd = Column([Row([Text("B!"), Button("Dismiss", Custom(0))]), Row([Text("D"), Button("Dismiss", Custom(1))])]);
+    expect(view_shape(bd)).toEqual(view_shape(bc));
+    expect(view_shape(Scroll(40, bc))).toEqual(view_shape(Scroll(0, bc)));
+    Served same = changed_shape(moved.a, semantics(bd, r, ui_new()), view_shape(bd));
+    expect(path_in(same.a, 6)).toEqual(path_in(moved.a, 6));
+    expect(serve(same.a, reader_call(path_in(moved.a, 6), "org.a11y.atspi.Action", "DoAction", [DI32(0)])).events.len()).toEqual(1);
 }

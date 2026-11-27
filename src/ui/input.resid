@@ -353,6 +353,12 @@ Found pressed_in(UiState ui, Widget root, Rect area, Font fo) {
 /// it; a row whose text alone changed does not.
 pub Int press_print(Widget root, Int upto) { return fp_node(root, 0, upto, Fp { .h = 17, .id = 0 }).h; }
 
+/// The shape of a whole view: `press_print` of all its widgets, with no
+/// label. Two views of one shape number their widgets alike, so an
+/// accessible object's number names the same widget in both (atspi.resid's
+/// `changed_shape`); scrolling, typing or new text keeps the shape.
+pub Int view_shape(Widget root) { return fp_node(root, 0, node_count(root), Fp { .h = 17, .id = 0 }).h; }
+
 /// A fingerprint so far, and the number of the next widget.
 type Fp = { Int h; Int id; };
 

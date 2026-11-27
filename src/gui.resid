@@ -399,8 +399,9 @@ test "an image whose size is a lie is not multiplied into damage (R4-7)" {
     expect(d.len() <= 1).toEqual(true);
     List(DrawOp) ops = paint(Row([Bitmap(1 << 62, 1 << 62, []), Bitmap(1 << 62, 3, [1, 2, 3])]), Rect { .x = 0, .y = 0, .w = 100, .h = 100 }, ui_new());
     expect(ops.len()).toEqual(0);
+    // laid out far past the window: no node near enough to export, and no abort
     List(SemNode) sem = semantics(Padding(1 << 62, Padding(1 << 62, Bitmap(1 << 62, 1, []))), Rect { .x = 0, .y = 0, .w = 100, .h = 100 }, ui_new());
-    expect(sem.len()).toEqual(1);
+    expect(sem.len() <= 1).toEqual(true);
 }
 
 @requires(display, clock(readonly))

@@ -95,10 +95,16 @@ pub Str path_of(Int id) {
 
 DV ref(A11y a, Int id) { return DStruct([DStr(a.name), DPath(path_of(id))]); }
 
-/// Where node `id` is in the tree, or -1.
-Int find_node(List(SemNode) t, Int id, Int i) {
-    if (i >= t.len()) { return -1; }
-    return if (t[i].id == id) { i } else { find_node(t, id, i + 1) };
+/// Where node `id` is in the tree, or -1: a binary search, as the tree is
+/// in increasing id order (R4-3). `i` is where to start looking.
+Int find_node(List(SemNode) t, Int id, Int i) { return find_in(t, id, i, t.len()); }
+
+Int find_in(List(SemNode) t, Int id, Int lo, Int hi) {
+    if (lo >= hi) { return -1; }
+    Int mid = lo + (hi - lo) / 2;
+    Int m = t[mid].id;
+    if (m == id) { return mid; }
+    return if (m < id) { find_in(t, id, mid + 1, hi) } else { find_in(t, id, lo, mid) };
 }
 
 SemNode node(A11y a, Int id) {
@@ -394,28 +400,74 @@ Str ifaces_xml(List(Str) xs, Int i, StrBuf b) {
 
 /// AT-SPI event signals for a change of tree, and the state with the new
 /// tree: a changed name, value, focus or check state on a node that stays,
-/// and children added to or removed from a parent.
+/// and children added to or removed from a parent. Both trees are in
+/// increasing id order (as `semantics` makes them), so one merge walk
+/// pairs their nodes, and each side's places among siblings are counted
+/// once, only when something was added or removed: the cost is linear in
+/// the trees, not their product (R4-3).
 pub Served changed(A11y a, List(SemNode) now) {
-    SemDiff d = sem_diff(a.tree, now);
+    Walk w = walk(a.tree, now, 0, 0, ListBuf(), ListBuf(), ListBuf());
     A11y next = with_tree(a, now);
-    List(DMsg) sig = signals_put(a, next, d.put, 0, a.serial, []);
-    List(DMsg) gone = signals_gone(a, d.removed, 0, a.serial + sig.len(), []);
-    return Served { .a = with_serial(next, a.serial + sig.len() + gone.len()), .out = sig.concat(gone), .events = [] };
+    List(Int) idx_now = if (w.added.len() > 0) { sibling_index(now, 0, {}, ListBuf()) } else { [] };
+    List(Int) idx_old = if (w.gone.len() > 0) { sibling_index(a.tree, 0, {}, ListBuf()) } else { [] };
+    List(DMsg) out = signals_put(a, next, w, idx_now, idx_old, 0, ListBuf(), a.serial).finish();
+    return Served { .a = with_serial(next, a.serial + out.len()), .out = out, .events = [] };
+}
+
+/// What a merge walk of two trees found: positions in the new tree of
+/// nodes added, of nodes that changed with their old positions, and
+/// positions in the old tree of nodes gone. `put` holds the new tree's
+/// positions of added or changed nodes, in id order, and `was` the old
+/// position of each (-1 for an added one).
+type Walk = { List(Int) put; List(Int) was; List(Int) added; List(Int) gone; };
+
+Walk walk(List(SemNode) a, List(SemNode) b, Int i, Int j, ListBuf(Int) put, ListBuf(Int) was, ListBuf(Int) gone) {
+    if (i >= a.len() && j >= b.len()) {
+        List(Int) ws = was.finish();
+        return Walk { .put = put.finish(), .was = ws, .added = added_of(ws, 0, ListBuf()), .gone = gone.finish() };
+    }
+    if (i >= a.len() || (j < b.len() && a[i].id > b[j].id)) { return walk(a, b, i, j + 1, put.push(j), was.push(-1), gone); }
+    if (j >= b.len() || a[i].id < b[j].id) { return walk(a, b, i + 1, j, put, was, gone.push(i)); }
+    if (sem_eq(a[i], b[j])) { return walk(a, b, i + 1, j + 1, put, was, gone); }
+    return walk(a, b, i + 1, j + 1, put.push(j), was.push(i), gone);
+}
+
+List(Int) added_of(List(Int) was, Int i, ListBuf(Int) acc) {
+    if (i >= was.len()) { return acc.finish(); }
+    return added_of(was, i + 1, if (was[i] < 0) { acc.push(i) } else { acc });
+}
+
+/// Each node's place among its parent's children, by position in `t`.
+List(Int) sibling_index(List(SemNode) t, Int i, Map(Int, Int) seen, ListBuf(Int) acc) {
+    if (i >= t.len()) { return acc.finish(); }
+    Int p = t[i].parent;
+    Int k = seen.get(p) else { 0 };
+    return sibling_index(t, i + 1, seen.insert(p, k + 1), acc.push(k));
+}
+
+ListBuf(DMsg) push_all_msgs(ListBuf(DMsg) b, List(DMsg) ms, Int i) {
+    if (i >= ms.len()) { return b; }
+    return push_all_msgs(b.push(ms[i]), ms, i + 1);
 }
 
 DMsg event(Int serial, Str path, Str member, Str detail, Int d1, Int d2, DV v) {
     return dsignal(serial, path, "org.a11y.atspi.Event.Object", member, [DStr(detail), DI32(d1), DI32(d2), DVar(v), DArr("{sv}", [])]);
 }
 
-List(DMsg) signals_put(A11y old, A11y now, List(SemNode) put, Int i, Int s, List(DMsg) acc) {
-    if (i >= put.len()) { return acc; }
-    SemNode n = put[i];
-    Int k = find_node(old.tree, n.id, 0);
-    List(DMsg) these = if (k < 0) {
+/// The signals for the added and changed nodes, serials from `s`, then
+/// those for the nodes gone.
+ListBuf(DMsg) signals_put(A11y old, A11y now, Walk w, List(Int) idx_now, List(Int) idx_old, Int i, ListBuf(DMsg) out, Int s) {
+    if (i >= w.put.len()) { return signals_gone(old, w.gone, idx_old, 0, out, s); }
+    Int j = w.put[i];
+    SemNode n = now.tree[j];
+    Int was = w.was[i];
+    if (was < 0) {
         Int p = parent_of(now, n.id);
-        [event(s, path_of(p), "ChildrenChanged", "add", index_in(children_of(now, p), n.id, 0), 0, ref(now, n.id))]
-    } else { node_changes(old.tree[k], n, s) };
-    return signals_put(old, now, put, i + 1, s + these.len(), acc.concat(these));
+        DMsg m = event(s, path_of(p), "ChildrenChanged", "add", if (j < idx_now.len()) { idx_now[j] } else { 0 }, 0, ref(now, n.id));
+        return signals_put(old, now, w, idx_now, idx_old, i + 1, out.push(m), s + 1);
+    }
+    List(DMsg) ms = node_changes(old.tree[was], n, s);
+    return signals_put(old, now, w, idx_now, idx_old, i + 1, push_all_msgs(out, ms, 0), s + ms.len());
 }
 
 List(DMsg) node_changes(SemNode o, SemNode n, Int s) {
@@ -438,11 +490,15 @@ List(DMsg) node_changes(SemNode o, SemNode n, Int s) {
     return name.concat(value).concat(focus).concat(check).concat(show);
 }
 
-List(DMsg) signals_gone(A11y old, List(Int) ids, Int i, Int s, List(DMsg) acc) {
-    if (i >= ids.len()) { return acc; }
-    Int p = parent_of(old, ids[i]);
-    DMsg m = event(s, path_of(p), "ChildrenChanged", "remove", index_in(children_of(old, p), ids[i], 0), 0, ref(old, ids[i]));
-    return signals_gone(old, ids, i + 1, s + 1, acc.concat([m]));
+/// A removal per old position in `gone`, from its old parent, at its old
+/// place there.
+ListBuf(DMsg) signals_gone(A11y old, List(Int) gone, List(Int) idx_old, Int i, ListBuf(DMsg) out, Int s) {
+    if (i >= gone.len()) { return out; }
+    Int k = gone[i];
+    SemNode n = old.tree[k];
+    Int p = if (n.parent < 0) { frame_id() } else { n.parent };
+    DMsg m = event(s, path_of(p), "ChildrenChanged", "remove", if (k < idx_old.len()) { idx_old[k] } else { 0 }, 0, ref(old, n.id));
+    return signals_gone(old, gone, idx_old, i + 1, out.push(m), s + 1);
 }
 
 // ─── The connection ────────────────────────────────────────────────
@@ -798,4 +854,43 @@ test "an off-screen node is read, not SHOWING, and can only be scrolled to (R3-3
 Bool has_state_change(List(DMsg) ms, Str what, Int i) {
     if (i >= ms.len()) { return false; }
     return (ms[i].member == "StateChanged" && arg_str(ms[i].body, 0) == what) || has_state_change(ms, what, i + 1);
+}
+
+List(Widget) many_buttons(Int n, Int i, ListBuf(Widget) acc) {
+    if (i >= n) { return acc.finish(); }
+    return many_buttons(n, i + 1, acc.push(Button(f"b{i}", Custom(i))));
+}
+
+/// `a` after `steps` wheel steps over a long list, each a new tree.
+A11y wheel_steps(A11y a, Widget col, Rect r, Int i, Int steps) {
+    if (i >= steps) { return a; }
+    return wheel_steps(changed(a, semantics(Scroll(i * 40, col), r, ui_new())).a, col, r, i + 1, steps);
+}
+
+@requires(clock(readonly))
+test "scrolling a long list with a reader attached costs what the view holds (R4-3)" {
+    Widget col = Column(many_buttons(5000, 0, ListBuf()));
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 400 };
+    A11y a = with_tree(sample(), semantics(Scroll(0, col), r, ui_new()));
+    Int t0 = clock.monotonic_ns();
+    A11y end = wheel_steps(a, col, r, 1, 11);
+    Int ms = (clock.monotonic_ns() - t0) / 1000000;
+    println(f"10 wheel steps over 5000 buttons: {ms} ms, {end.tree.len()} nodes exported");
+    expect(ms < 1000).toEqual(true);
+    // the exported tree is a window around the view, not the whole list
+    expect(end.tree.len() < 400).toEqual(true);
+    // and a change to every node of a tree that big costs linear time:
+    // all 5000 buttons shown, every one moved, half then removed
+    Rect tall = Rect { .x = 0, .y = 0, .w = 200, .h = 200000 };
+    List(SemNode) t0s = semantics(col, tall, ui_new());
+    List(SemNode) t1s = semantics(Padding(1, col), tall, ui_new());
+    List(SemNode) t2s = semantics(Column(many_buttons(2500, 0, ListBuf())), tall, ui_new());
+    Int t1 = clock.monotonic_ns();
+    Served moved = changed(with_tree(sample(), t0s), t1s);
+    Served halved = changed(moved.a, t2s);
+    Int ms2 = (clock.monotonic_ns() - t1) / 1000000;
+    println(f"5000 nodes moved, then 2500 removed: {ms2} ms, {halved.out.len()} signals");
+    expect(t0s.len()).toEqual(5000);
+    expect(halved.out.len()).toEqual(5001);
+    expect(ms2 < 1000).toEqual(true);
 }

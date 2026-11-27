@@ -15,7 +15,10 @@
 // those. A widget scrolled out of its `Scroll`, or laid out outside the
 // window, is a node flagged `sem_offscreen`, as GTK and Qt export
 // scrolled-out children: a reader can read it and ask to scroll to it
-// (`act_scroll`), but not act on it until it is shown.
+// (`act_scroll`), but not act on it until it is shown. Only those within
+// four views (at least 1024 pixels) of their Scroll's view, or of the
+// window, are exported, and the focused one wherever it is, so a long
+// list costs what lies around its view.
 
 import "../app.resid";
 import "../gfx/color.resid";
@@ -142,7 +145,10 @@ SemNode mk(Int id, Int parent, Int role, Int flags, Rect r, Int actions, Str lab
 ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Font f, Int id, Int parent, Rect clip, Rect port, List(Layer) over, Bool scrolled) {
     Rect v = rect_intersect(r, clip);
     Bool shown = !rect_is_empty(v);
-    Bool own = role_of(w) != 0 && !covered(over, if (shown) { v } else { port }, f, 0);
+    // an off-screen node is exported only near its port, as `Rows` lays
+    // out only the rows in view (R4-3); the focused node always is
+    Bool near = shown || ui.focus == id || near_port(r, port);
+    Bool own = role_of(w) != 0 && near && !covered(over, if (shown) { v } else { port }, f, 0);
     ListBuf(SemNode) here = if (own) { acc.push(if (shown) { node_of(w, r, ui, id, parent) } else { offscreen(node_of(w, r, ui, id, parent), scrolled) }) } else { acc };
     Int up = if (own) { id } else { parent };
     Rect inner = if (shown) { v } else { port };
@@ -152,6 +158,29 @@ ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Fo
         Stack(xs) => sem_kids(here, xs, child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, port, over, true, scrolled),
         _ => sem_kids(here, children(w), child_rects_in(w, r, f), ui, f, 0, id + 1, up, clip, port, over, false, scrolled)
     };
+}
+
+/// Whether `r` lies near port `p`: within four times the port's size of
+/// it each way, and at least 1024 pixels (an empty `r` counts as its
+/// corner). A reader moving line by line finds the next node there; one
+/// further away is exported once scrolling brings it near. A Scroll of
+/// thousands of rows exports what lies around its view, not all of them
+/// (R4-3). (Ints only: a Rect built here and returned came back as
+/// garbage from this Resid compiler inside sem_node's build.)
+Bool near_port(Rect r, Rect p) {
+    Int pw = clamp_coord(max_int(p.w, 0));
+    Int ph = clamp_coord(max_int(p.h, 0));
+    Int dx = max_int(4 * pw, 1024);
+    Int dy = max_int(4 * ph, 1024);
+    Int px = clamp_coord(p.x);
+    Int py = clamp_coord(p.y);
+    Int x = clamp_coord(r.x);
+    Int y = clamp_coord(r.y);
+    Int x1 = x + clamp_coord(max_int(r.w, 0));
+    Int y1 = y + clamp_coord(max_int(r.h, 0));
+    Bool ax = x <= px + pw + dx && x1 >= px - dx;
+    Bool ay = y <= py + ph + dy && y1 >= py - dy;
+    return ax && ay;
 }
 
 /// Node `n` off screen: flagged so, and its only action scrolling to it,
@@ -284,7 +313,7 @@ test "a node scrolled out of view is read as off screen; one under a layer that 
 }
 
 test "off-screen nodes are flagged, offer only scrolling, and visible ones are not flagged (R3-3)" {
-    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    Rect r = Rect { .x = 0, .y = 0, .w = 100 * str_len(rt "xx"), .h = 100 };
     // Scroll 0, Column 1, Button "top" 2, Spacer 3, Button "far" 4: "far"
     // lies 400 pixels down a view 100 tall
     Widget w = Scroll(0, Column([Button("top", Custom(1)), Padding(200, Spacer), Button("far", Custom(2))]));
@@ -307,7 +336,8 @@ test "off-screen nodes are flagged, offer only scrolling, and visible ones are n
 }
 
 test "content under an overlay is not read, scrolled out of view or not (R4-1)" {
-    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // a width read at run time, so the check runs compiled, not reduced
+    Rect r = Rect { .x = 0, .y = 0, .w = 100 * str_len(rt "xx"), .h = 100 };
     // a field scrolled below the view of a Scroll that a modal covers
     Widget scrolled = Stack([Scroll(0, Column([Padding(200, Spacer), TextInput("secret", 0, Custom(1))])), Button("modal", Custom(2))]);
     Str said = sem_speech(semantics(scrolled, r, ui_new()));
@@ -320,4 +350,19 @@ test "content under an overlay is not read, scrolled out of view or not (R4-1)" 
     Widget beside = Row([Scroll(0, Column([Padding(200, Spacer), TextInput("far", 0, Custom(1))])),
                          Stack([Spacer, Button("modal", Custom(2))])]);
     expect(str_contains(sem_speech(semantics(beside, r, ui_new())), "text field = far, off screen")).toEqual(true);
+}
+
+test "a long scroll exports the nodes around its view, and the focused one (R4-3)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 100 * str_len(rt "xx"), .h = 100 };
+    // Scroll 0, Column 1, then TextInput i at 2 + i: 36 pixels a row
+    List(SemNode) ns = semantics(Scroll(0, Column(inputs_n(500, 0, ListBuf()))), r, ui_with_focus(ui_new(), 2 + 400));
+    // the view (100) and 1024 pixels around it: rows 0 to 31, and the focused 400
+    expect(ns.len() < 40).toEqual(true);
+    expect(ns[ns.len() - 1].id).toEqual(402);
+    expect(ns[ns.len() - 2].value).toEqual("31");
+}
+
+List(Widget) inputs_n(Int n, Int i, ListBuf(Widget) acc) {
+    if (i >= n) { return acc.finish(); }
+    return inputs_n(n, i + 1, acc.push(TextInput(f"{i}", 0, Custom(i))));
 }

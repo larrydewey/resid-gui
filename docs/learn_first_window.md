@@ -122,7 +122,7 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
 | `Padding(n, w)` | `n` pixels around `w` |
 | `Align(ax, ay, w)` | `w` placed at `ax`/`ay` percent of the free space |
 | `Scroll(offset, w)` | `w` shifted up by `offset` and clipped; move `offset` on `Wheel` |
-| `Rows(offset, row_h, rows)` | a long list of `row_h`-pixel rows, scrolled like `Scroll`; only the rows in view cost anything |
+| `Rows(offset, row_h, rows)` | a long list of `row_h`-pixel rows, scrolled like `Scroll`; only the rows in view are laid out, painted and hit-tested (every row is still numbered and visited for focus) |
 | `Bitmap(w, h, px)` | a `w` x `h` image, four bytes per pixel, blue-green-red-alpha |
 
 Text inputs, sliders, scroll areas, lists and aligned boxes stretch along

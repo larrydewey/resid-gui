@@ -5,8 +5,11 @@ the language: values and pure functions, no ambient authority, compile-time
 reduction of whatever is static, and native code only where it is the right
 tool.
 
-A program states that it touches the display (and reads the clock, for
-timers) and nothing else:
+A program states what it reaches, and nothing else is reachable: the
+display, the accessibility bus (so screen readers can read it), the clock
+(read-only, for timers), and `declassify`, because editing a
+`PasswordInput` splices each keystroke into its secret text. (That grant
+goes once Resid's `Secret(Str)` splice lands.)
 
 ```resid
 import "../src/gui.resid";
@@ -209,9 +212,12 @@ is pure, so:
 ## Security
 
 - Every function that reaches a display builtin or the clock declares
-  `@requires`. A GUI program needs `display` and `clock(readonly)`, nothing
-  more; one that loads fonts or images adds `filesystem(readonly)` and
-  `native_font` or `native_image`.
+  `@requires`. A GUI program needs `display`, `accessibility`,
+  `clock(readonly)` and `declassify` (the password input's splice, until
+  Resid's `Secret(Str)` splice replaces it), nothing more; one that loads
+  fonts or images adds `filesystem(readonly)` (and `args` for a path from
+  the command line) and `native_font` or `native_image`. `gui_run_dev`
+  adds `filesystem`, to write and replay its event log.
 - Font and image bytes are untrusted input to native code. The process
   boundary contains an escape attempt (`tests/evil.sh` tries a dozen),
   and the Resid side validates the answer. The calls run in spawn

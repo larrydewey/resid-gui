@@ -25,13 +25,15 @@ message ends the session.
 
 Actions: wait:TEXT  click:LABEL  assist:LABEL  type:TEXT  key:CODE
          shot:NAME  tree:NAME (the semantics tree as JSON)  speak  close
-         run:COMMAND (runs while the shell keeps serving the window)
+         run:COMMAND (runs while the shell keeps serving the window; split
+         into words as a shell would, quotes kept, but run with no shell)
 """
 
 import argparse
 import os
 import socket
 import struct
+import shlex
 import subprocess
 import sys
 import time
@@ -132,7 +134,8 @@ class Shell:
         env = dict(os.environ, RSP_SOCKET=str(theirs.fileno()))
         for k in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY"):
             env.pop(k, None)
-        self.proc = subprocess.Popen([core], env=env, pass_fds=[theirs.fileno()])
+        # by its absolute path: a bare name must not be looked up on $PATH
+        self.proc = subprocess.Popen([os.path.abspath(core)], env=env, pass_fds=[theirs.fileno()])
         theirs.close()
         self.sock, self.buf, self.fds = mine, b"", []
         self.buffers, self.tree, self.pending, self.gone = {}, {}, {}, set()
@@ -319,8 +322,10 @@ class Shell:
             elif verb == "shot":
                 self.shot(arg)
             elif verb == "run":
-                # a command run while the shell keeps serving the window
-                proc = subprocess.Popen(arg, shell=True)
+                # a command run while the shell keeps serving the window:
+                # its words split as a shell would, with no shell to expand
+                # or run anything else in them
+                proc = subprocess.Popen(shlex.split(arg))
                 while proc.poll() is None:
                     self.pump(0.05)
                 if proc.returncode != 0:

@@ -303,7 +303,8 @@ UiState mods_after(UiState ui, Int code, Bool down) {
 
 UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     Found f = hit_in(root, area, x, y, fo);
-    UiState pressed = ui_with_press(ui, f.id, msg_of(f.w), label_of(f.w), f.r, if (f.id >= 0) { press_print(root, f.id) } else { 0 });
+    UiState pressed = ui_with_press(ui, f.id, msg_of(f.w), label_of(f.w), f.r, if (f.id >= 0) { shape_print(root, f.id) } else { 0 },
+                                    if (f.id >= 0) { context_print(root, f.id) } else { 0 });
     return match (f.w) {
         TextInput(s, k, m) => press_input(pressed, root, f.id, f.w, s, k, m, caret_at_in(f.r, s, k, x, fo)),
         PasswordInput(s, k, m) => press_password(pressed, root, f.id, f.w, s, k, m, caret_at_in(f.r, password_bullets(s), k, x, fo)),
@@ -356,11 +357,16 @@ Str label_of(Widget w) {
 /// by index (Custom(i)) renumber when one is removed, and the next row's
 /// button arrives under the pointer with the message the pressed one had,
 /// and with its label and box too when every row has the same button
-/// (R4-5).
-Found pressed_in(UiState ui, Widget root, Rect area, Font fo) {
+/// (R4-5). A release (`ctx`) also needs its box and the text around it
+/// unchanged (`context_print`, R6-2); a drag needs neither, as the value
+/// it sets is often shown beside it (a slider's percentage, an input's
+/// character count, which can widen and move the input's box), and the
+/// drag must not stop at its first step (R7-1). The structure up to it
+/// and its own label still say it is the widget pressed.
+Found pressed_in(UiState ui, Widget root, Rect area, Font fo, Bool ctx) {
     Found f = find_in(root, area, ui.pressed, fo);
-    Bool same = f.id >= 0 && msg_eq(msg_of(f.w), ui.pmsg) && label_of(f.w) == ui.plabel && rect_eq(f.r, ui.prect)
-                && press_print(root, ui.pressed) == ui.pprint;
+    Bool same = f.id >= 0 && msg_eq(msg_of(f.w), ui.pmsg) && label_of(f.w) == ui.plabel && (!ctx || rect_eq(f.r, ui.prect))
+                && shape_print(root, ui.pressed) == ui.pprint && (!ctx || context_print(root, ui.pressed) == ui.pctx);
     return if (same) { f } else { not_found() };
 }
 
@@ -374,7 +380,11 @@ Found pressed_in(UiState ui, Widget root, Rect area, Font fo) {
 /// label, and the text of the row or list holding it (`context_print`,
 /// R6-2). Removing, adding or replacing a widget before the pressed one
 /// changes it; so does new text in its own row or list, not in another.
-pub Int press_print(Widget root, Int upto) { return fp_mix(fp_node(root, 0, upto, Fp { .h = 17, .id = 0 }).h, context_print(root, upto)); }
+pub Int press_print(Widget root, Int upto) { return fp_mix(shape_print(root, upto), context_print(root, upto)); }
+
+/// `press_print` without the text around the widget: the structure up to
+/// it and its own label.
+pub Int shape_print(Widget root, Int upto) { return fp_node(root, 0, upto, Fp { .h = 17, .id = 0 }).h; }
 
 /// What the text around widget `n` says: `content_print` of the nearest
 /// Row, Column, Stack or Rows holding it (wrappers such as Padding are
@@ -620,7 +630,7 @@ Seek seek_kids(List(Widget) xs, UiState ui, Int i, Int id, Seek s) {
 
 UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
     if (ui.pressed < 0) { return none(ui); }
-    Found f = pressed_in(ui, root, area, fo);
+    Found f = pressed_in(ui, root, area, fo, false);
     return match (f.w) {
         Slider(v, m) => UiStep { .ui = ui, .out = [SliderSet(m, slider_value_at(f.r, x))] },
         TextInput(s, k, m) => UiStep { .ui = ui, .out = [TextEdited(m, s, caret_at_in(f.r, s, k, x, fo))] },
@@ -632,7 +642,7 @@ UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
 UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     UiState released = ui_with_pressed(ui, -1);
     if (ui.pressed < 0) { return none(released); }
-    Found f = pressed_in(ui, root, area, fo);
+    Found f = pressed_in(ui, root, area, fo, true);
     Bool inside = hit_in(root, area, x, y, fo).id == ui.pressed;
     return match (f.w) {
         Button(s, m) => UiStep { .ui = released, .out = if (inside) { [AppMsg(m)] } else { [] } },
@@ -1336,4 +1346,25 @@ test "the count of inputs alike is kept current as focus follows (R7-3)" {
     UiStep k2 = ui_event(k1.ui, Column([TextInput("x", 1, Submitted), TextInput("ax", 2, Submitted)]), r, KeyDown(31, "y"));
     expect(k2.ui.focus).toEqual(-1);
     expect(edited(k2, Submitted, 0)).toEqual(false);
+}
+
+@requires(declassify)
+test "a drag goes on when a value shown beside it changes (R7-1)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 300, .h = 200 };
+    // the gallery's row: Column 0, Row 1, Slider 2, Text 3, Bitmap 4
+    Widget at30 = Column([Row([Slider(30, Clicked), Text("30%"), Bitmap(4, 4, [])])]);
+    Widget at57 = Column([Row([Slider(57, Clicked), Text("57%"), Bitmap(4, 4, [])])]);
+    Found s = find(at30, r, 2);
+    UiStep down = ui_event(ui_new(), at30, r, PointerDown(s.r.x + s.r.w / 3, s.r.y + 2, 1));
+    expect(down.ui.pressed).toEqual(2);
+    UiStep moved = ui_event(down.ui, at57, r, PointerMoved(s.r.x + s.r.w / 2, s.r.y + 2));
+    Bool set = moved.out.len() == 2 && match (moved.out[1]) { SliderSet(m, v) => true, _ => false };
+    expect(set).toEqual(true);
+    // drag-selecting in an input beside a character count
+    Widget c2 = Column([Row([TextInput("abcdef", 0, Custom(1)), Text("6/80")])]);
+    Widget c3 = Column([Row([TextInput("abcdef", 3, Custom(1)), Text("6/80 (3)")])]);
+    Found t = find(c2, r, 2);
+    UiStep td = ui_event(ui_new(), c2, r, PointerDown(t.r.x + 6, t.r.y + 4, 1));
+    UiStep tm = ui_event(td.ui, c3, r, PointerMoved(t.r.x + 30, t.r.y + 4));
+    expect(edited(tm, Custom(1), 0)).toEqual(true);
 }

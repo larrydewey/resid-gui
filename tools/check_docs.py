@@ -20,6 +20,10 @@ Usage: tools/check_docs.py [residc]
 """
 import os, re, shutil, subprocess, sys, tempfile
 
+if any(a in ("-h", "--help") for a in sys.argv[1:]):
+    print(__doc__.strip())
+    sys.exit(0)
+
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 residc = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("RESIDC", os.path.expanduser("~/.resid/bin/residc"))
 fence = re.compile(r"^```resid[^\n]*\n(.*?)^```\s*$", re.M | re.S)

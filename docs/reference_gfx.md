@@ -14,6 +14,7 @@ servers read).
 | `font.resid` | `Font`: the built-in bitmap font or a glyph atlas; metrics |
 | `image.resid` | `Image`, alpha-blended blitting, the native decoder's answer |
 | `png.resid` | a PNG encoder for golden-image tests |
+| `readfile.resid` | a font or image file read with a limit, only if it is a regular file |
 
 ## Types
 
@@ -99,6 +100,21 @@ pub Result(Image, Str) image_parse(List(Int) answer)
 ```
 
 Pixels are laid over the canvas by their alpha.
+
+## Files
+
+```resid
+@requires(filesystem(readonly)) pub Result(List(Int), Str) read_file_limited(Str path, Int max)
+pub Str read_error(Result(List(Int), Str) r)
+```
+
+A path a program was given can name a directory, a FIFO that blocks, or
+a device such as `/dev/zero` that never ends. `read_file_limited` refuses
+a missing path, a directory, an empty file or one of no known size (a
+FIFO or a device stats as 0), and a file larger than `max`, then reads
+the size it found and no more. `gui.resid` makes it available; the
+examples and `fontfile.resid` read fonts and images through it, and
+`gui_run_dev` its event log. `read_error` is the reason, or "".
 
 ## PNG
 

@@ -100,7 +100,8 @@ When an update renumbers the widgets (a line inserted above, a row
 removed), focus follows the focused input by its kind (a `TextInput` or a
 `PasswordInput`), its message (or, for `Changed(text)`, by still echoing
 its text) and its place among the inputs alike in both; when no input is
-at that place, focus is dropped. Keys never go to an input of the other
+at that place, or several are alike and their number changed, focus is
+dropped. Keys never go to an input of the other
 kind.
 
 ## Damage

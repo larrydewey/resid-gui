@@ -444,13 +444,14 @@ Bool echoes(Msg m, Str s) { return match (m) { Changed(x) => x == s, _ => false 
 /// inputs that match it, which is how it is found again (`ui_refocus`).
 UiState focus_on(UiState ui, Widget root, Int id, Widget w) {
     UiState u = match (w) {
-        TextInput(s, k, m) => ui_with_focus_input(ui, id, m, echoes(m, s), false, 0),
+        TextInput(s, k, m) => ui_with_focus_input(ui, id, m, echoes(m, s), false, 0, 1),
         // a password's message is compared whole: its text cannot be read
-        PasswordInput(s, k, m) => ui_with_focus_input(ui, id, m, false, true, 0),
+        PasswordInput(s, k, m) => ui_with_focus_input(ui, id, m, false, true, 0, 1),
         _ => ui_with_focus_on(ui, id, msg_of(w))
     };
     if (id < 0) { return u; }
-    return ui_with_focus_input(u, id, u.fmsg, u.fecho, u.fpw, matches_before(root, u, 0, id, 0));
+    Seek all = seek_like(root, u, 0, Seek { .seen = 0, .at = -1 });
+    return ui_with_focus_input(u, id, u.fmsg, u.fecho, u.fpw, matches_before(root, u, 0, id, 0), all.seen);
 }
 
 /// Whether an input with message `m` and text `s` has the focused
@@ -479,10 +480,14 @@ pub Bool focus_like(UiState ui, Widget w) {
 /// in `ui.focus` may then name another input: keys must not go to it. The
 /// focused input is the one at its place (`ui.ford`) among the inputs
 /// like it, in pre-order: a line inserted above moves its number, not its
-/// place (R5-5). When there is no input at that place, focus is dropped.
+/// place (R5-5). When there is no input at that place, focus is dropped,
+/// and so it is when several inputs are alike and their number changed
+/// (R6-5): one inserted above the focused one would shift every place,
+/// and the keys would go to its neighbour.
 pub UiState ui_refocus(UiState ui, Widget root, Rect area, Font fo) {
     if (ui.focus < 0) { return ui; }
-    Int at = seek_like(root, ui, 0, Seek { .seen = 0, .at = -1 }).at;
+    Seek found = seek_like(root, ui, 0, Seek { .seen = 0, .at = -1 });
+    Int at = if (found.seen > 1 && found.seen != ui.fcount) { -1 } else { found.at };
     if (at == ui.focus) { return ui; }
     return if (at < 0) { ui_with_focus(ui, -1) } else { ui_with_focus_moved(ui, at) };
 }
@@ -498,18 +503,17 @@ Int matches_before_kids(List(Widget) xs, UiState ui, Int i, Int id, Int upto, In
     return matches_before_kids(xs, ui, i + 1, id + node_count(xs[i]), upto, matches_before(xs[i], ui, id, upto, n));
 }
 
-/// A search for the input at place `ford`: how many like it were passed,
-/// and its number once found (-1 until then).
+/// A search for the input at place `ford`: how many like it there are,
+/// and its number once found (-1 until then). It walks the whole view.
 type Seek = { Int seen; Int at; };
 
 Seek seek_like(Widget w, UiState ui, Int id, Seek s) {
-    if (s.at >= 0) { return s; }
-    Seek here = if (focus_like(ui, w)) { Seek { .seen = s.seen + 1, .at = if (s.seen == ui.ford) { id } else { -1 } } } else { s };
+    Seek here = if (focus_like(ui, w)) { Seek { .seen = s.seen + 1, .at = if (s.seen == ui.ford && s.at < 0) { id } else { s.at } } } else { s };
     return seek_kids(children(w), ui, 0, id + 1, here);
 }
 
 Seek seek_kids(List(Widget) xs, UiState ui, Int i, Int id, Seek s) {
-    if (i >= xs.len() || s.at >= 0) { return s; }
+    if (i >= xs.len()) { return s; }
     return seek_kids(xs, ui, i + 1, id + node_count(xs[i]), seek_like(xs[i], ui, id, s));
 }
 
@@ -1148,4 +1152,23 @@ test "losing the window forgets the password keys held (R6-6)" {
     expect(down.ui.pwkeys).toEqual([30]);
     UiStep blur = ui_event(down.ui, login, r, Blurred);
     expect(blur.ui.pwkeys.len()).toEqual(0);
+}
+
+@requires(declassify)
+test "an input like the focused one appearing drops focus (R6-5)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    // Column 0, new password 1, confirm 2: the same message
+    Widget two = Column([PasswordInput(password_empty(), 0, Submitted), PasswordInput(password_empty(), 0, Submitted)]);
+    UiState on2 = ui_event(ui_new(), two, r, Assist(2, act_focus())).ui;
+    expect(on2.focus).toEqual(2);
+    // a "current password" field is inserted above them: the confirm
+    // field's place among them would name the new password
+    Widget three = Column([PasswordInput(password_empty(), 0, Submitted), PasswordInput(password_empty(), 0, Submitted),
+                           PasswordInput(password_empty(), 0, Submitted)]);
+    UiStep typed = ui_event(on2, three, r, KeyDown(30, "x"));
+    expect(typed.ui.focus).toEqual(-1);
+    expect(pw_edited(typed, 0)).toEqual(false);
+    // the same number of them, renumbered, is followed
+    Widget moved = Column([Text("Change password"), PasswordInput(password_empty(), 0, Submitted), PasswordInput(password_empty(), 0, Submitted)]);
+    expect(ui_event(on2, moved, r, KeyDown(30, "x")).ui.focus).toEqual(3);
 }

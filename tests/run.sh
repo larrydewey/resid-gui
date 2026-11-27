@@ -29,11 +29,17 @@ extra() {
 }
 
 fail=0
+skip=0
 total=0
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
-for f in $(find "$ROOT/src" "$ROOT/tests" -name '*.resid' | sort); do
+# The files, one per line, read whole lines at a time: a path with a
+# space in it stays one path.
+find "$ROOT/src" "$ROOT/tests" -name '*.resid' | sort > "$OUT/files"
+find "$ROOT/examples" -name '*.resid' | sort > "$OUT/examples"
+
+while IFS= read -r f; do
     total=$((total + 1))
     rel=${f#"$ROOT"/}
     if grep -q '^Int main()' "$f"; then
@@ -51,16 +57,16 @@ for f in $(find "$ROOT/src" "$ROOT/tests" -name '*.resid' | sort); do
             fail=$((fail + 1))
         fi
     fi
-done
+done < "$OUT/files"
 
-for f in $(find "$ROOT/examples" -name '*.resid' | sort); do
+while IFS= read -r f; do
     total=$((total + 1))
     # shellcheck disable=SC2046
     if ! "$RESIDC" "$f" --profile check $(extra "$f") >/dev/null 2>&1; then
         echo "FAILED to build: ${f#"$ROOT"/}"
         fail=$((fail + 1))
     fi
-done
+done < "$OUT/examples"
 
 # The malicious native module against the real wrapper.
 total=$((total + 1))
@@ -70,9 +76,16 @@ if ! RESIDC="$RESIDC" "$ROOT/tests/evil.sh" >"$OUT/evil.log" 2>&1; then
     fail=$((fail + 1))
 fi
 
-# The AT-SPI bridge against a real dbus-daemon (skipped without one).
+# The AT-SPI bridge against a real dbus-daemon. Without one it exits 77:
+# skipped, counted apart, never as passed.
 total=$((total + 1))
-if ! RESIDC="$RESIDC" "$ROOT/tests/atspi.sh" >"$OUT/atspi.log" 2>&1; then
+rc=0
+RESIDC="$RESIDC" "$ROOT/tests/atspi.sh" >"$OUT/atspi.log" 2>&1 || rc=$?
+if [ "$rc" -eq 77 ]; then
+    cat "$OUT/atspi.log"
+    echo "SKIPPED: tests/atspi.sh"
+    skip=$((skip + 1))
+elif [ "$rc" -ne 0 ]; then
     cat "$OUT/atspi.log"
     echo "FAILED: tests/atspi.sh"
     fail=$((fail + 1))
@@ -111,7 +124,11 @@ fi
 
 echo
 if [ "$fail" -ne 0 ]; then
-    echo "$fail of $total file(s) failed"
+    echo "$fail of $total file(s) failed$( [ "$skip" -ne 0 ] && echo ", $skip skipped" )"
     exit 1
 fi
-echo "$total file(s) green"
+if [ "$skip" -ne 0 ]; then
+    echo "$((total - skip)) file(s) green, $skip SKIPPED (not run here; see above)"
+else
+    echo "$total file(s) green"
+fi

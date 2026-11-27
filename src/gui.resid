@@ -635,3 +635,13 @@ test "a shell's action with a stale token is dropped (R6-4)" {
     // nor does a node the core never sent
     expect(shell_says_over(now, [A11yAction(99, act_activate(), 0)]).len()).toEqual(0);
 }
+
+test "tokens tell apart texts a weak hash confused (R7-4)" {
+    Widget aa = Column([Row([Text("Aa"), Button("Delete", Custom(0))])]);
+    Widget bb = Column([Row([Text("BB"), Button("Delete", Custom(0))])]);
+    expect(node_tokens(aa)[3] == node_tokens(bb)[3]).toEqual(false);
+    A11y a1 = changed(reader_a11y(), exported(bb)).a;
+    Str old = path_in(a1, 3);
+    Served stale = serve(changed(a1, exported(aa)).a, reader_call(old, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    expect(stale.events.len()).toEqual(0);
+}

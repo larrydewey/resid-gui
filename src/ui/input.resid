@@ -426,9 +426,9 @@ Widget group_kids(List(Widget) xs, Int i, Int id, Int target, Widget cand) {
     return group_kids(xs, i + 1, id + n, target, cand);
 }
 
-/// A node's token: a print (`press_print`) in the 31 bits a protocol
-/// field carries.
-pub Int node_token(Int print) { return print & 2147483647; }
+/// A node's token: a print (`press_print`) folded into the 31 bits a
+/// protocol field carries.
+pub Int node_token(Int print) { return (print ^ (print >> 31)) & 2147483647; }
 
 /// Every widget's token, by number: `node_token(press_print(root, n))`
 /// for each `n`, in one walk. A screen reader's object path and a shell's
@@ -474,7 +474,16 @@ List(SemNode) with_tokens_at(List(SemNode) ns, List(Int) toks, Int i, ListBuf(Se
 type Fp = { Int h; Int id; };
 
 Int fp_mask() { return (1 << 40) - 1; }
-Int fp_mix(Int h, Int x) { return (h * 31 + (x & fp_mask())) & fp_mask(); }
+/// One step of the print: `x` xored in, then a multiply and an
+/// xorshift, all in 40 bits (each product stays under 2^63). A base-31
+/// sum, as before, is linear: "Aa" and "BB" gave the same print, and a
+/// reader's stale path to one row's button was taken on the other's
+/// (R7-4).
+Int fp_mix(Int h, Int x) {
+    Int a = (h ^ (x & fp_mask())) & fp_mask();
+    Int b = (a * 6700417 + 40503) & fp_mask();
+    return (b ^ (b >> 19)) & fp_mask();
+}
 
 Int fp_str(Int h, Str s, Int i) {
     if (i >= str_len(s)) { return fp_mix(h, 0); }

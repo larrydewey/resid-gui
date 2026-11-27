@@ -213,7 +213,9 @@ put it in an f-string or log it. The program reads it only with
 `declassify(m.pass, "why")`, in a function that has the `declassify`
 grant, at the point it chooses (checking a login). The library draws
 and announces one bullet per character, and never passes on the keys
-that typed it.
+that typed it: while a password has focus, `update` sees only the keys
+that say nothing of it (Shift, Ctrl, Alt, Super, Tab, Enter, Escape, the
+arrows, Home, End, Backspace and Delete), and no key's text.
 
 ## Next steps
 

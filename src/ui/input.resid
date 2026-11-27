@@ -136,9 +136,9 @@ Int next_input_at(List(Int) ids, Int cur, Int i) {
 pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) { return ui_event_in(ui, root, area, e, font_builtin()); }
 
 /// Fold one raw event through the widgets on screen, laid out in font `f`.
-/// A key that types into a focused `PasswordInput`, and any key's
-/// release there but Shift's and Ctrl's, is not passed on raw: its code
-/// and text are the password (the edit itself arrives as
+/// While a `PasswordInput` has focus, a key that types text, and any key
+/// not on `pw_key_allowed`'s list, down or up, is not passed on raw: its
+/// code and text are the password (the edit itself arrives as
 /// `PasswordEdited`). A key that went down there has its release withheld
 /// even if focus has moved by then.
 @requires(declassify)
@@ -154,19 +154,34 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
         _ => none(ui)
     };
     Bool pw = match (e) { KeyDown(code, text) => password_focused(ui, root, area, f), KeyUp(code) => password_focused(ui, root, area, f), _ => false };
+    // In a password, only the keys that type nothing and say nothing of
+    // it pass raw (`pw_key_allowed`): a shell sends a key's code with no
+    // text and its text after it as KeyDown(0, text), so a test for text
+    // would let every code through (R6-1).
     Bool withheld = match (e) {
-        KeyDown(code, text) => str_len(text) > 0 && pw,
-        KeyUp(code) => index_of_int(ui.pwkeys, code, 0) >= 0 || (!is_shift(code) && !is_ctrl(code) && pw),
+        KeyDown(code, text) => pw && (str_len(text) > 0 || !pw_key_allowed(code)),
+        KeyUp(code) => index_of_int(ui.pwkeys, code, 0) >= 0 || (pw && !pw_key_allowed(code)),
         _ => false
     };
     // a key that went down in a password is remembered until it comes up,
     // so its release is withheld even once focus has moved (R5-6)
     List(Int) held = match (e) {
-        KeyDown(code, text) => if (pw && !is_shift(code) && !is_ctrl(code)) { held_add(s.ui.pwkeys, code) } else { s.ui.pwkeys },
+        KeyDown(code, text) => if (pw && (str_len(text) > 0 || !pw_key_allowed(code))) { held_add(s.ui.pwkeys, code) } else { s.ui.pwkeys },
         KeyUp(code) => without_int(s.ui.pwkeys, code, 0, ListBuf()),
         _ => s.ui.pwkeys
     };
     return UiStep { .ui = ui_with_pwkeys(s.ui, held), .out = if (withheld) { s.out } else { [e].concat(s.out) } };
+}
+
+/// The keys a focused password passes on raw: modifiers (Shift, Ctrl,
+/// Alt, Super), Tab, Enter, Escape, the arrows, Home, End, Backspace and
+/// Delete. Every other key's code is withheld, down and up, as it could
+/// say what was typed.
+pub Bool pw_key_allowed(Int code) {
+    return is_shift(code) || is_ctrl(code) || code == key_left_alt() || code == 100 || code == 125 || code == 126
+        || code == key_tab() || code == key_enter() || code == key_kp_enter() || code == key_esc()
+        || code == key_left() || code == key_right() || code == key_up() || code == 108   // key_down(): the name is this file's handler
+        || code == key_home() || code == key_end() || code == key_backspace() || code == key_delete();
 }
 
 /// Where `x` is in `xs` from `i`, or -1.
@@ -1094,4 +1109,25 @@ test "a password key's release is withheld after focus has left it (R5-6)" {
     // a key pressed in a text input is released as usual
     UiStep t = ui_event(tab.ui, login, r, KeyDown(32, "z"));
     expect(raw_up(ui_event(t.ui, login, r, KeyUp(32)), 32, 0)).toEqual(true);
+}
+
+@requires(declassify)
+test "a password's key codes are withheld even when the text comes apart (R6-1)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
+    UiState on = ui_event(ui_new(), login, r, Assist(2, act_focus())).ui;
+    // a shell sends the key's code with no text, and the text after it
+    UiStep code = ui_event(on, login, r, KeyDown(30, ""));
+    expect(raw_key(code, 0)).toEqual(false);
+    UiStep text = ui_event(code.ui, login, r, KeyDown(0, "a"));
+    expect(raw_key(text, 0)).toEqual(false);
+    expect(pw_edited(text, 0)).toEqual(true);
+    expect(raw_up(ui_event(text.ui, login, r, KeyUp(30)), 30, 0)).toEqual(false);
+    // the keys on the allow-list pass: Shift, arrows, Backspace, Tab
+    expect(raw_key(ui_event(on, login, r, KeyDown(key_left_shift(), "")), 0)).toEqual(true);
+    expect(raw_key(ui_event(on, login, r, KeyDown(key_left(), "")), 0)).toEqual(true);
+    expect(raw_key(ui_event(on, login, r, KeyDown(key_backspace(), "")), 0)).toEqual(true);
+    expect(raw_up(ui_event(on, login, r, KeyUp(key_left())), key_left(), 0)).toEqual(true);
+    // a key on the list that types text is still withheld
+    expect(raw_key(ui_event(on, login, r, KeyDown(key_enter(), "\n")), 0)).toEqual(false);
 }

@@ -518,3 +518,44 @@ test "a reader's path from before the rows changed names nothing (R5-4)" {
     expect(path_in(same.a, 6)).toEqual(path_in(moved.a, 6));
     expect(serve(same.a, reader_call(path_in(moved.a, 6), "org.a11y.atspi.Action", "DoAction", [DI32(0)])).events.len()).toEqual(1);
 }
+
+/// The events a turn's pump turns `msgs` from a shell into.
+@requires(display)
+List(Event) shell_says(List(FromShell) msgs) {
+    List(Int) pair = resid_disp_pair();
+    Rsp r = rsp_failed("");
+    Rsp r0 = Rsp { .fd = pair[1], .alive = true, .err = "", .buf = [], .win = r.win, .bufs = r.bufs, .frame_ok = true, .sem = [], .sent = 0 };
+    _ = resid_disp_send(pair[0], shell_bytes(msgs, 0, ListBuf()), -1);
+    List(Event) es = be_pump(r0, 100).events;
+    _ = resid_disp_close(pair[0]);
+    _ = resid_disp_close(pair[1]);
+    return es;
+}
+
+List(Int) shell_bytes(List(FromShell) ms, Int i, ListBuf(Int) acc) {
+    if (i >= ms.len()) { return acc.finish(); }
+    return shell_bytes(ms, i + 1, push_all(acc, from_shell_bytes(ms[i]), 0));
+}
+
+/// What `ui_event` passes on of `es`, folded in order over `v`.
+@requires(declassify)
+List(Event) passed_on(UiState ui, Widget v, List(Event) es, Int i, List(Event) acc) {
+    if (i >= es.len()) { return acc; }
+    UiStep u = ui_event(ui, v, Rect { .x = 0, .y = 0, .w = 200, .h = 200 }, es[i]);
+    return passed_on(u.ui, v, es, i + 1, acc.concat(u.out));
+}
+
+Bool any_key(List(Event) es, Int i) {
+    if (i >= es.len()) { return false; }
+    Bool k = match (es[i]) { KeyDown(c, t) => true, KeyUp(c) => true, _ => false };
+    return k || any_key(es, i + 1);
+}
+
+@requires(display, declassify)
+test "a password typed through a shell passes no key on (R6-1)" {
+    Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
+    UiState on = ui_event(ui_new(), login, Rect { .x = 0, .y = 0, .w = 200, .h = 200 }, Assist(2, act_focus())).ui;
+    List(Event) es = shell_says([Key(30, 1, 0), TextCommit("a"), Key(30, 0, 0)]);
+    expect(es.len()).toEqual(3);
+    expect(any_key(passed_on(on, login, es, 0, []), 0)).toEqual(false);
+}

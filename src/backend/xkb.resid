@@ -75,10 +75,12 @@ Bool key_name(Str s) { return str_starts_with(s, "<") && str_ends_with(s, ">"); 
 
 // ─── Key codes ──────────────────────────────────────────────────────
 
-/// Every `<NAME> = number;`: the key codes section's definitions.
+/// Every `<NAME> = number;`: the key codes section's definitions. A
+/// number of more than 9 digits is no key code and is not parsed (it
+/// would not fit, or would wrap, in str_parse_int).
 Map(Str, Int) key_codes(List(Str) t, Int i, Map(Str, Int) acc) {
     if (i + 3 >= t.len()) { return acc; }
-    if (key_name(t[i]) && t[i + 1] == "=" && str_is_int(t[i + 2]) && t[i + 3] == ";") {
+    if (key_name(t[i]) && t[i + 1] == "=" && str_len(t[i + 2]) <= 9 && str_is_int(t[i + 2]) && t[i + 3] == ";") {
         return key_codes(t, i + 4, acc.insert(t[i], str_parse_int(t[i + 2])));
     }
     return key_codes(t, i + 1, acc);
@@ -220,4 +222,11 @@ test "text that is not a keymap" {
     expect(none).toEqual(true);
     Bool empty = match (xkb_keymap([])) { Some(_) => false, None => true };
     expect(empty).toEqual(true);
+}
+
+test "a key code of more than 9 digits is not read" {
+    Map(Str, Int) m = key_codes(["<AC01>", "=", "99999999999999999999999", ";", "<AC02>", "=", "39", ";"], 0, {});
+    Bool none = match (m.get("<AC01>")) { Some(x) => false, None => true };
+    expect(none).toEqual(true);
+    expect(m.get("<AC02>") else { 0 }).toEqual(39);
 }

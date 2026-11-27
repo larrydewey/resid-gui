@@ -139,7 +139,7 @@ pub Int atspi_role(A11y a, Int id) {
     if (id == root_id()) { return 75; }
     if (id == frame_id()) { return 23; }
     Int r = node(a, id).role;
-    List(Int) map = [39, 29, 43, 7, 61, 51, 27, 49, 31];
+    List(Int) map = [39, 29, 43, 7, 61, 51, 27, 49, 31, 40];
     return if (r >= 0 && r < map.len()) { map[r] } else { 39 };
 }
 
@@ -154,6 +154,7 @@ pub Str role_name(Int role) {
     if (role == 27) { return "image"; }
     if (role == 49) { return "scroll pane"; }
     if (role == 31) { return "list"; }
+    if (role == 40) { return "password text"; }
     return "panel";
 }
 
@@ -193,7 +194,7 @@ List(Str) interfaces(A11y a, Int id) {
     if (id == frame_id()) { return ["org.a11y.atspi.Accessible", "org.a11y.atspi.Component"]; }
     SemNode n = node(a, id);
     List(Str) act = if ((n.actions & act_activate()) != 0) { ["org.a11y.atspi.Action"] } else { [] };
-    List(Str) text = if (n.role == role_textbox()) { ["org.a11y.atspi.Text"] } else { [] };
+    List(Str) text = if (is_text(n.role)) { ["org.a11y.atspi.Text"] } else { [] };
     return ["org.a11y.atspi.Accessible", "org.a11y.atspi.Component"].concat(act).concat(text);
 }
 
@@ -323,6 +324,11 @@ Served action(A11y a, DMsg m, Int id) {
     return fail(a, m, "org.freedesktop.DBus.Error.UnknownMethod", "Action." + k + " is not supported");
 }
 
+/// A text field or a password field: both answer Text. A password
+/// field's node holds its bullets, never its text (semantics.resid), so
+/// GetText, the character count and value signals give bullets.
+Bool is_text(Int role) { return role == role_textbox() || role == role_password(); }
+
 Served text(A11y a, DMsg m, Int id) {
     Str v = node(a, id).value;
     if (m.member == "GetText") {
@@ -351,7 +357,7 @@ DV prop(A11y a, Int id, Str iface, Str p) {
         if (p == "Id") { return DI32(0); }
     }
     if (iface == "org.a11y.atspi.Action" && can_act(a, id) && p == "NActions") { return DI32(1); }
-    if (iface == "org.a11y.atspi.Text" && id >= 0 && node(a, id).role == role_textbox()) {
+    if (iface == "org.a11y.atspi.Text" && id >= 0 && is_text(node(a, id).role)) {
         if (p == "CharacterCount") { return DI32(str_len(node(a, id).value)); }
         if (p == "CaretOffset") { return DI32(str_len(node(a, id).value)); }
     }

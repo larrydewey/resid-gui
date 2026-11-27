@@ -113,6 +113,8 @@ List(DrawOp) paint_self(Widget w, Rect r, UiState ui, Int id, Font f, Theme t) {
         Button(s, m) => framed_round(r, t.radius, t.rule_strong, if (ui.pressed == id) { t.surface_down } else { t.surface }).concat([label(r, (r.w - text_width_in(f, s)) / 2, s, t.ink, f)]),
         Checkbox(s, on, m) => paint_check(r, s, on, ui.pressed == id, f, t),
         TextInput(s, caret, m) => paint_input(r, s, caret, ui.focus == id, ui.caret_on, if (ui.focus == id) { ui.anchor } else { -1 }, f, t),
+        // a password is drawn as its bullets: only its length is read
+        PasswordInput(s, caret, m) => paint_input(r, password_bullets(s), caret, ui.focus == id, ui.caret_on, if (ui.focus == id) { ui.anchor } else { -1 }, f, t),
         Slider(v, m) => paint_slider(r, v, t),
         // an image whose pixels do not fill its claimed size draws nothing,
         // so no claimed size reaches damage or the rasterizer (R4-7)

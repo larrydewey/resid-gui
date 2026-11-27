@@ -53,7 +53,7 @@ FROM_SHELL = {"Welcome": (129, "iis"), "Configure": (130, "iiiiiiii"), "FrameDon
               "Pointer": (133, "iiiiiii"), "ScrollBy": (134, "iii"), "Key": (135, "iii"), "TextCommit": (136, "s"),
               "Preedit": (137, "si"), "Lifecycle": (138, "i"), "A11yAction": (139, "ii"),
               "ClipboardData": (140, "sb"), "DialogResult": (141, "ii"), "MenuActivated": (142, "i")}
-ROLES = ["group", "text", "button", "checkbox", "text field", "slider", "image", "scroll area", "list"]
+ROLES = ["group", "text", "button", "checkbox", "text field", "slider", "image", "scroll area", "list", "password field"]
 
 
 class ProtocolError(Exception):
@@ -308,7 +308,7 @@ class Shell:
                     self.send("Pointer", 1, x, y, 1, 0, 0, 0)
                     self.send("Pointer", 2, x, y, 1, 0, 0, 0)
                 else:
-                    self.send("A11yAction", n["id"], 2 if n["role"] == 4 else 1)
+                    self.send("A11yAction", n["id"], 2 if n["role"] in (4, 9) else 1)
             elif verb == "type":
                 self.send("TextCommit", arg)
             elif verb == "key":

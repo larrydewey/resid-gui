@@ -3,7 +3,10 @@
 // A program declares an `App(M)` instance and calls `gui_run`. The library
 // owns the display connection, the frame loop and the pixels; the program
 // owns the model. Nothing here holds ambient authority: every function
-// that reaches a display builtin or the clock says so with @requires.
+// that reaches a display builtin or the clock says so with @requires. The
+// loop also needs `declassify`: editing a `PasswordInput` splices each
+// keystroke into its `Secret(Str)` text (`pw_splice`, ui/input.resid),
+// the library's one declassification; so a program's `main` grants it.
 //
 // The loop is written once against `Backend(B)` and runs over whichever
 // backend could open a window: Wayland when a compositor is reachable,
@@ -81,14 +84,14 @@ Int now_ms() { return clock.monotonic_ns() / 1000000; }
 /// is closed. Returns the process exit status: 0 after a clean close, 1
 /// when no display could be opened.
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run(WindowOptions opts) { return gui_run_with(opts, []); }
 
 /// `gui_run` with text in TrueType fonts: glyph atlases the program made
 /// with the native font module (native/font/font.resid), one per device
 /// scale it wants sharp. An empty list means the built-in bitmap font.
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_with(WindowOptions opts, List(Font) fonts) {
     M m0 = init();
     return gui_run_model(opts, m0, fonts);
@@ -97,7 +100,7 @@ pub Int gui_run_with(WindowOptions opts, List(Font) fonts) {
 /// `gui_run_with` starting from `m0` instead of `init()`: for a program
 /// whose first model depends on what `main` read (a file, the arguments).
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts) {
     Int rfd = resid_disp_connect_rsp();
     if (rfd >= 0) {
@@ -120,7 +123,7 @@ pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts) {
 /// Wayland, X11), with the events `update` saw kept. `opened` is false
 /// when no display could be opened.
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Recorded(M) gui_run_model_recorded(WindowOptions opts, M m0, List(Font) fonts) {
     Int rfd = resid_disp_connect_rsp();
     if (rfd >= 0) {
@@ -140,7 +143,7 @@ pub Recorded(M) gui_run_model_recorded(WindowOptions opts, M m0, List(Font) font
 /// `gui_run` over X11 only, for testing the X11 backend on a Wayland
 /// desktop (Xwayland).
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_x11(WindowOptions opts) {
     X11 x = x11_start(opts);
     M m0 = init();
@@ -152,7 +155,7 @@ pub Int gui_run_x11(WindowOptions opts) {
 /// Run the program from model `m0` on an opened backend, with text in
 /// `fonts` (see `gui_run_with`).
 @needs(App(M), Backend(B))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_on(B b, M m0, List(Font) fonts) {
     Widget v0 = view(m0);
     Loop(M) st = Loop {
@@ -164,7 +167,7 @@ pub Int gui_run_on(B b, M m0, List(Font) fonts) {
 }
 
 @needs(App(M), Backend(B))
-@requires(display, clock(readonly))
+@requires(display, clock(readonly), declassify)
 Int gui_loop(B b, Loop(M) st0) {
     Loop(M) end = run_loop(b, st0);
     return 0;
@@ -177,7 +180,7 @@ pub type Recorded(M) = { Bool opened; M model; List(Event) log; };
 
 /// `gui_run_on`, keeping the events `update` saw.
 @needs(App(M), Backend(B))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Recorded(M) gui_run_recorded(B b, M m0, List(Font) fonts) {
     Widget v0 = view(m0);
     Loop(M) st = Loop {
@@ -190,7 +193,7 @@ pub Recorded(M) gui_run_recorded(B b, M m0, List(Font) fonts) {
 }
 
 @needs(App(M), Backend(B))
-@requires(display, clock(readonly))
+@requires(display, clock(readonly), declassify)
 Loop(M) run_loop(B b, Loop(M) st0) {
     if (st0.done || !be_alive(b)) {
         _ = be_close(b);
@@ -314,6 +317,7 @@ pub Bool assist_current(Event e, Int p, Widget v) {
 /// Fold the backend's events, in order, through the widgets and `update`.
 /// `prints` holds `assist_prints` for the first events (a reader's).
 @needs(App(M))
+@requires(declassify)
 Loop(M) fold_events(List(Event) es, List(Int) prints, Int i, Loop(M) st, Int s, Int w, Int h) {
     if (i >= es.len() || st.done) { return st; }
     if (i < prints.len() && !assist_current(es[i], prints[i], st.view)) { return fold_events(es, prints, i + 1, st, s, w, h); }
@@ -450,6 +454,7 @@ test "a window past 16384 pixels a side is refused before it is asked for (R4-7)
     _ = resid_disp_close(pair2[0]);
 }
 
+@requires(declassify)
 test "a reader's action after the view renumbered hits its widget or nothing (R4-2)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...

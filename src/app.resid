@@ -29,11 +29,17 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
 ///   on widget number `node` (see `act_*` in ui/semantics.resid). The
 ///   library turns it into what a pointer or keyboard would have done
 ///   (`AppMsg`, focus) and passes it on as well.
+/// - `PasswordEdited(m, text, caret)`: a focused `PasswordInput` was
+///   edited; as with `TextEdited`, the program stores the text and caret
+///   and passes them back in `view`. The text is a `Secret(Str)`: the type
+///   system keeps it out of `Show`, f-strings, logs and comparisons; the
+///   program reads it only through `declassify`, where it chooses (to
+///   check a login, say). The keys that typed it are not passed on.
 /// - `ScrollTo(scroll, offset)`: a screen reader asked to see a widget
 ///   scrolled out of view; the `Scroll` numbered `scroll` (pre-order, as
 ///   `Assist` numbers widgets) shows it at `offset`. The program owns the
 ///   offset, as it does for `Wheel`: one with a single `Scroll` sets it.
-type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int) | Assist(Int, Int) | ScrollTo(Int, Int);
+type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int, Int, Int) | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int) | Focused | Blurred | Closed | FrameTick | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int) | Assist(Int, Int) | ScrollTo(Int, Int) | PasswordEdited(Msg, Secret(Str), Int);
 
 /// What the program wants on screen. A widget is a value, so two equal
 /// models give two equal display lists and therefore identical pixels.
@@ -42,6 +48,11 @@ type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int
 /// - `Button(label, m)`: raises `AppMsg(m)` when clicked.
 /// - `Checkbox(label, checked, m)`: raises `AppMsg(m)` when clicked.
 /// - `TextInput(text, caret, m)`: an editable line; see `TextEdited`.
+/// - `PasswordInput(text, caret, m)`: an editable line whose text is a
+///   secret: drawn as one bullet per character, read to screen readers
+///   as a password field holding that many bullets, never exported
+///   (semantics, AT-SPI, the RSP tree, the timeline); see
+///   `PasswordEdited`. Start it from `password_empty()`.
 /// - `Row(xs)` / `Column(xs)`: children side by side or stacked, each at
 ///   its natural size; `Spacer`s share whatever space is left.
 /// - `Stack(xs)`: children drawn over each other in the same box.
@@ -62,7 +73,21 @@ type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int
 /// - `Themed(spec, w)`: `w` in the theme `spec` derives (ui/theme.resid):
 ///   switch light and dark from the model, or give a panel its own
 ///   accent. Lays out exactly as `w`.
-type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget)) | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget) | Rows(Int, Int, List(Widget)) | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer | Themed(ThemeSpec, Widget);
+type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg) | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget)) | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget) | Rows(Int, Int, List(Widget)) | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer | Themed(ThemeSpec, Widget) | PasswordInput(Secret(Str), Int, Msg);
+
+/// An empty password, for a `PasswordInput`'s first view. (`classify`:
+/// an empty text holds no secret, and a known one built with `secret`
+/// would be refused, E0250.)
+pub Secret(Str) password_empty() { return classify(""); }
+
+/// The character a `PasswordInput` shows for each of its own: U+2022.
+pub Str password_bullet() { return "•"; }
+
+/// What a `PasswordInput` holding `s` shows and reads: one bullet per
+/// character. Only the length is used, which is public (spec §48).
+pub Str password_bullets(Secret(Str) s) { return bullets_n(s.len(), StrBuf()); }
+
+Str bullets_n(Int n, StrBuf b) { return if (n <= 0) { b.finish() } else { bullets_n(n - 1, b.push(password_bullet())) }; }
 
 /// A program's application: a model, a pure step over events, a pure view.
 behavior App(M) {
@@ -106,4 +131,10 @@ test "messages compare by value" {
     expect(msg_eq(Custom(1), Custom(2))).toEqual(false);
     expect(msg_eq(Clicked, Toggled)).toEqual(false);
     expect(msg_eq(Changed("a"), Changed("a"))).toEqual(true);
+}
+
+test "a password shows one bullet per character" {
+    expect(password_bullets(password_empty())).toEqual("");
+    expect(str_len(password_bullets(classify("héllo")))).toEqual(5);
+    expect(password_bullets(classify("ab"))).toEqual("••");
 }

@@ -163,20 +163,20 @@ Sh sh_new(Int scale) {
                 .bye = false, .why = "", .platform_scale = scale };
 }
 
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 Int core(Int fd) {
     Rsp r = rsp_start_on(fd, WindowOptions { .title = "Counter", .width = 160, .height = 60, .resizable = true });
     if (!r.alive) { return 100; }
     return gui_run_on(r, counter_init(), []);
 }
 
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 test "a shell drives the counter by pointer and by screen reader" {
     List(Int) pair = resid_disp_pair();
     expect(pair.len()).toEqual(2);
     Int sfd = pair[0];
     Int cfd = pair[1];
-    Result(Int, RegionError) r = spawn (display, accessibility, clock(readonly)) {
+    Result(Int, RegionError) r = spawn (display, accessibility, clock(readonly), declassify) {
         return core(cfd);
     };
     Sh s = serve(sfd, [], sh_new(2));

@@ -58,7 +58,10 @@ pub Str event_lit(Event e) {
         TextEdited(m, t, k) => "TextEdited(" + msg_lit(m) + ", " + str_lit(t) + f", {k})",
         SliderSet(m, v) => "SliderSet(" + msg_lit(m) + f", {v})",
         Assist(n, a) => f"Assist({n}, {a})",
-        ScrollTo(n, o) => f"ScrollTo({n}, {o})"
+        ScrollTo(n, o) => f"ScrollTo({n}, {o})",
+        // a password's text and caret are not written: neither the log
+        // nor a hot restart may hold them, and a replay starts it empty
+        PasswordEdited(m, s, k) => "PasswordEdited(" + msg_lit(m) + ")"
     };
 }
 
@@ -210,6 +213,7 @@ Result(Event, Str) to_event(Str n, List(Lit) a) {
     if (n == "SliderSet" && shaped(a, "mi")) { return Ok(SliderSet(to_msg(a[0]), ival(a[1]))); }
     if (n == "Assist" && shaped(a, "ii")) { return Ok(Assist(ival(a[0]), ival(a[1]))); }
     if (n == "ScrollTo" && shaped(a, "ii")) { return Ok(ScrollTo(ival(a[0]), ival(a[1]))); }
+    if (n == "PasswordEdited" && shaped(a, "m")) { return Ok(PasswordEdited(to_msg(a[0]), password_empty(), 0)); }
     return Err(f"not an event: {n} with {a.len()} argument(s)");
 }
 

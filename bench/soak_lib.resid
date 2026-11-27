@@ -206,7 +206,7 @@ Comp2 wind_down(Int fd, Comp2 s, Int tries) {
     return wind_down(fd, serve_once(fd, s, 1000), tries - 1);
 }
 
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 Int run_client(Int fd) {
     Wl w = wl_start_on(fd, WindowOptions { .title = "soak", .width = 200, .height = 100, .resizable = true });
     if (!w.alive) { return 100; }
@@ -218,7 +218,7 @@ Int run_client(Int fd) {
 pub type Soaked = { Int code; Int events; Int frames; List(Int) marks; };
 
 /// Soak the counter with `total` events.
-@requires(display, accessibility, clock(readonly), filesystem(readonly))
+@requires(display, accessibility, clock(readonly), filesystem(readonly), declassify)
 pub Soaked soak(Int total) {
     List(Int) pair = resid_disp_pair();
     Int sfd = pair[0];
@@ -230,7 +230,7 @@ pub Soaked soak(Int total) {
     Int by = btn.bounds.y + btn.bounds.h / 2;
     Str rss0 = status_field("VmRSS:");
     println(f"button at {bx},{by}; start rss {rss0}");
-    Result(Int, RegionError) r = spawn (display, accessibility, clock(readonly)) {
+    Result(Int, RegionError) r = spawn (display, accessibility, clock(readonly), declassify) {
         return run_client(cfd);
     };
     Int t0 = clock.monotonic_ns();

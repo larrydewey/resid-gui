@@ -38,6 +38,9 @@ pub Int role_slider() { return 5; }
 pub Int role_image() { return 6; }
 pub Int role_scroll() { return 7; }
 pub Int role_list() { return 8; }
+/// A `PasswordInput`: its value is one bullet per character, never the
+/// text (AT-SPI PASSWORD_TEXT).
+pub Int role_password() { return 9; }
 
 pub Int sem_checked() { return 1; }
 pub Int sem_focused() { return 2; }
@@ -77,7 +80,7 @@ type Layer = { Widget w; Rect r; };
 /// Whether a widget takes the pointer (`interactive` in input.resid).
 Bool takes_input(Widget w) {
     Int role = role_of(w);
-    return role == role_button() || role == role_checkbox() || role == role_textbox() || role == role_slider();
+    return role == role_button() || role == role_checkbox() || role == role_textbox() || role == role_slider() || role == role_password();
 }
 
 /// Whether a click at (`x`, `y`) would land on something in `w` laid out
@@ -106,6 +109,7 @@ pub Int role_of(Widget w) {
         Button(s, m) => role_button(),
         Checkbox(s, c, m) => role_checkbox(),
         TextInput(s, k, m) => role_textbox(),
+        PasswordInput(s, k, m) => role_password(),
         Slider(v, m) => role_slider(),
         Bitmap(bw, bh, px) => role_image(),
         Scroll(o, c) => role_scroll(),
@@ -121,6 +125,7 @@ SemNode node_of(Widget w, Rect r, UiState ui, Int id, Int parent) {
         Button(s, m) => mk(id, parent, role_button(), 0, r, act_activate(), s, ""),
         Checkbox(s, c, m) => mk(id, parent, role_checkbox(), if (c) { sem_checked() } else { 0 }, r, act_activate(), s, ""),
         TextInput(s, k, m) => mk(id, parent, role_textbox(), sem_editable() | focused, r, act_focus() | act_set_value(), "", s),
+        PasswordInput(s, k, m) => mk(id, parent, role_password(), sem_editable() | focused, r, act_focus(), "", password_bullets(s)),
         Slider(v, m) => mk(id, parent, role_slider(), 0, r, act_set_value(), "", f"{v}"),
         Bitmap(bw, bh, px) => mk(id, parent, role_image(), 0, r, 0, "", ""),
         Scroll(o, c) => mk(id, parent, role_scroll(), 0, r, act_scroll(), "", f"{o}"),
@@ -238,7 +243,7 @@ pub Str sem_speech(List(SemNode) ns) { return speech_at(ns, 0, StrBuf()); }
 Str speech_at(List(SemNode) ns, Int i, StrBuf b) {
     if (i >= ns.len()) { return b.finish(); }
     SemNode n = ns[i];
-    List(Str) names = ["group", "text", "button", "checkbox", "text field", "slider", "image", "scroll area", "list"];
+    List(Str) names = ["group", "text", "button", "checkbox", "text field", "slider", "image", "scroll area", "list", "password field"];
     Str role = if (n.role >= 0 && n.role < names.len()) { names[n.role] } else { "group" };
     Str checked = if (n.role == role_checkbox()) { if ((n.flags & sem_checked()) != 0) { ", checked" } else { ", not checked" } } else { "" };
     Str focused = if ((n.flags & sem_focused()) != 0) { ", focused" } else { "" };

@@ -36,6 +36,7 @@ pub Size pref_size_in(Widget w, Font f) {
         Button(s, m) => Size { .w = text_width_in(f, s) + 28, .h = lh + 8 },
         Checkbox(s, c, m) => Size { .w = text_width_in(f, s) + 30, .h = lh },
         TextInput(s, k, m) => Size { .w = max_int(text_width_in(f, s) + 12, 120), .h = lh + 8 },
+        PasswordInput(s, k, m) => Size { .w = max_int(text_width_in(f, password_bullets(s)) + 12, 120), .h = lh + 8 },
         Row(xs) => Size { .w = sum_w(xs, 0, 0, f) + gaps(xs), .h = max_h(xs, 0, 0, f) },
         Column(xs) => Size { .w = max_w(xs, 0, 0, f), .h = sum_h(xs, 0, 0, f) + gaps(xs) },
         Stack(xs) => Size { .w = max_w(xs, 0, 0, f), .h = max_h(xs, 0, 0, f) },
@@ -75,6 +76,7 @@ pub Bool stretches_x(Widget w) {
     return match (w) {
         Spacer => true,
         TextInput(s, k, m) => true,
+        PasswordInput(s, k, m) => true,
         Slider(v, m) => true,
         Scroll(o, c) => true,
         Rows(o, rh, xs) => true,

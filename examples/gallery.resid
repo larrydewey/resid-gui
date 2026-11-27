@@ -1,17 +1,19 @@
 import "../src/gui.resid";
 
-// Every widget once: text, buttons, a checkbox, a text input, a slider, a
-// bitmap, a scrolling list and stretching spacers.
+// Every widget once: text, buttons, a checkbox, a text input, a password
+// input, a slider, a bitmap, a scrolling list and stretching spacers.
 
-type Gallery = { Int clicks; Bool checked; Str text; Int caret; Int level; Int scroll; };
+type Gallery = { Int clicks; Bool checked; Str text; Int caret; Int level; Int scroll; Secret(Str) pass; Int pcaret; };
 
-Gallery gallery_init() { return Gallery { .clicks = 0, .checked = false, .text = "edit me", .caret = 7, .level = 30, .scroll = 0 }; }
+Gallery gallery_init() { return Gallery { .clicks = 0, .checked = false, .text = "edit me", .caret = 7, .level = 30, .scroll = 0, .pass = password_empty(), .pcaret = 0 }; }
 
-Gallery with_clicks(Gallery g, Int c) { return Gallery { .clicks = c, .checked = g.checked, .text = g.text, .caret = g.caret, .level = g.level, .scroll = g.scroll }; }
-Gallery with_checked(Gallery g, Bool c) { return Gallery { .clicks = g.clicks, .checked = c, .text = g.text, .caret = g.caret, .level = g.level, .scroll = g.scroll }; }
-Gallery with_text(Gallery g, Str t, Int k) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = t, .caret = k, .level = g.level, .scroll = g.scroll }; }
-Gallery with_level(Gallery g, Int v) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = g.text, .caret = g.caret, .level = v, .scroll = g.scroll }; }
-Gallery with_scroll(Gallery g, Int s) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = g.text, .caret = g.caret, .level = g.level, .scroll = if (s < 0) { 0 } else { if (s > 400) { 400 } else { s } } }; }
+Gallery with_clicks(Gallery g, Int c) { return Gallery { .clicks = c, .checked = g.checked, .text = g.text, .caret = g.caret, .level = g.level, .scroll = g.scroll, .pass = g.pass, .pcaret = g.pcaret }; }
+Gallery with_checked(Gallery g, Bool c) { return Gallery { .clicks = g.clicks, .checked = c, .text = g.text, .caret = g.caret, .level = g.level, .scroll = g.scroll, .pass = g.pass, .pcaret = g.pcaret }; }
+Gallery with_text(Gallery g, Str t, Int k) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = t, .caret = k, .level = g.level, .scroll = g.scroll, .pass = g.pass, .pcaret = g.pcaret }; }
+Gallery with_level(Gallery g, Int v) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = g.text, .caret = g.caret, .level = v, .scroll = g.scroll, .pass = g.pass, .pcaret = g.pcaret }; }
+Gallery with_scroll(Gallery g, Int s) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = g.text, .caret = g.caret, .level = g.level, .scroll = if (s < 0) { 0 } else { if (s > 400) { 400 } else { s } }, .pass = g.pass, .pcaret = g.pcaret }; }
+
+Gallery with_pass(Gallery g, Secret(Str) p, Int k) { return Gallery { .clicks = g.clicks, .checked = g.checked, .text = g.text, .caret = g.caret, .level = g.level, .scroll = g.scroll, .pass = p, .pcaret = k }; }
 
 Gallery on_msg(Gallery g, Msg m) {
     return match (m) {
@@ -26,6 +28,8 @@ Gallery gallery_update(Gallery g, Event e) {
     return match (e) {
         AppMsg(m) => on_msg(g, m),
         TextEdited(m, t, k) => with_text(g, t, k),
+        // kept as a secret; the gallery never reads it
+        PasswordEdited(m, p, k) => with_pass(g, p, k),
         SliderSet(m, v) => with_level(g, v),
         Wheel(dx, dy) => with_scroll(g, g.scroll + dy * 24),
         // a screen reader asked to see a line scrolled out of view
@@ -53,6 +57,7 @@ Widget gallery_view(Gallery g) {
         Text("Gallery"),
         Row([Button("click", Clicked), Text(f"{g.clicks} clicks"), Spacer, Checkbox("checked", g.checked, Toggled)]),
         Row([TextInput(g.text, g.caret, Submitted), Button("clear", Submitted)]),
+        Row([Text("password"), PasswordInput(g.pass, g.pcaret, Custom(9))]),
         Row([Slider(g.level, Clicked), Text(f"{g.level}%"), Bitmap(32, 32, swatch(g.level))]),
         Stack([Text("under"), Align(100, 0, Text("over, right"))]),
         Scroll(g.scroll, Column(lines(0, 20, [])))
@@ -61,7 +66,7 @@ Widget gallery_view(Gallery g) {
 
 App(Gallery) = { .init = gallery_init, .update = gallery_update, .view = gallery_view };
 
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 Int main() {
     return gui_run(WindowOptions { .title = "Gallery", .width = 420, .height = 360, .resizable = true });
 }

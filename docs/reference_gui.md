@@ -9,12 +9,13 @@ type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int
            | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int)
            | Focused | Blurred | Closed | FrameTick
            | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int)
-           | Assist(Int, Int) | ScrollTo(Int, Int);
+           | Assist(Int, Int) | ScrollTo(Int, Int) | PasswordEdited(Msg, Secret(Str), Int);
 
 type Widget = Text(Str) | Button(Str, Msg) | Checkbox(Str, Bool, Msg) | TextInput(Str, Int, Msg)
             | Row(List(Widget)) | Column(List(Widget)) | Stack(List(Widget))
             | Padding(Int, Widget) | Align(Int, Int, Widget) | Scroll(Int, Widget) | Rows(Int, Int, List(Widget))
-            | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer;
+            | Bitmap(Int, Int, List(Int)) | Slider(Int, Msg) | Spacer | Themed(ThemeSpec, Widget)
+            | PasswordInput(Secret(Str), Int, Msg);
 
 behavior App(M) {
     M init();
@@ -25,6 +26,9 @@ behavior App(M) {
 type WindowOptions = { Str title; Int width; Int height; Bool resizable; };
 
 pub Bool msg_eq(Msg a, Msg b)
+pub Secret(Str) password_empty()
+pub Str password_bullets(Secret(Str) s)
+pub Str window_options_err(WindowOptions o)
 ```
 
 The meaning of each event and widget is in
@@ -34,27 +38,38 @@ The meaning of each event and widget is in
 
 ```resid
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run(WindowOptions opts)
 
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_x11(WindowOptions opts)
 
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_with(WindowOptions opts, List(Font) fonts)
 
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
 
 @needs(App(M), Backend(B))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_on(B b, M m0, List(Font) fonts)
 
 pub Font pick_font(List(Font) fs, Int scale)
 ```
+
+Every way to run a program needs the `declassify` grant, and so does the
+`main` that calls it: a `PasswordInput`'s text is a `Secret(Str)`, and
+editing it splices each keystroke into that text (`pw_splice` in
+`ui/input.resid`, the library's one `declassify`, recorded in the graph as
+`declassify.a password input splices a keystroke into its own text`). The
+text is wrapped again at once and reaches nothing else: not semantics,
+AT-SPI, the RSP tree, the display list or the timeline, which the type
+system checks (a secret cannot be shown, compared or put in an f-string).
+A window whose width or height is past 16384 is refused before any
+backend opens it (`window_options_err`).
 
 `gui_run` opens a Wayland toplevel when a compositor is reachable and an
 X11 window otherwise, runs the program until the window closes, and

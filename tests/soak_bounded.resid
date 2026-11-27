@@ -21,7 +21,7 @@
 
 import "../bench/soak_lib.resid";
 
-@requires(display, accessibility, clock(readonly), filesystem(readonly))
+@requires(display, accessibility, clock(readonly), filesystem(readonly), declassify)
 Int main() {
     Int total = 120000;
     Soaked s = soak(total);

@@ -51,7 +51,7 @@ Widget counter_view(Int m) {
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 Int main() {
     return gui_run(WindowOptions { .title = "Counter", .width = 240, .height = 90, .resizable = true });
 }
@@ -78,7 +78,7 @@ type Event = PointerMoved(Int, Int) | PointerDown(Int, Int, Int) | PointerUp(Int
            | Wheel(Int, Int) | KeyDown(Int, Str) | KeyUp(Int) | Resized(Int, Int)
            | Focused | Blurred | Closed | FrameTick
            | AppMsg(Msg) | TextEdited(Msg, Str, Int) | SliderSet(Msg, Int)
-           | Assist(Int, Int) | ScrollTo(Int, Int);
+           | Assist(Int, Int) | ScrollTo(Int, Int) | PasswordEdited(Msg, Secret(Str), Int);
 ```
 
 Coordinates are logical pixels. Buttons are 1 (left), 2 (middle) and
@@ -89,7 +89,7 @@ keyboard layout.
 `FrameTick` arrives every 500 ms (it also blinks the caret). `Closed` is
 the last event `update` sees.
 
-The last five are widget events, raised by the library:
+The last six are widget events, raised by the library:
 
 | Event | When |
 |---|---|
@@ -98,6 +98,7 @@ The last five are widget events, raised by the library:
 | `SliderSet(m, value)` | a `Slider` was clicked or dragged to `value` (0 to 100) |
 | `Assist(node, action)` | a screen reader acted on widget `node`; the library has already turned it into the click or focus it means |
 | `ScrollTo(scroll, offset)` | a screen reader asked to see a widget scrolled out of view: set the `Scroll` numbered `scroll` to `offset`, as for `Wheel` |
+| `PasswordEdited(m, text, caret)` | a focused `PasswordInput` was edited or its caret moved; `text` is a `Secret(Str)` the model keeps, and reads only with `declassify` |
 
 `m` is the widget's own message, so `Custom(n)` tells many widgets apart:
 
@@ -113,6 +114,7 @@ type Msg = Clicked | Toggled | Changed(Str) | Submitted | Custom(Int);
 | `Button(label, m)` | raises `AppMsg(m)` when clicked |
 | `Checkbox(label, checked, m)` | raises `AppMsg(m)` when clicked; the model flips `checked` |
 | `TextInput(text, caret, m)` | an editable line; the model keeps `text` and `caret` from `TextEdited` |
+| `PasswordInput(text, caret, m)` | an editable line for a secret: drawn and read to screen readers as one bullet per character; the model keeps `text` (a `Secret(Str)`, first `password_empty()`) and `caret` from `PasswordEdited` |
 | `Slider(value, m)` | 0 to 100; the model keeps `value` from `SliderSet` |
 | `Row(xs)` / `Column(xs)` | children side by side or stacked, at their natural size |
 | `Spacer` | stretches to take what a `Row` or `Column` has left |
@@ -141,7 +143,7 @@ read (a file, the arguments) builds that model itself and passes it:
 
 ```resid
 @needs(App(M))
-@requires(display, accessibility, clock(readonly))
+@requires(display, accessibility, clock(readonly), declassify)
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
 ```
 
@@ -161,10 +163,57 @@ return gui_run_with(opts, fonts);
 
 ## Capabilities
 
-`gui_run` needs `display`, to reach the window server, and
-`clock(readonly)`, to time the caret and `FrameTick`. Nothing else:
+`gui_run` needs `display`, to reach the window server,
+`accessibility`, to serve screen readers, `clock(readonly)`, to time the
+caret and `FrameTick`, and `declassify`, because editing a
+`PasswordInput` splices each keystroke into its secret text (that one
+function is the only place the library reads a secret). Nothing else:
 there is no filesystem, network or environment access, and the program
 links no native code unless it imports a native module.
+
+## Passwords
+
+```resid
+import "../src/gui.resid";
+
+type Login = { Secret(Str) pass; Int caret; Str said; };
+
+Login login_init() { return Login { .pass = password_empty(), .caret = 0, .said = "" }; }
+
+/// The one place this program reads the password: when Enter or "Sign in"
+/// asks to check it.
+@requires(declassify)
+Str check(Secret(Str) p) {
+    return if (declassify(p, "the program checks the password it was given") == "open sesame") { "welcome" } else { "no" };
+}
+
+@requires(declassify)
+Login login_update(Login m, Event e) {
+    return match (e) {
+        PasswordEdited(msg, text, caret) => Login { .pass = text, .caret = caret, .said = m.said },
+        AppMsg(msg) => Login { .pass = m.pass, .caret = m.caret, .said = check(m.pass) },
+        _ => m
+    };
+}
+
+Widget login_view(Login m) {
+    return Column([Text("Password"), PasswordInput(m.pass, m.caret, Custom(1)), Button("Sign in", Custom(2)), Text(m.said)]);
+}
+
+App(Login) = { .init = login_init, .update = login_update, .view = login_view };
+
+@requires(display, accessibility, clock(readonly), declassify)
+Int main() {
+    return gui_run(WindowOptions { .title = "Sign in", .width = 240, .height = 140, .resizable = true });
+}
+```
+
+The text is a `Secret(Str)`: the compiler refuses to show it, compare it,
+put it in an f-string or log it. The program reads it only with
+`declassify(m.pass, "why")`, in a function that has the `declassify`
+grant, at the point it chooses (checking a login). The library draws
+and announces one bullet per character, and never passes on the keys
+that typed it.
 
 ## Next steps
 

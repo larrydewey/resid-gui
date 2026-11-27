@@ -33,6 +33,7 @@ pub Bool interactive(Widget w) {
         Button(s, m) => true,
         Checkbox(s, c, m) => true,
         TextInput(s, k, m) => true,
+        PasswordInput(s, k, m) => true,
         Slider(v, m) => true,
         _ => false
     };
@@ -128,9 +129,18 @@ Int next_input_at(List(Int) ids, Int cur, Int i) {
 }
 
 /// Fold one raw event through the widgets on screen, in the built-in font.
+/// It needs the `declassify` grant: editing a `PasswordInput` splices a
+/// keystroke into its secret text (`pw_splice`), the one place the
+/// library reads one.
+@requires(declassify)
 pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) { return ui_event_in(ui, root, area, e, font_builtin()); }
 
 /// Fold one raw event through the widgets on screen, laid out in font `f`.
+/// A key that types into a focused `PasswordInput`, and any key's
+/// release there but Shift's and Ctrl's, is not passed on raw: its code
+/// and text are the password (the edit itself arrives as
+/// `PasswordEdited`).
+@requires(declassify)
 pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
     UiStep s = match (e) {
         PointerDown(x, y, b) => if (b == 1) { pointer_down(ui, root, area, x, y, f) } else { none(ui) },
@@ -142,7 +152,21 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
         Assist(node, act) => assist(ui, root, area, node, act, f),
         _ => none(ui)
     };
-    return UiStep { .ui = s.ui, .out = [e].concat(s.out) };
+    Bool withheld = match (e) {
+        KeyDown(code, text) => str_len(text) > 0 && password_focused(ui, root, area, f),
+        KeyUp(code) => !is_shift(code) && !is_ctrl(code) && password_focused(ui, root, area, f),
+        _ => false
+    };
+    return UiStep { .ui = s.ui, .out = if (withheld) { s.out } else { [e].concat(s.out) } };
+}
+
+/// Whether the input with focus (followed through a renumbering, as keys
+/// are) is a `PasswordInput`.
+Bool password_focused(UiState ui, Widget root, Rect area, Font f) {
+    if (ui.focus < 0) { return false; }
+    UiState u = ui_refocus(ui, root, area, f);
+    if (u.focus < 0) { return false; }
+    return match (find_in(root, area, u.focus, f).w) { PasswordInput(s, k, m) => true, _ => false };
 }
 
 UiStep none(UiState ui) { return UiStep { .ui = ui, .out = [] }; }
@@ -162,6 +186,7 @@ UiStep assist(UiState ui, Widget root, Rect area, Int node, Int act, Font fo) {
         Button(s, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
         Checkbox(s, c, m) => if ((act & act_activate()) != 0) { UiStep { .ui = ui, .out = [AppMsg(m)] } } else { none(ui) },
         TextInput(s, k, m) => if ((act & act_focus()) != 0) { none(focus_on(ui, node, f.w)) } else { none(ui) },
+        PasswordInput(s, k, m) => if ((act & act_focus()) != 0) { none(focus_on(ui, node, f.w)) } else { none(ui) },
         _ => none(ui)
     };
 }
@@ -214,7 +239,7 @@ pub List(Int) tab_inputs(Widget root, Rect area, UiState ui, Font fo) {
 List(Int) tab_at(List(SemNode) ns, Int i, ListBuf(Int) acc) {
     if (i >= ns.len()) { return acc.finish(); }
     SemNode n = ns[i];
-    Bool ok = n.role == role_textbox() && (n.flags & sem_offscreen()) == 0 && (n.actions & act_focus()) != 0;
+    Bool ok = (n.role == role_textbox() || n.role == role_password()) && (n.flags & sem_offscreen()) == 0 && (n.actions & act_focus()) != 0;
     return tab_at(ns, i + 1, if (ok) { acc.push(n.id) } else { acc });
 }
 
@@ -231,6 +256,7 @@ UiStep pointer_down(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     UiState pressed = ui_with_press(ui, f.id, msg_of(f.w), label_of(f.w), f.r, if (f.id >= 0) { press_print(root, f.id) } else { 0 });
     return match (f.w) {
         TextInput(s, k, m) => press_input(pressed, f.id, s, k, m, caret_at_in(f.r, s, k, x, fo)),
+        PasswordInput(s, k, m) => press_password(pressed, f.id, s, k, m, caret_at_in(f.r, password_bullets(s), k, x, fo)),
         Slider(v, m) => UiStep { .ui = ui_with_focus(pressed, -1), .out = [SliderSet(m, slider_value_at(f.r, x))] },
         _ => UiStep { .ui = ui_with_focus(pressed, -1), .out = [] }
     };
@@ -243,6 +269,13 @@ UiStep press_input(UiState ui, Int id, Str s, Int k, Msg m, Int c) {
     Int keep = if (ui.focus == id && ui.anchor >= 0) { ui.anchor } else { k };
     UiState u = ui_with_anchor(ui_with_focus_msg(ui, id, m, echoes(m, s)), if (ui.shift) { keep } else { c });
     return UiStep { .ui = u, .out = [TextEdited(m, s, c)] };
+}
+
+/// `press_input` for a password: the caret placed among its bullets.
+UiStep press_password(UiState ui, Int id, Secret(Str) s, Int k, Msg m, Int c) {
+    Int keep = if (ui.focus == id && ui.anchor >= 0) { ui.anchor } else { k };
+    UiState u = ui_with_anchor(ui_with_focus_msg(ui, id, m, false), if (ui.shift) { keep } else { c });
+    return UiStep { .ui = u, .out = [PasswordEdited(m, s, c)] };
 }
 
 /// The caret position a click at `x` puts in an input showing `s`, in the
@@ -258,7 +291,7 @@ pub Int caret_at_in(Rect r, Str s, Int caret, Int x, Font f) {
 
 /// The message a widget raises, or `Clicked` for one that raises none.
 Msg msg_of(Widget w) {
-    return match (w) { Button(s, m) => m, Checkbox(s, c, m) => m, TextInput(s, k, m) => m, Slider(v, m) => m, _ => Clicked };
+    return match (w) { Button(s, m) => m, Checkbox(s, c, m) => m, TextInput(s, k, m) => m, PasswordInput(s, k, m) => m, Slider(v, m) => m, _ => Clicked };
 }
 
 /// A widget's label, or "" for one without (an input's text is not its
@@ -325,7 +358,8 @@ Int fp_one(Int h, Widget w) {
         Bitmap(bw, bh, px) => fp_mix(fp_mix(fp_mix(h, 112), bw), bh),
         Slider(v, m) => fp_msg(fp_mix(h, 113), m, true),
         Spacer => fp_mix(h, 114),
-        Themed(t, c) => fp_mix(h, 115)
+        Themed(t, c) => fp_mix(h, 115),
+        PasswordInput(s, k, m) => fp_msg(fp_mix(h, 116), m, true)
     };
 }
 
@@ -349,6 +383,8 @@ Bool echoes(Msg m, Str s) { return match (m) { Changed(x) => x == s, _ => false 
 UiState focus_on(UiState ui, Int id, Widget w) {
     return match (w) {
         TextInput(s, k, m) => ui_with_focus_msg(ui, id, m, echoes(m, s)),
+        // a password's message is compared whole: its text cannot be read
+        PasswordInput(s, k, m) => ui_with_focus_msg(ui, id, m, false),
         _ => ui_with_focus_on(ui, id, msg_of(w))
     };
 }
@@ -370,7 +406,7 @@ pub Bool focus_matches(UiState ui, Msg m, Str s) {
 pub UiState ui_refocus(UiState ui, Widget root, Rect area, Font fo) {
     if (ui.focus < 0) { return ui; }
     Found f = find_in(root, area, ui.focus, fo);
-    Bool same = match (f.w) { TextInput(s, k, m) => focus_matches(ui, m, s), _ => false };
+    Bool same = match (f.w) { TextInput(s, k, m) => focus_matches(ui, m, s), PasswordInput(s, k, m) => focus_matches(ui, m, ""), _ => false };
     if (same) { return ui; }
     List(Int) at = inputs_with(root, ui, 0, []);
     return if (at.len() == 1) { ui_with_focus_moved(ui, at[0]) } else { ui_with_focus(ui, -1) };
@@ -379,7 +415,11 @@ pub UiState ui_refocus(UiState ui, Widget root, Rect area, Font fo) {
 /// The numbers of the inputs that match the focused one, stopping at two.
 List(Int) inputs_with(Widget w, UiState ui, Int id, List(Int) acc) {
     if (acc.len() >= 2) { return acc; }
-    List(Int) here = match (w) { TextInput(s, k, x) => if (focus_matches(ui, x, s)) { acc.concat([id]) } else { acc }, _ => acc };
+    List(Int) here = match (w) {
+        TextInput(s, k, x) => if (focus_matches(ui, x, s)) { acc.concat([id]) } else { acc },
+        PasswordInput(s, k, x) => if (focus_matches(ui, x, "")) { acc.concat([id]) } else { acc },
+        _ => acc
+    };
     return inputs_with_kids(children(w), ui, 0, id + 1, here);
 }
 
@@ -394,6 +434,7 @@ UiStep pointer_moved(UiState ui, Widget root, Rect area, Int x, Font fo) {
     return match (f.w) {
         Slider(v, m) => UiStep { .ui = ui, .out = [SliderSet(m, slider_value_at(f.r, x))] },
         TextInput(s, k, m) => UiStep { .ui = ui, .out = [TextEdited(m, s, caret_at_in(f.r, s, k, x, fo))] },
+        PasswordInput(s, k, m) => UiStep { .ui = ui, .out = [PasswordEdited(m, s, caret_at_in(f.r, password_bullets(s), k, x, fo))] },
         _ => none(ui)
     };
 }
@@ -410,6 +451,7 @@ UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     };
 }
 
+@requires(declassify)
 UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo) {
     // A key that types something types it, whatever its code.
     Bool typing = str_len(text) > 0;
@@ -426,6 +468,7 @@ UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo)
     Found f = find_in(root, area, u.focus, fo);
     return match (f.w) {
         TextInput(s, k, m) => key_in_input(u, s, clamp_int(k, 0, str_len(s)), m, code, text),
+        PasswordInput(s, k, m) => key_in_password(u, s, clamp_int(k, 0, s.len()), m, code, text),
         _ => none(ui_with_focus(u, -1))
     };
 }
@@ -433,6 +476,51 @@ UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo)
 UiStep key_in_input(UiState ui, Str s, Int k, Msg m, Int code, Str text) {
     Edited e = edit_sel(s, k, ui.anchor, m, code, text, ui.shift, ui.ctrl);
     return UiStep { .ui = ui_with_anchor(ui_with_caret(ui, true), e.anchor), .out = e.out };
+}
+
+@requires(declassify)
+UiStep key_in_password(UiState ui, Secret(Str) s, Int k, Msg m, Int code, Str text) {
+    Edited e = edit_password(s, k, ui.anchor, m, code, text, ui.shift, ui.ctrl);
+    return UiStep { .ui = ui_with_anchor(ui_with_caret(ui, true), e.anchor), .out = e.out };
+}
+
+/// `edit_sel` for a password holding `s`: the same keys, worked out from
+/// its length alone (public, spec §48); a change to the text is a splice
+/// of the typed text (`pw_splice`) between two caret positions.
+@requires(declassify)
+pub Edited edit_password(Secret(Str) s, Int k, Int a0, Msg m, Int code, Str text, Bool shift, Bool ctrl) {
+    Int n = s.len();
+    Int a = if (a0 < 0 || a0 > n) { k } else { a0 };
+    Int lo = min_int(a, k);
+    Int hi = max_int(a, k);
+    Bool sel = lo != hi;
+    if (ctrl && code == key_a() && str_len(text) == 0) { return Edited { .out = [PasswordEdited(m, s, n)], .anchor = 0 }; }
+    if (str_len(text) > 0) { return Edited { .out = [PasswordEdited(m, pw_splice(s, lo, hi, text), lo + str_len(text))], .anchor = -1 }; }
+    if (code == key_enter() || code == key_kp_enter()) { return Edited { .out = [AppMsg(m)], .anchor = a0 }; }
+    Bool erase = code == key_backspace() || code == key_delete();
+    if (erase && sel) { return Edited { .out = [PasswordEdited(m, pw_splice(s, lo, hi, ""), lo)], .anchor = -1 }; }
+    if (code == key_backspace()) { return Edited { .out = if (k > 0) { [PasswordEdited(m, pw_splice(s, k - 1, k, ""), k - 1)] } else { [] }, .anchor = -1 }; }
+    if (code == key_delete()) { return Edited { .out = if (k < n) { [PasswordEdited(m, pw_splice(s, k, k + 1, ""), k)] } else { [] }, .anchor = -1 }; }
+    Int t = if (code == key_left()) { if (sel && !shift) { lo } else { max_int(k - 1, 0) } }
+            else { if (code == key_right()) { if (sel && !shift) { hi } else { min_int(k + 1, n) } }
+            else { if (code == key_home()) { 0 } else { if (code == key_end()) { n } else { -1 } } } };
+    if (t < 0) { return Edited { .out = [], .anchor = a0 }; }
+    return Edited { .out = if (t != k) { [PasswordEdited(m, s, t)] } else { [] }, .anchor = if (shift) { a } else { -1 } };
+}
+
+/// Password text `s` with characters `lo` to `hi` replaced by `ins`. The
+/// one place the library declassifies: the text is read here to splice
+/// the keystroke in and wrapped again at once, and goes nowhere else.
+/// (`classify`, not `secret`, for the result: E0250 would refuse a
+/// secret the compiler can work out, as it can in a test's literal
+/// view; at run time the text is the user's typing.)
+@requires(declassify)
+pub Secret(Str) pw_splice(Secret(Str) s, Int lo, Int hi, Str ins) {
+    Str p = declassify(s, "a password input splices a keystroke into its own text");
+    Int n = str_len(p);
+    Int a = clamp_int(lo, 0, n);
+    Int b = clamp_int(hi, a, n);
+    return classify(str_slice(p, 0, a) + ins + str_slice(p, b, n));
 }
 
 /// The input before `cur` in tab order, wrapping; -1 when there is none.
@@ -509,6 +597,7 @@ test "hit finds the control under the pointer" {
     expect(next_input(inputs(demo()), 5)).toEqual(3);
 }
 
+@requires(declassify)
 test "a click is a press and a release on the same button" {
     UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(5, 30, 1));
     expect(a.ui.pressed).toEqual(2);
@@ -522,6 +611,7 @@ test "a click is a press and a release on the same button" {
     expect(c.out.len()).toEqual(1);
 }
 
+@requires(declassify)
 test "clicking an input focuses it and typing edits at the caret" {
     UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(100, 70, 1));
     expect(a.ui.focus).toEqual(3);
@@ -537,6 +627,7 @@ test "clicking an input focuses it and typing edits at the caret" {
     expect(ui_event(a.ui, demo(), demo_area(), KeyDown(key_tab(), "")).ui.focus).toEqual(5);
 }
 
+@requires(declassify)
 test "dragging a slider reports values" {
     UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(6, 100, 1));
     Bool zero = match (a.out[1]) { SliderSet(m, v) => v == 0, _ => false };
@@ -561,6 +652,7 @@ test "a click in a long list reaches the row under it" {
 Str edited_text(List(Event) es) { return match (es[es.len() - 1]) { TextEdited(m, s, k) => s, _ => "?" }; }
 Int edited_caret(List(Event) es) { return match (es[es.len() - 1]) { TextEdited(m, s, k) => k, _ => -1 }; }
 
+@requires(declassify)
 test "Shift-Tab moves focus backwards" {
     UiState down = ui_event(ui_new(), demo(), demo_area(), KeyDown(key_left_shift(), "")).ui;
     expect(down.shift).toEqual(true);
@@ -595,6 +687,7 @@ test "Shift and the arrows select, and typing replaces the selection" {
     expect(edited_caret(all.out)).toEqual(5);
 }
 
+@requires(declassify)
 test "dragging across an input selects" {
     Widget w = Column([TextInput("abcdef", 0, Custom(1))]);
     Rect area = Rect { .x = 0, .y = 0, .w = 200, .h = 40 };
@@ -606,6 +699,7 @@ test "dragging across an input selects" {
     expect(b.ui.anchor).toEqual(1);
 }
 
+@requires(declassify)
 test "an assistive activation clicks; an assistive focus focuses" {
     Widget v = Column([Button("ok", Clicked), TextInput("x", 1, Custom(1))]);
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
@@ -623,6 +717,7 @@ Bool raised(UiStep s, Msg m, Int i) {
     return hit || raised(s, m, i + 1);
 }
 
+@requires(declassify)
 test "a release raises nothing when the view changed the pressed widget" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     Widget before = Column([Button("a", Custom(1)), Button("keep", Custom(2))]);
@@ -639,6 +734,7 @@ test "a release raises nothing when the view changed the pressed widget" {
     expect(raised(ui_event(down.ui, before, r, PointerUp(x, y, 1)), Custom(2), 0)).toEqual(true);
 }
 
+@requires(declassify)
 test "an assistive action reaches only what a click could" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Stack 0, Button "del" 1, Button "cover" 2: cover is drawn over del
@@ -667,6 +763,7 @@ Bool edited(UiStep s, Msg m, Int i) {
     return hit || edited(s, m, i + 1);
 }
 
+@requires(declassify)
 test "keys go to the input that was focused, not to the one now numbered so (R3-4)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget before = Column([TextInput("a", 1, Custom(1)), TextInput("b", 1, Custom(2))]);
@@ -693,6 +790,7 @@ test "keys go to the input that was focused, not to the one now numbered so (R3-
     expect(edited(ui_event(onc, Column([TextInput("ab", 2, Changed("ab"))]), r, KeyDown(30, "x")), Changed("ab"), 0)).toEqual(true);
 }
 
+@requires(declassify)
 test "a release raises nothing when index-keyed rows renumber under it (R3-6)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // a delete button per row, keyed by the row's index
@@ -716,6 +814,7 @@ Bool scrolled_to(UiStep s, Int node, Int off, Int i) {
     return hit || scrolled_to(s, node, off, i + 1);
 }
 
+@requires(declassify)
 test "a reader can scroll to an off-screen node, but not act on it (R3-3)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Scroll 0, Column 1, Button "top" 2 (0..32), Padding 3, Spacer 4,
@@ -736,6 +835,7 @@ test "a reader can scroll to an off-screen node, but not act on it (R3-3)" {
     expect(ui_event(ui_new(), Column([Padding(200, Spacer), Button("below", Custom(3))]), r, Assist(3, act_scroll())).out.len()).toEqual(1);
 }
 
+@requires(declassify)
 test "Tab skips inputs scrolled out of view or covered (R3-3)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Column 0, TextInput a 1, Scroll 2 (scrolled 500 past its content),
@@ -754,6 +854,7 @@ test "Tab skips inputs scrolled out of view or covered (R3-3)" {
     expect(tab_inputs(w, big, ui_new(), font_builtin())).toEqual([1, 10]);
 }
 
+@requires(declassify)
 test "an off-screen field under a modal cannot be scrolled to (R4-1)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Stack 0, Scroll 1, Column 2, Padding 3, Spacer 4, TextInput 5, Button 6
@@ -769,6 +870,7 @@ Widget dismiss_rows(List(Str) names, Int i, ListBuf(Widget) acc) {
     return dismiss_rows(names, i + 1, acc.push(Row([Text(names[i]), Button("Dismiss", Custom(i))])));
 }
 
+@requires(declassify)
 test "a release raises nothing when rows with the same label renumber under it (R4-5)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...
@@ -796,6 +898,7 @@ test "a release raises nothing when rows with the same label renumber under it (
     expect(sm.out.len()).toEqual(2);
 }
 
+@requires(declassify)
 test "inputs told apart by Changed tags keep their own focus (R4-6)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget before = Column([TextInput("ann", 3, Changed("name")), TextInput("a@b", 3, Changed("email"))]);

@@ -20,10 +20,16 @@ import "timeline.resid";
 /// that does not parse is reported and ignored.
 @requires(filesystem(readonly))
 pub List(Event) read_log(Str path) {
-    if (!filesystem.exists(path)) { return []; }
-    if (filesystem.size(path) > 16777216) { return warn_empty(f"resid-gui: ignoring {path}: larger than 16 MB"); }
-    return match (log_parse(filesystem.read_all(path))) {
-        Ok(es) => es,
+    if (!filesystem.exists(path) || filesystem.size(path) == 0) { return []; }
+    // a regular file of at most 16 MB: not a FIFO, a device or a directory
+    return match (read_file_limited(path, 16777216)) {
+        Ok(bytes) => match (utf8_decode(bytes)) {
+            Ok(text) => match (log_parse(text)) {
+                Ok(es) => es,
+                Err(why) => warn_empty(f"resid-gui: ignoring {path}: {why}")
+            },
+            Err(why) => warn_empty(f"resid-gui: ignoring {path}: {why}")
+        },
         Err(why) => warn_empty(f"resid-gui: ignoring {path}: {why}")
     };
 }
@@ -55,4 +61,14 @@ pub Int gui_run_dev(WindowOptions opts, Str log_path) {
         return 1;
     }
     return 0;
+}
+
+@requires(filesystem)
+test "a log that is not a regular file is not read" {
+    expect(read_log("/dev/zero").len()).toEqual(0);
+    expect(read_log("/tmp").len()).toEqual(0);
+    Str p = "/tmp/resid-gui-hot-test.log";
+    _ = filesystem.write_all(p, "");
+    expect(read_log(p).len()).toEqual(0);
+    _ = filesystem.remove(p);
 }

@@ -212,7 +212,12 @@ Loop(M) run_loop(B b, Loop(M) st0) {
     Int ms = turn_ms(b2, a11y_fd(a1), a11y_alive(a1), wait);
     Pumped(B) p = be_pump(b2, ms);
     A11yStep ax = a11y_pump(a1);
-    Loop(M) st3 = fold_events(p.events.concat(ax.events), 0, with_a11y(st2, ax.a), be_scale(p.b), be_width(p.b), be_height(p.b));
+    // A reader's actions first, while the view is the one its tree was
+    // made from; each keeps a print of the widget it named, and is
+    // dropped if an earlier event has changed that widget or those
+    // numbered before it (R4-2, HP-6). Then the display's events.
+    List(Int) prints = assist_prints(ax.events, 0, st2.view, ListBuf());
+    Loop(M) st3 = fold_events(ax.events.concat(p.events), prints, 0, with_a11y(st2, ax.a), be_scale(p.b), be_width(p.b), be_height(p.b));
     Loop(M) st4 = tick(st3, now_ms());
     return run_loop(p.b, st4);
 }
@@ -287,10 +292,31 @@ pub Event to_logical(Event e, Int s) {
     };
 }
 
+/// For each event, the print (`press_print`) of the widget an `Assist`
+/// names in view `v`, or -1 for any other event.
+pub List(Int) assist_prints(List(Event) es, Int i, Widget v, ListBuf(Int) acc) {
+    if (i >= es.len()) { return acc.finish(); }
+    Int p = match (es[i]) { Assist(n, act) => press_print(v, n), _ => -1 };
+    return assist_prints(es, i + 1, v, acc.push(p));
+}
+
+/// Whether event `e`, printed `p` when it arrived (-1: not an `Assist`),
+/// still names the widget it named in view `v`: the same widget, with the
+/// same kind, label and message, and the same widgets numbered before it.
+/// Otherwise an earlier event renumbered the view, and the action would
+/// land on another widget; it is dropped (a reader acts again on the new
+/// tree).
+pub Bool assist_current(Event e, Int p, Widget v) {
+    if (p < 0) { return true; }
+    return match (e) { Assist(n, act) => press_print(v, n) == p, _ => true };
+}
+
 /// Fold the backend's events, in order, through the widgets and `update`.
+/// `prints` holds `assist_prints` for the first events (a reader's).
 @needs(App(M))
-Loop(M) fold_events(List(Event) es, Int i, Loop(M) st, Int s, Int w, Int h) {
+Loop(M) fold_events(List(Event) es, List(Int) prints, Int i, Loop(M) st, Int s, Int w, Int h) {
     if (i >= es.len() || st.done) { return st; }
+    if (i < prints.len() && !assist_current(es[i], prints[i], st.view)) { return fold_events(es, prints, i + 1, st, s, w, h); }
     Rect area = Rect { .x = 0, .y = 0, .w = w / s, .h = h / s };
     UiStep u = ui_event_in(st.ui, st.view, area, to_logical(es[i], s), st.font);
     Loop(M) next = apply(u.out, 0, Loop {
@@ -304,7 +330,7 @@ Loop(M) fold_events(List(Event) es, Int i, Loop(M) st, Int s, Int w, Int h) {
         .model = next.model, .ui = ui2, .view = next.view, .ops = next.ops, .w = next.w, .h = next.h, .scale = next.scale,
         .pending = next.pending, .blink = next.blink, .done = next.done, .fonts = next.fonts, .font = next.font, .rec = next.rec, .log = next.log, .a11y = next.a11y
     };
-    return fold_events(es, i + 1, kept, s, w, h);
+    return fold_events(es, prints, i + 1, kept, s, w, h);
 }
 
 /// Hand each event to `update`, refreshing the view after each so the next
@@ -422,4 +448,27 @@ test "a window past 16384 pixels a side is refused before it is asked for (R4-7)
     expect(str_contains(r.err, "16384")).toEqual(true);
     _ = resid_disp_close(pair[0]);
     _ = resid_disp_close(pair2[0]);
+}
+
+test "a reader's action after the view renumbered hits its widget or nothing (R4-2)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...
+    Widget abc = Column([Row([Text("A"), Button("Dismiss", Custom(0))]), Row([Text("B"), Button("Dismiss", Custom(1))]),
+                         Row([Text("C"), Button("Dismiss", Custom(2))])]);
+    List(Event) es = [Assist(6, act_activate()), FrameTick];
+    List(Int) ps = assist_prints(es, 0, abc, ListBuf());
+    expect(ps[1]).toEqual(-1);
+    // the view the reader saw: it acts
+    expect(assist_current(es[0], ps[0], abc)).toEqual(true);
+    // an earlier event removed A: number 6 is C's Dismiss, now Custom(1)
+    Widget bc = Column([Row([Text("B"), Button("Dismiss", Custom(0))]), Row([Text("C"), Button("Dismiss", Custom(1))])]);
+    expect(assist_current(es[0], ps[0], bc)).toEqual(false);
+    // which matters: by its number alone, the action would delete C
+    Bool deletes_c = match (ui_event(ui_new(), bc, r, es[0]).out[1]) { AppMsg(m) => msg_eq(m, Custom(1)), _ => false };
+    expect(deletes_c).toEqual(true);
+    // a change after it does not matter
+    Widget abd = Column([Row([Text("A"), Button("Dismiss", Custom(0))]), Row([Text("B"), Button("Dismiss", Custom(1))]),
+                         Row([Text("D"), Button("Dismiss", Custom(2))])]);
+    expect(assist_current(es[0], ps[0], abd)).toEqual(true);
+    expect(assist_current(FrameTick, -1, bc)).toEqual(true);
 }

@@ -256,7 +256,7 @@ Loop(M) render(B b, Loop(M) st) {
     List(DrawOp) ops = paint_with(st.view, Rect { .x = 0, .y = 0, .w = w / s, .h = h / s }, st.ui, f, theme_from(theme_default(), be_hints(b)));
     Bool fresh = st.w != w || st.h != h || st.scale != s;
     Rect all = Rect { .x = 0, .y = 0, .w = w, .h = h };
-    List(Rect) dmg = if (fresh) { [all] } else { scale_all(damage_rects_in(st.ops, ops, f), s, 0, []) };
+    List(Rect) dmg = if (fresh) { [all] } else { scale_all(damage_rects_in(st.ops, ops, f), s, 0, ListBuf()) };
     return Loop {
         .model = st.model, .ui = st.ui, .view = st.view, .ops = ops, .w = w, .h = h, .scale = s,
         .pending = rects_clip(if (fresh) { dmg } else { rects_merge(st.pending, dmg) }, all), .blink = st.blink, .done = st.done,
@@ -264,9 +264,9 @@ Loop(M) render(B b, Loop(M) st) {
     };
 }
 
-List(Rect) scale_all(List(Rect) rs, Int s, Int i, List(Rect) acc) {
-    if (i >= rs.len()) { return acc; }
-    return scale_all(rs, s, i + 1, acc.concat([scale_up(rs[i], s)]));
+List(Rect) scale_all(List(Rect) rs, Int s, Int i, ListBuf(Rect) acc) {
+    if (i >= rs.len()) { return acc.finish(); }
+    return scale_all(rs, s, i + 1, acc.push(scale_up(rs[i], s)));
 }
 
 @needs(App(M))
@@ -395,7 +395,7 @@ test "a turn with whole messages already read does not wait for more (R3-1)" {
 }
 
 test "an image whose size is a lie is not multiplied into damage (R4-7)" {
-    List(Rect) d = scale_all(damage_rects_in([], [OpImage(0, 0, 1 << 62, 1, [])], font_builtin()), 2, 0, []);
+    List(Rect) d = scale_all(damage_rects_in([], [OpImage(0, 0, 1 << 62, 1, [])], font_builtin()), 2, 0, ListBuf());
     expect(d.len() <= 1).toEqual(true);
     List(DrawOp) ops = paint(Row([Bitmap(1 << 62, 1 << 62, []), Bitmap(1 << 62, 3, [1, 2, 3])]), Rect { .x = 0, .y = 0, .w = 100, .h = 100 }, ui_new());
     expect(ops.len()).toEqual(0);

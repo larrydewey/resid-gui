@@ -23,9 +23,6 @@ pub Color accent() { return theme().accent; }
 pub Color paper() { return theme().surface; }
 pub Color selection() { return theme().selection; }
 
-/// What painting a subtree produced, and the number of the next widget.
-type Painted = { List(DrawOp) ops; Int next; };
-
 /// The display list for `w` occupying `r`, in the built-in font.
 pub List(DrawOp) paint(Widget w, Rect r, UiState ui) { return paint_in(w, r, ui, font_builtin()); }
 
@@ -36,8 +33,9 @@ pub List(DrawOp) paint_in(Widget w, Rect r, UiState ui, Font f) { return paint_w
 /// ground is not the rasterizer's background, the box is filled with it
 /// first.
 pub List(DrawOp) paint_with(Widget w, Rect r, UiState ui, Font f, Theme t) {
-    List(DrawOp) ground = if (color_eq(t.ground, background_of_light())) { [] } else { [OpFill(r, t.ground)] };
-    return ground.concat(paint_node(w, r, ui, 0, f, t).ops);
+    ListBuf(DrawOp) empty = ListBuf();
+    ListBuf(DrawOp) ground = if (color_eq(t.ground, background_of_light())) { empty } else { empty.push(OpFill(r, t.ground)) };
+    return paint_node(ground, w, r, ui, 0, f, t).finish();
 }
 
 /// The ground the rasterizer clears to (gfx/raster.resid `background`).
@@ -46,44 +44,43 @@ Color background_of_light() { return rgb(245, 246, 247); }
 /// `paint` with no focus and nothing pressed.
 pub List(DrawOp) paint_widget(Widget w, Rect r) { return paint(w, r, ui_new()); }
 
-Painted paint_node(Widget w, Rect r, UiState ui, Int id, Font f, Theme t) {
-    Painted themed = match (w) { Themed(spec, c) => paint_themed(spec, c, r, ui, id, f, t), _ => Painted { .ops = [], .next = -1 } };
-    if (themed.next >= 0) { return themed; }
-    Painted rows = match (w) { Rows(o, rh, xs) => paint_rows(o, rh, xs, r, ui, id, f, t), _ => Painted { .ops = [], .next = -1 } };
-    if (rows.next >= 0) { return rows; }
-    List(DrawOp) own = paint_self(w, r, ui, id, f, t);
-    List(Widget) kids = children(w);
-    if (kids.len() == 0) { return Painted { .ops = own, .next = id + 1 }; }
-    Painted inner = paint_kids(kids, child_rects_in(w, r, f), ui, 0, id + 1, [], f, t);
-    List(DrawOp) body = match (w) {
-        Scroll(o, c) => [OpClipPush(r)].concat(inner.ops).concat([OpClipPop]),
-        _ => inner.ops
+// The display list is built in one ListBuf down the tree (R4-4): each
+// widget's ops are pushed after its parent's, and a subtree's widgets are
+// numbered from `id` to `id + node_count(w) - 1`, as in semantics.resid.
+
+ListBuf(DrawOp) paint_node(ListBuf(DrawOp) acc, Widget w, Rect r, UiState ui, Int id, Font f, Theme t) {
+    return match (w) {
+        Themed(spec, c) => paint_themed(acc, spec, c, r, ui, id, f, t),
+        Rows(o, rh, xs) => paint_rows(acc, o, rh, xs, r, ui, id, f, t),
+        Scroll(o, c) => paint_kids(push_ops(acc, paint_self(w, r, ui, id, f, t), 0).push(OpClipPush(r)), children(w), child_rects_in(w, r, f), ui, 0, id + 1, f, t).push(OpClipPop),
+        _ => paint_kids(push_ops(acc, paint_self(w, r, ui, id, f, t), 0), children(w), child_rects_in(w, r, f), ui, 0, id + 1, f, t)
     };
-    return Painted { .ops = own.concat(body), .next = inner.next };
+}
+
+ListBuf(DrawOp) push_ops(ListBuf(DrawOp) acc, List(DrawOp) ops, Int i) {
+    if (i >= ops.len()) { return acc; }
+    return push_ops(acc.push(ops[i]), ops, i + 1);
 }
 
 /// A `Themed` subtree: its child painted in the theme its spec derives
 /// under the same platform hints, on that theme's ground when it differs.
-Painted paint_themed(ThemeSpec spec, Widget c, Rect r, UiState ui, Int id, Font f, Theme t) {
+ListBuf(DrawOp) paint_themed(ListBuf(DrawOp) acc, ThemeSpec spec, Widget c, Rect r, UiState ui, Int id, Font f, Theme t) {
     Theme inner = theme_from(spec, t.hints);
-    Painted p = paint_node(c, r, ui, id + 1, f, inner);
-    List(DrawOp) ground = if (color_eq(inner.ground, t.ground)) { [] } else { [OpFill(r, inner.ground)] };
-    return Painted { .ops = ground.concat(p.ops), .next = p.next };
+    ListBuf(DrawOp) ground = if (color_eq(inner.ground, t.ground)) { acc } else { acc.push(OpFill(r, inner.ground)) };
+    return paint_node(ground, c, r, ui, id + 1, f, inner);
 }
 
 /// A `Rows`: only the rows in view are painted; the others only count
 /// towards the numbers of the widgets after them.
-Painted paint_rows(Int o, Int rh, List(Widget) xs, Rect r, UiState ui, Int id, Font f, Theme t) {
+ListBuf(DrawOp) paint_rows(ListBuf(DrawOp) acc, Int o, Int rh, List(Widget) xs, Rect r, UiState ui, Int id, Font f, Theme t) {
     RowSpan v = rows_in_view(r, o, rh, xs.len());
     Int first_id = id + 1 + count_nodes(xs, 0, v.first, 0);
-    Painted inner = paint_row_range(xs, r, o, rh, v.first, v.last, ui, first_id, [], f, t);
-    return Painted { .ops = [OpClipPush(r)].concat(inner.ops).concat([OpClipPop]), .next = inner.next + count_nodes(xs, v.last, xs.len(), 0) };
+    return paint_row_range(acc.push(OpClipPush(r)), xs, r, o, rh, v.first, v.last, ui, first_id, f, t).push(OpClipPop);
 }
 
-Painted paint_row_range(List(Widget) xs, Rect r, Int o, Int rh, Int i, Int end, UiState ui, Int id, List(DrawOp) acc, Font f, Theme t) {
-    if (i >= end) { return Painted { .ops = acc, .next = id }; }
-    Painted p = paint_node(xs[i], row_rect(r, o, rh, i), ui, id, f, t);
-    return paint_row_range(xs, r, o, rh, i + 1, end, ui, p.next, acc.concat(p.ops), f, t);
+ListBuf(DrawOp) paint_row_range(ListBuf(DrawOp) acc, List(Widget) xs, Rect r, Int o, Int rh, Int i, Int end, UiState ui, Int id, Font f, Theme t) {
+    if (i >= end) { return acc; }
+    return paint_row_range(paint_node(acc, xs[i], row_rect(r, o, rh, i), ui, id, f, t), xs, r, o, rh, i + 1, end, ui, id + node_count(xs[i]), f, t);
 }
 
 /// The widgets in `xs[i]` to `xs[end - 1]`, nested ones included.
@@ -92,10 +89,9 @@ pub Int count_nodes(List(Widget) xs, Int i, Int end, Int acc) {
     return count_nodes(xs, i + 1, end, acc + node_count(xs[i]));
 }
 
-Painted paint_kids(List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, List(DrawOp) acc, Font f, Theme t) {
-    if (i >= xs.len() || i >= rs.len()) { return Painted { .ops = acc, .next = id }; }
-    Painted p = paint_node(xs[i], rs[i], ui, id, f, t);
-    return paint_kids(xs, rs, ui, i + 1, p.next, acc.concat(p.ops), f, t);
+ListBuf(DrawOp) paint_kids(ListBuf(DrawOp) acc, List(Widget) xs, List(Rect) rs, UiState ui, Int i, Int id, Font f, Theme t) {
+    if (i >= xs.len() || i >= rs.len()) { return acc; }
+    return paint_kids(paint_node(acc, xs[i], rs[i], ui, id, f, t), xs, rs, ui, i + 1, id + node_count(xs[i]), f, t);
 }
 
 /// Text centred vertically in `r`, `dx` pixels in from its left edge.
@@ -264,4 +260,20 @@ test "a themed widget is a node, and lays out as its child" {
     Widget w = Column([Themed(theme_default(), Button("a", Clicked)), Button("b", Clicked)]);
     expect(node_count(w)).toEqual(4);
     expect(pref_size(Themed(theme_default(), Button("a", Clicked))).h).toEqual(pref_size(Button("a", Clicked)).h);
+}
+
+List(Widget) paint_many(Int n, Int i, ListBuf(Widget) acc) {
+    if (i >= n) { return acc.finish(); }
+    return paint_many(n, i + 1, acc.push(Row([Text(f"row {i}"), Button("x", Custom(i))])));
+}
+
+@requires(clock(readonly))
+test "a long column paints in time linear in its widgets (R4-4)" {
+    Widget col = Column(paint_many(5000 * str_len(rt "x"), 0, ListBuf()));
+    Int t0 = clock.monotonic_ns();
+    List(DrawOp) ops = paint(col, Rect { .x = 0, .y = 0, .w = 300, .h = 200000 }, ui_new());
+    Int ms = (clock.monotonic_ns() - t0) / 1000000;
+    println(f"5000 rows: {ops.len()} ops in {ms} ms");
+    expect(ops.len()).toEqual(20000);
+    expect(ms < 500).toEqual(true);
 }

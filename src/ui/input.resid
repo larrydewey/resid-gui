@@ -50,7 +50,7 @@ Found hit_node(Widget w, Rect r, Int x, Int y, Int id, Font f) {
     Found row = match (w) { Rows(o, rh, xs) => hit_row(xs, r, o, rh, x, y, id, f), _ => Found { .id = -2, .w = Spacer, .r = r } };
     if (row.id != -2) { return row; }
     List(Widget) kids = children(w);
-    return hit_kids(kids, child_rects_in(w, r, f), x, y, kids.len() - 1, kid_ids(kids, id + 1, 0, []), f);
+    return hit_kids(kids, child_rects_in(w, r, f), x, y, kids.len() - 1, kid_ids(kids, id + 1, 0, ListBuf()), f);
 }
 
 /// In a `Rows`, the row under the pointer is the only one asked.
@@ -61,8 +61,8 @@ Found hit_row(List(Widget) xs, Rect r, Int o, Int rh, Int x, Int y, Int id, Font
 }
 
 /// The number of each child, given the first child's.
-List(Int) kid_ids(List(Widget) xs, Int id, Int i, List(Int) acc) {
-    return if (i >= xs.len()) { acc } else { kid_ids(xs, id + node_count(xs[i]), i + 1, acc.concat([id])) };
+List(Int) kid_ids(List(Widget) xs, Int id, Int i, ListBuf(Int) acc) {
+    return if (i >= xs.len()) { acc.finish() } else { kid_ids(xs, id + node_count(xs[i]), i + 1, acc.push(id)) };
 }
 
 // Later children are drawn over earlier ones, so they are asked first.
@@ -103,14 +103,14 @@ Found find_kids(List(Widget) xs, List(Rect) rs, Int target, Int i, Int id, Font 
 }
 
 /// The numbers of every text input, in order.
-pub List(Int) inputs(Widget w) { return inputs_node(w, 0, []); }
+pub List(Int) inputs(Widget w) { return inputs_node(w, 0, ListBuf()).finish(); }
 
-List(Int) inputs_node(Widget w, Int id, List(Int) acc) {
-    List(Int) here = match (w) { TextInput(s, k, m) => acc.concat([id]), _ => acc };
+ListBuf(Int) inputs_node(Widget w, Int id, ListBuf(Int) acc) {
+    ListBuf(Int) here = match (w) { TextInput(s, k, m) => acc.push(id), _ => acc };
     return inputs_kids(children(w), 0, id + 1, here);
 }
 
-List(Int) inputs_kids(List(Widget) xs, Int i, Int id, List(Int) acc) {
+ListBuf(Int) inputs_kids(List(Widget) xs, Int i, Int id, ListBuf(Int) acc) {
     if (i >= xs.len()) { return acc; }
     return inputs_kids(xs, i + 1, id + node_count(xs[i]), inputs_node(xs[i], id, acc));
 }

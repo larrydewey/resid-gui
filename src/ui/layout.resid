@@ -136,9 +136,9 @@ pub List(Rect) child_rects(Widget w, Rect r) { return child_rects_in(w, r, font_
 /// `child_rects` with text in font `f`.
 pub List(Rect) child_rects_in(Widget w, Rect r, Font f) {
     return match (w) {
-        Row(xs) => row_rects(xs, r, share(r.w - sum_w(xs, 0, 0, f) - gaps(xs), count_x(xs, 0, 0)), 0, r.x, [], f),
-        Column(xs) => col_rects(xs, r, share(r.h - sum_h(xs, 0, 0, f) - gaps(xs), count_y(xs, 0, 0)), 0, r.y, [], f),
-        Stack(xs) => same_rects(xs.len(), r, 0, []),
+        Row(xs) => row_rects(xs, r, share(r.w - sum_w(xs, 0, 0, f) - gaps(xs), count_x(xs, 0, 0)), 0, r.x, ListBuf(), f),
+        Column(xs) => col_rects(xs, r, share(r.h - sum_h(xs, 0, 0, f) - gaps(xs), count_y(xs, 0, 0)), 0, r.y, ListBuf(), f),
+        Stack(xs) => same_rects(xs.len(), r, 0, ListBuf()),
         Padding(n0, c) => pad_rect(r, pad_of(n0)),
         Align(ax, ay, c) => [align_rect(pref_size_in(c, f), r, ax, ay)],
         Scroll(o, c) => [Rect { .x = r.x, .y = clamp_coord(r.y) - off_of(o), .w = r.w, .h = max_int(pref_size_in(c, f).h, r.h) }],
@@ -157,20 +157,20 @@ List(Rect) pad_rect(Rect r, Int n) {
 /// Each stretching child's share of `free` pixels; none when nothing is free.
 Int share(Int free, Int n) { return if (n <= 0 || free <= 0) { 0 } else { free / n }; }
 
-List(Rect) row_rects(List(Widget) xs, Rect r, Int extra, Int i, Int x, List(Rect) acc, Font f) {
-    if (i >= xs.len()) { return acc; }
+List(Rect) row_rects(List(Widget) xs, Rect r, Int extra, Int i, Int x, ListBuf(Rect) acc, Font f) {
+    if (i >= xs.len()) { return acc.finish(); }
     Int w = pref_size_in(xs[i], f).w + if (stretches_x(xs[i])) { extra } else { 0 };
-    return row_rects(xs, r, extra, i + 1, x + w + gap(), acc.concat([Rect { .x = x, .y = r.y, .w = w, .h = r.h }]), f);
+    return row_rects(xs, r, extra, i + 1, x + w + gap(), acc.push(Rect { .x = x, .y = r.y, .w = w, .h = r.h }), f);
 }
 
-List(Rect) col_rects(List(Widget) xs, Rect r, Int extra, Int i, Int y, List(Rect) acc, Font f) {
-    if (i >= xs.len()) { return acc; }
+List(Rect) col_rects(List(Widget) xs, Rect r, Int extra, Int i, Int y, ListBuf(Rect) acc, Font f) {
+    if (i >= xs.len()) { return acc.finish(); }
     Int h = pref_size_in(xs[i], f).h + if (stretches_y(xs[i])) { extra } else { 0 };
-    return col_rects(xs, r, extra, i + 1, y + h + gap(), acc.concat([Rect { .x = r.x, .y = y, .w = r.w, .h = h }]), f);
+    return col_rects(xs, r, extra, i + 1, y + h + gap(), acc.push(Rect { .x = r.x, .y = y, .w = r.w, .h = h }), f);
 }
 
-List(Rect) same_rects(Int n, Rect r, Int i, List(Rect) acc) {
-    return if (i >= n) { acc } else { same_rects(n, r, i + 1, acc.concat([r])) };
+List(Rect) same_rects(Int n, Rect r, Int i, ListBuf(Rect) acc) {
+    return if (i >= n) { acc.finish() } else { same_rects(n, r, i + 1, acc.push(r)) };
 }
 
 /// A box of size `s` (at most `r`) placed `ax`/`ay` percent into `r`'s

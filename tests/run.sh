@@ -35,7 +35,8 @@ OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
 # The files, one per line, read whole lines at a time: a path with a
-# space in it stays one path.
+# space in it stays one path. Each command in the loops reads /dev/null,
+# not the list the loop is reading.
 find "$ROOT/src" "$ROOT/tests" -name '*.resid' | sort > "$OUT/files"
 find "$ROOT/examples" -name '*.resid' | sort > "$OUT/examples"
 
@@ -46,13 +47,13 @@ while IFS= read -r f; do
         # shellcheck disable=SC2046
         # (no accessibility bus: tests/soak_bounded.resid measures the
         # loop alone, and no test program needs one)
-        if ! "$RESIDC" "$f" -o "$OUT/prog" $(extra "$f") >/dev/null || ! env -u AT_SPI_BUS_ADDRESS -u DBUS_SESSION_BUS_ADDRESS "$OUT/prog"; then
+        if ! "$RESIDC" "$f" -o "$OUT/prog" $(extra "$f") >/dev/null </dev/null || ! env -u AT_SPI_BUS_ADDRESS -u DBUS_SESSION_BUS_ADDRESS "$OUT/prog" </dev/null; then
             echo "FAILED: $rel"
             fail=$((fail + 1))
         fi
     else
         # shellcheck disable=SC2046
-        if ! "$RESIDC" test "$f" $(extra "$f"); then
+        if ! "$RESIDC" test "$f" $(extra "$f") </dev/null; then
             echo "FAILED: $rel"
             fail=$((fail + 1))
         fi
@@ -62,7 +63,7 @@ done < "$OUT/files"
 while IFS= read -r f; do
     total=$((total + 1))
     # shellcheck disable=SC2046
-    if ! "$RESIDC" "$f" --profile check $(extra "$f") >/dev/null 2>&1; then
+    if ! "$RESIDC" "$f" --profile check $(extra "$f") >/dev/null 2>&1 </dev/null; then
         echo "FAILED to build: ${f#"$ROOT"/}"
         fail=$((fail + 1))
     fi

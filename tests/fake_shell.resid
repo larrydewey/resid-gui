@@ -153,7 +153,7 @@ List(SemNode) merge(List(SemNode) t, List(SemNode) puts, Int i) {
 }
 
 SemNode find_role(List(SemNode) t, Int role, Int i) {
-    if (i >= t.len()) { return SemNode { .id = -1, .parent = -1, .role = 0, .flags = 0, .bounds = Rect { .x = 0, .y = 0, .w = 0, .h = 0 }, .actions = 0, .label = "", .value = "" }; }
+    if (i >= t.len()) { return SemNode { .id = -1, .parent = -1, .role = 0, .flags = 0, .bounds = Rect { .x = 0, .y = 0, .w = 0, .h = 0 }, .actions = 0, .label = "", .value = "", .token = 0 }; }
     if (t[i].role == role) { return t[i]; }
     return find_role(t, role, i + 1);
 }

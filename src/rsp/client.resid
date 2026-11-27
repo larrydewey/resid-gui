@@ -334,7 +334,7 @@ List(SemNode) to_device(List(SemNode) ns, Int s, Int i, ListBuf(SemNode) acc) {
     SemNode n = ns[i];
     Rect b = n.bounds;
     return to_device(ns, s, i + 1, acc.push(SemNode { .id = n.id, .parent = n.parent, .role = n.role, .flags = n.flags,
-        .bounds = rect_scaled(b, s), .actions = n.actions, .label = n.label, .value = n.value }));
+        .bounds = rect_scaled(b, s), .actions = n.actions, .label = n.label, .value = n.value, .token = n.token }));
 }
 
 List(ToShell) puts(List(SemNode) ns, Int i, ListBuf(ToShell) acc) {

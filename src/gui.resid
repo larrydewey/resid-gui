@@ -201,9 +201,12 @@ Loop(M) run_loop(B b, Loop(M) st0) {
     }
     Loop(M) st = render(b, st0);
     Int s = be_scale(b);
-    List(SemNode) sem = semantics_in(st.view, Rect { .x = 0, .y = 0, .w = be_width(b) / s, .h = be_height(b) / s }, st.ui, st.font);
+    // each node carries its token, so a reader's action on a number from
+    // an older tree that now names another widget is refused (R6-3, R6-4)
+    List(SemNode) sem = with_tokens(semantics_in(st.view, Rect { .x = 0, .y = 0, .w = be_width(b) / s, .h = be_height(b) / s }, st.ui, st.font),
+                                    node_tokens(st.view));
     B bs = be_semantics(b, sem);
-    A11y a1 = a11y_tree(st.a11y, sem, view_shape(st.view));
+    A11y a1 = a11y_tree(st.a11y, sem);
     Bool show = st.pending.len() > 0 && be_ready(bs);
     B b2 = if (show) { be_present(bs, Frame { .ops = st.ops, .scale = st.scale, .font = st.font }, st.pending) } else { bs };
     Loop(M) st2 = with_a11y(if (show) { with_pending(st, []) } else { st }, a1);
@@ -485,38 +488,62 @@ DMsg reader_call(Str path, Str iface, Str member, List(DV) body) {
                   .error = "", .dest = ":1.7", .sender = ":1.42", .body = body };
 }
 
+/// The tree a reader is given for view `v`: its semantics, with tokens.
+List(SemNode) exported(Widget v) { return with_tokens(semantics(v, Rect { .x = 0, .y = 0, .w = 200, .h = 200 }, ui_new()), node_tokens(v)); }
+
+A11y reader_a11y() { return A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Rows", .tree = [], .skip = 0 }; }
+
+Bool did_assist(Served s, Int node) {
+    return s.events.len() == 1 && match (s.events[0]) { Assist(n, act) => n == node, _ => false };
+}
+
 test "a reader's path from before the rows changed names nothing (R5-4)" {
-    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...
     Widget abc = Column([Row([Text("A"), Button("Dismiss", Custom(0))]), Row([Text("B"), Button("Dismiss", Custom(1))]),
                          Row([Text("C"), Button("Dismiss", Custom(2))])]);
-    A11y a0 = A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Rows", .tree = [], .skip = 0, .gen = 0, .shape = 0 };
-    A11y a1 = changed_shape(a0, semantics(abc, r, ui_new()), view_shape(abc)).a;
+    A11y a1 = changed(reader_a11y(), exported(abc)).a;
     // the reader holds B's Dismiss
     Str b6 = path_in(a1, 6);
-    Served first = serve(a1, reader_call(b6, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
-    Bool acts = first.events.len() == 1 && match (first.events[0]) { Assist(n, act) => n == 6, _ => false };
-    expect(acts).toEqual(true);
+    expect(did_assist(serve(a1, reader_call(b6, "org.a11y.atspi.Action", "DoAction", [DI32(0)])), 6)).toEqual(true);
     // A is removed: number 6 is now C's Dismiss, Custom(1)
     Widget bc = Column([Row([Text("B"), Button("Dismiss", Custom(0))]), Row([Text("C"), Button("Dismiss", Custom(1))])]);
-    Served moved = changed_shape(a1, semantics(bc, r, ui_new()), view_shape(bc));
+    Served moved = changed(a1, exported(bc));
     Served stale = serve(moved.a, reader_call(b6, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
     expect(stale.events.len()).toEqual(0);
     expect(stale.out[0].error).toEqual("org.freedesktop.DBus.Error.UnknownObject");
-    // the reader was told the old objects went and the new ones came
+    // the reader was told the old objects went and the new ones came:
+    // removals first, from the last
     expect(moved.out.len()).toEqual(6 + 4);
     expect(arg_str(moved.out[0].body, 0)).toEqual("remove");
+    expect(arg_int(moved.out[0].body, 1) > arg_int(moved.out[1].body, 1)).toEqual(true);
     expect(arg_str(moved.out[6].body, 0)).toEqual("add");
     // and the new tree's paths act on what they now name
-    Served fresh = serve(moved.a, reader_call(path_in(moved.a, 6), "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
-    expect(fresh.events.len()).toEqual(1);
-    // text changing, or scrolling, keeps the shape and every path
-    Widget bd = Column([Row([Text("B!"), Button("Dismiss", Custom(0))]), Row([Text("D"), Button("Dismiss", Custom(1))])]);
-    expect(view_shape(bd)).toEqual(view_shape(bc));
-    expect(view_shape(Scroll(40, bc))).toEqual(view_shape(Scroll(0, bc)));
-    Served same = changed_shape(moved.a, semantics(bd, r, ui_new()), view_shape(bd));
-    expect(path_in(same.a, 6)).toEqual(path_in(moved.a, 6));
-    expect(serve(same.a, reader_call(path_in(moved.a, 6), "org.a11y.atspi.Action", "DoAction", [DI32(0)])).events.len()).toEqual(1);
+    expect(did_assist(serve(moved.a, reader_call(path_in(moved.a, 6), "org.a11y.atspi.Action", "DoAction", [DI32(0)])), 6)).toEqual(true);
+    // text changing in another row, or scrolling, keeps the paths
+    Widget s0 = Column([Row([Text("12:00")]), Scroll(0, bc)]);
+    Widget s1 = Column([Row([Text("12:01")]), Scroll(40, bc)]);
+    Served same = changed(changed(reader_a11y(), exported(s0)).a, exported(s1));
+    expect(path_in(same.a, 9)).toEqual(path_in(changed(reader_a11y(), exported(s0)).a, 9));
+}
+
+test "a reader's path names nothing once a row of the same shape replaced it (R6-3)" {
+    // rows A, B, C, then the feed drops A and appends D: every number,
+    // kind and message is as it was
+    Widget abc = Column([Row([Text("A"), Button("Delete", Custom(0))]), Row([Text("B"), Button("Delete", Custom(1))]),
+                         Row([Text("C"), Button("Delete", Custom(2))])]);
+    Widget bcd = Column([Row([Text("B"), Button("Delete", Custom(0))]), Row([Text("C"), Button("Delete", Custom(1))]),
+                         Row([Text("D"), Button("Delete", Custom(2))])]);
+    A11y a1 = changed(reader_a11y(), exported(abc)).a;
+    Str b6 = path_in(a1, 6);
+    Served next = changed(a1, exported(bcd));
+    Served stale = serve(next.a, reader_call(b6, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    expect(stale.events.len()).toEqual(0);
+    expect(stale.out[0].error).toEqual("org.freedesktop.DBus.Error.UnknownObject");
+    // the tokens are press_print's
+    List(Int) toks = node_tokens(abc);
+    expect(toks.len()).toEqual(10);
+    expect(toks[6]).toEqual(node_token(press_print(abc, 6)));
+    expect(toks[9]).toEqual(node_token(press_print(abc, 9)));
 }
 
 /// The events a turn's pump turns `msgs` from a shell into.

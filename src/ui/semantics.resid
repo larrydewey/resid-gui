@@ -28,7 +28,12 @@ import "state.resid";
 
 /// One node. `parent` is -1 for a node at the top. `bounds` are logical
 /// pixels. `flags` holds `sem_*` bits, `actions` holds `act_*` bits.
-pub type SemNode = { Int id; Int parent; Int role; Int flags; Rect bounds; Int actions; Str label; Str value; };
+/// `token` says which widget the number names (input.resid's
+/// `node_tokens`: the structure before it, its label and the text of its
+/// row or list); `semantics` leaves it 0 and the loop fills it in. A
+/// reader's action names a node by number and token, and one whose token
+/// no longer matches is refused (R6-3, R6-4).
+pub type SemNode = { Int id; Int parent; Int role; Int flags; Rect bounds; Int actions; Str label; Str value; Int token; };
 
 pub Int role_text() { return 1; }
 pub Int role_button() { return 2; }
@@ -135,7 +140,7 @@ SemNode node_of(Widget w, Rect r, UiState ui, Int id, Int parent) {
 }
 
 SemNode mk(Int id, Int parent, Int role, Int flags, Rect r, Int actions, Str label, Str value) {
-    return SemNode { .id = id, .parent = parent, .role = role, .flags = flags, .bounds = r, .actions = actions, .label = label, .value = value };
+    return SemNode { .id = id, .parent = parent, .role = role, .flags = flags, .bounds = r, .actions = actions, .label = label, .value = value, .token = 0 };
 }
 
 /// `w`'s nodes, unless a layer in `over` covers it: flagged off screen
@@ -196,7 +201,13 @@ Bool near_port(Rect r, Rect p) {
 /// when a `Scroll` could.
 SemNode offscreen(SemNode n, Bool scrolled) {
     return SemNode { .id = n.id, .parent = n.parent, .role = n.role, .flags = n.flags | sem_offscreen(), .bounds = n.bounds,
-                     .actions = if (scrolled) { act_scroll() } else { 0 }, .label = n.label, .value = n.value };
+                     .actions = if (scrolled) { act_scroll() } else { 0 }, .label = n.label, .value = n.value, .token = n.token };
+}
+
+/// Node `n` with token `t`.
+pub SemNode sem_with_token(SemNode n, Int t) {
+    return SemNode { .id = n.id, .parent = n.parent, .role = n.role, .flags = n.flags, .bounds = n.bounds, .actions = n.actions,
+                     .label = n.label, .value = n.value, .token = t };
 }
 
 /// The children; in a `Stack` (`layered`) each under the ones after it.
@@ -221,7 +232,7 @@ ListBuf(SemNode) sem_rows(ListBuf(SemNode) acc, List(Widget) xs, Rect r, Int o, 
 pub Bool sem_eq(SemNode a, SemNode b) {
     return a.id == b.id && a.parent == b.parent && a.role == b.role && a.flags == b.flags && a.actions == b.actions
         && a.bounds.x == b.bounds.x && a.bounds.y == b.bounds.y && a.bounds.w == b.bounds.w && a.bounds.h == b.bounds.h
-        && a.label == b.label && a.value == b.value;
+        && a.label == b.label && a.value == b.value && a.token == b.token;
 }
 
 /// What changed between two semantics lists: nodes that are new or

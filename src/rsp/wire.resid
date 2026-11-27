@@ -481,7 +481,7 @@ Result(ToShell, Str) to_shell_typed(Int op, List(RspField) f) {
     if (op == 6) { return Ok(Cursor(fi(f, 0))); }
     if (op == 7) { return Ok(TextInputState(fi(f, 0), fi(f, 1), Rect { .x = fi(f, 2), .y = fi(f, 3), .w = fi(f, 4), .h = fi(f, 5) }, fstr(f, 6), fi(f, 7), fi(f, 8))); }
     if (op == 8) { return Ok(SemReset); }
-    if (op == 9) { return Ok(SemPut(SemNode { .id = fi(f, 0), .parent = fi(f, 1), .role = fi(f, 2), .flags = fi(f, 3), .bounds = Rect { .x = fi(f, 4), .y = fi(f, 5), .w = fi(f, 6), .h = fi(f, 7) }, .actions = fi(f, 8), .label = fstr(f, 9), .value = fstr(f, 10) })); }
+    if (op == 9) { return Ok(SemPut(SemNode { .id = fi(f, 0), .parent = fi(f, 1), .role = fi(f, 2), .flags = fi(f, 3), .bounds = Rect { .x = fi(f, 4), .y = fi(f, 5), .w = fi(f, 6), .h = fi(f, 7) }, .actions = fi(f, 8), .label = fstr(f, 9), .value = fstr(f, 10), .token = 0 })); }
     if (op == 10) { return Ok(SemRemove(fi(f, 0))); }
     if (op == 11) { return Ok(SemCommit); }
     if (op == 12) { return Ok(ClipboardSet(fstr(f, 0), fb(f, 1))); }
@@ -522,7 +522,7 @@ test "a message carries its size and opcode" {
 
 test "every message to the shell survives a round trip" {
     SemNode n = SemNode { .id = 3, .parent = 1, .role = 2, .flags = 5, .bounds = Rect { .x = -4, .y = 5, .w = 60, .h = 20 },
-                          .actions = 1, .label = "Save", .value = "é€" };
+                          .actions = 1, .label = "Save", .value = "é€", .token = 0 };
     List(ToShell) all = [
         Hello(1, "dev.resid.todo"), Window("Tâches", 640, 480, 1, 200, 100), Attach(1, 640, 480, 2560),
         Present(1, [Rect { .x = 0, .y = 0, .w = 10, .h = 10 }, Rect { .x = 5, .y = 6, .w = 7, .h = 8 }]),

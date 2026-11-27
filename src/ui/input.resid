@@ -426,11 +426,49 @@ Widget group_kids(List(Widget) xs, Int i, Int id, Int target, Widget cand) {
     return group_kids(xs, i + 1, id + n, target, cand);
 }
 
-/// The shape of a whole view: `press_print` of all its widgets, with no
-/// label. Two views of one shape number their widgets alike, so an
-/// accessible object's number names the same widget in both (atspi.resid's
-/// `changed_shape`); scrolling, typing or new text keeps the shape.
-pub Int view_shape(Widget root) { return fp_node(root, 0, node_count(root), Fp { .h = 17, .id = 0 }).h; }
+/// A node's token: a print (`press_print`) in the 31 bits a protocol
+/// field carries.
+pub Int node_token(Int print) { return print & 2147483647; }
+
+/// Every widget's token, by number: `node_token(press_print(root, n))`
+/// for each `n`, in one walk. A screen reader's object path and a shell's
+/// action carry it with the number, so a number from an older tree that
+/// now names another widget (a row removed above it, or a row of the same
+/// shape with other text) is refused (R6-3, R6-4).
+pub List(Int) node_tokens(Widget root) {
+    Tok t = tok_node(root, content_print(root), Tok { .h = 17, .n = 0, .acc = {} });
+    return tok_list(t.acc, 0, t.n, ListBuf());
+}
+
+/// The structure printed so far, how many widgets, and their tokens by
+/// number.
+type Tok = { Int h; Int n; Map(Int, Int) acc; };
+
+List(Int) tok_list(Map(Int, Int) m, Int i, Int n, ListBuf(Int) acc) {
+    if (i >= n) { return acc.finish(); }
+    return tok_list(m, i + 1, n, acc.push(m.get(i) else { 0 }));
+}
+
+Tok tok_node(Widget w, Int ctx, Tok t) {
+    Int h = fp_one(t.h, w);
+    Int mine = node_token(fp_mix(fp_str(h, label_of(w), 0), ctx));
+    return tok_kids(children(w), 0, if (is_group(w)) { content_print(w) } else { ctx }, Tok { .h = h, .n = t.n + 1, .acc = t.acc.insert(t.n, mine) });
+}
+
+Tok tok_kids(List(Widget) xs, Int i, Int ctx, Tok t) {
+    if (i >= xs.len()) { return t; }
+    return tok_kids(xs, i + 1, ctx, tok_node(xs[i], ctx, t));
+}
+
+/// `ns` with each node's token from `toks` (`node_tokens` of the view
+/// they were made from).
+pub List(SemNode) with_tokens(List(SemNode) ns, List(Int) toks) { return with_tokens_at(ns, toks, 0, ListBuf()); }
+
+List(SemNode) with_tokens_at(List(SemNode) ns, List(Int) toks, Int i, ListBuf(SemNode) acc) {
+    if (i >= ns.len()) { return acc.finish(); }
+    Int id = ns[i].id;
+    return with_tokens_at(ns, toks, i + 1, acc.push(sem_with_token(ns[i], if (id >= 0 && id < toks.len()) { toks[id] } else { 0 })));
+}
 
 /// A fingerprint so far, and the number of the next widget.
 type Fp = { Int h; Int id; };

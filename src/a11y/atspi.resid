@@ -6,8 +6,7 @@
 //
 //   /org/a11y/atspi/accessible/root    the application
 //   /org/a11y/atspi/accessible/frame   its window
-//   /org/a11y/atspi/accessible/<n>     widget number n, in the first tree
-//   /org/a11y/atspi/accessible/<n>_<g> widget number n, in generation g
+//   /org/a11y/atspi/accessible/<n>_<t> widget number n, whose token is t
 //
 // with the interfaces a reader asks for: Accessible (role, name, state,
 // children, parent), Component (extents, hit testing, focus), Action
@@ -34,34 +33,32 @@ import "dbus.resid";
 pub type A11y = {
     Int fd; Bool alive; Str err; List(Int) buf; Int serial;
     Str name; Str title; List(SemNode) tree; Int skip;
-    Int gen;    // the tree's generation, in every widget's object path
-    Int shape;  // the shape of the view it was made from (`a11y_tree`)
 };
 
 pub A11y a11y_none() {
-    return A11y { .fd = -1, .alive = false, .err = "", .buf = [], .serial = 1, .name = "", .title = "", .tree = [], .skip = 0, .gen = 0, .shape = 0 };
+    return A11y { .fd = -1, .alive = false, .err = "", .buf = [], .serial = 1, .name = "", .title = "", .tree = [], .skip = 0 };
 }
 
 A11y with_tree(A11y a, List(SemNode) t) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = t, .skip = a.skip, .gen = a.gen, .shape = a.shape };
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = t, .skip = a.skip };
 }
 
 A11y with_serial(A11y a, Int s) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = s, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip, .gen = a.gen, .shape = a.shape };
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = s, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip };
 }
 
 A11y with_buf(A11y a, List(Int) b) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = b, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip, .gen = a.gen, .shape = a.shape };
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = b, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip };
 }
 
 /// `a` skipping the next `n` bytes from the bus: the rest of a message too
 /// large to keep.
 A11y with_skip(A11y a, Int n) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = n, .gen = a.gen, .shape = a.shape };
+    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = n };
 }
 
 A11y dead(A11y a, Str why) {
-    return A11y { .fd = a.fd, .alive = false, .err = why, .buf = [], .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = 0, .gen = a.gen, .shape = a.shape };
+    return A11y { .fd = a.fd, .alive = false, .err = why, .buf = [], .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = 0 };
 }
 
 // ─── Objects ───────────────────────────────────────────────────────
@@ -75,29 +72,34 @@ Int root_id() { return -2; }
 Int frame_id() { return -3; }
 
 /// The object a path names: -2 the application, -3 the window, a widget
-/// number, or -9 for anything else. A widget's path carries the tree's
-/// generation: one handed out before the view changed shape names nothing
-/// now, as its number may name another widget (R5-4).
+/// number, or -9 for anything else. A widget's path carries its token
+/// (semantics.resid's `SemNode.token`: the structure before it, its label
+/// and the text of its row or list), and names the widget only while the
+/// current tree gives that number that token: a path handed out before a
+/// row was removed above it, or before rows of the same shape changed
+/// their text, is an UnknownObject, never another widget (R5-4, R6-3).
 pub Int id_of(A11y a, Str p) {
     if (p == root_path()) { return root_id(); }
     if (p == frame_path()) { return frame_id(); }
     if (!str_starts_with(p, path_prefix())) { return -9; }
     Str rest = str_slice(p, str_len(path_prefix()), str_len(p));
     Int u = str_index_of(rest, "_", 0);
-    Str num = if (u < 0) { rest } else { str_slice(rest, 0, u) };
-    Str gen = if (u < 0) { "" } else { str_slice(rest, u + 1, str_len(rest)) };
+    if (u < 0) { return -9; }
+    Str num = str_slice(rest, 0, u);
+    Str tok = str_slice(rest, u + 1, str_len(rest));
     if (str_len(num) == 0 || str_len(num) > 9 || !digits(num, 0)) { return -9; }
-    if (u >= 0 && (str_len(gen) == 0 || str_len(gen) > 18 || !digits(gen, 0))) { return -9; }
-    Int g = if (u < 0) { 0 } else { digits_value(gen, 0, 0) };
-    // the generation must be this tree's, written as path_in writes it
-    if (g != a.gen || (u >= 0) != (a.gen != 0)) { return -9; }
+    if (str_len(tok) == 0 || str_len(tok) > 10 || !digits(tok, 0)) { return -9; }
     Int n = digits_value(num, 0, 0);
-    return if (find_node(a.tree, n, 0) >= 0) { n } else { -9 };
+    if (find_node(a.tree, n, 0) < 0) { return -9; }
+    // written as path_in writes it (no leading zeros), with this tree's token
+    return if (path_in(a, n) == p) { n } else { -9 };
 }
 
 Bool digits(Str s, Int i) { return i >= str_len(s) || (str_char_at(s, i) >= 48 && str_char_at(s, i) <= 57 && digits(s, i + 1)); }
 Int digits_value(Str s, Int i, Int acc) { return if (i >= str_len(s)) { acc } else { digits_value(s, i + 1, acc * 10 + str_char_at(s, i) - 48) }; }
 
+/// The path of the application, the window or nothing; for a widget,
+/// its number alone, which `path_in` completes with its token.
 pub Str path_of(Int id) {
     if (id == root_id()) { return root_path(); }
     if (id == frame_id()) { return frame_path(); }
@@ -105,11 +107,11 @@ pub Str path_of(Int id) {
     return path_prefix() + f"{id}";
 }
 
-/// The path of object `id` in `a`'s tree: `path_of`, with the tree's
-/// generation after a widget's number once there has been more than one.
+/// The path of object `id` in `a`'s tree: for a widget, its number and
+/// its token.
 pub Str path_in(A11y a, Int id) {
-    if (id < 0 || a.gen == 0) { return path_of(id); }
-    return path_of(id) + f"_{a.gen}";
+    if (id < 0) { return path_of(id); }
+    return path_of(id) + f"_{node(a, id).token}";
 }
 
 DV ref(A11y a, Int id) { return DStruct([DStr(a.name), DPath(path_in(a, id))]); }
@@ -128,7 +130,7 @@ Int find_in(List(SemNode) t, Int id, Int lo, Int hi) {
 
 SemNode node(A11y a, Int id) {
     Int k = find_node(a.tree, id, 0);
-    if (k < 0) { return SemNode { .id = -9, .parent = -1, .role = 0, .flags = 0, .bounds = rect_none(), .actions = 0, .label = "", .value = "" }; }
+    if (k < 0) { return SemNode { .id = -9, .parent = -1, .role = 0, .flags = 0, .bounds = rect_none(), .actions = 0, .label = "", .value = "", .token = 0 }; }
     return a.tree[k];
 }
 
@@ -435,66 +437,11 @@ pub Served changed(A11y a, List(SemNode) now) {
     A11y next = with_tree(a, now);
     List(Int) idx_now = if (w.added.len() > 0) { sibling_index(now, 0, {}, ListBuf()) } else { [] };
     List(Int) idx_old = if (w.gone.len() > 0) { sibling_index(a.tree, 0, {}, ListBuf()) } else { [] };
-    List(DMsg) out = signals_put(a, next, w, idx_now, idx_old, 0, ListBuf(), a.serial).finish();
+    // removals first, last to first, so each old place is still right
+    // when it is read; then additions in order, at their new places
+    ListBuf(DMsg) gone = signals_gone(a, w.gone, idx_old, w.gone.len() - 1, ListBuf(), a.serial);
+    List(DMsg) out = signals_put(a, next, w, idx_now, 0, gone, a.serial + w.gone.len()).finish();
     return Served { .a = with_serial(next, a.serial + out.len()), .out = out, .events = [] };
-}
-
-/// `changed` for a tree made from a view of shape `shape` (gui.resid's
-/// `view_shape`: its widgets' kinds, messages and child counts). A view
-/// of the same shape numbers its widgets as before, and the tree is
-/// diffed as `changed` does. A new shape may have renumbered them, so a
-/// number a reader holds could name another widget (a row removed above
-/// it): the tree takes a new generation, which every widget's path
-/// carries, so an old path is an UnknownObject, never another widget
-/// (R5-4). The reader is told the window's old children went and the new
-/// ones came, and which one has focus.
-pub Served changed_shape(A11y a, List(SemNode) now, Int shape) {
-    if (shape == a.shape) { return changed(a, now); }
-    A11y next = with_gen(with_tree(a, now), a.gen + 1, shape);
-    List(Int) idx_old = sibling_index(a.tree, 0, {}, ListBuf());
-    List(Int) idx_now = sibling_index(now, 0, {}, ListBuf());
-    Int s1 = a.serial + tops(a.tree, 0, 0);
-    Int s2 = s1 + tops(now, 0, 0);
-    ListBuf(DMsg) gone = tops_gone(a, idx_old, 0, ListBuf(), a.serial);
-    List(DMsg) out = focus_now(next, 0, tops_added(next, idx_now, 0, gone, s1), s2).finish();
-    return Served { .a = with_serial(next, a.serial + out.len()), .out = out, .events = [] };
-}
-
-A11y with_gen(A11y a, Int gen, Int shape) {
-    return A11y { .fd = a.fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip, .gen = gen, .shape = shape };
-}
-
-/// How many nodes of `t` hang from the window.
-Int tops(List(SemNode) t, Int i, Int n) {
-    if (i >= t.len()) { return n; }
-    return tops(t, i + 1, if (t[i].parent < 0) { n + 1 } else { n });
-}
-
-/// A removal from the window for each top node of the old tree (its
-/// subtree goes with it), at its old place.
-ListBuf(DMsg) tops_gone(A11y old, List(Int) idx, Int i, ListBuf(DMsg) out, Int s) {
-    if (i >= old.tree.len()) { return out; }
-    SemNode n = old.tree[i];
-    if (n.parent >= 0) { return tops_gone(old, idx, i + 1, out, s); }
-    DMsg m = event(s, frame_path(), "ChildrenChanged", "remove", if (i < idx.len()) { idx[i] } else { 0 }, 0, ref(old, n.id));
-    return tops_gone(old, idx, i + 1, out.push(m), s + 1);
-}
-
-/// An addition to the window for each top node of the new tree.
-ListBuf(DMsg) tops_added(A11y now, List(Int) idx, Int i, ListBuf(DMsg) out, Int s) {
-    if (i >= now.tree.len()) { return out; }
-    SemNode n = now.tree[i];
-    if (n.parent >= 0) { return tops_added(now, idx, i + 1, out, s); }
-    DMsg m = event(s, frame_path(), "ChildrenChanged", "add", if (i < idx.len()) { idx[i] } else { 0 }, 0, ref(now, n.id));
-    return tops_added(now, idx, i + 1, out.push(m), s + 1);
-}
-
-/// The focused node of the new tree, announced as focused.
-ListBuf(DMsg) focus_now(A11y now, Int i, ListBuf(DMsg) out, Int s) {
-    if (i >= now.tree.len()) { return out; }
-    SemNode n = now.tree[i];
-    if ((n.flags & sem_focused()) == 0) { return focus_now(now, i + 1, out, s); }
-    return out.push(event(s, path_in(now, n.id), "StateChanged", "focused", 1, 0, DI32(0)));
 }
 
 /// What a merge walk of two trees found: positions in the new tree of
@@ -511,6 +458,9 @@ Walk walk(List(SemNode) a, List(SemNode) b, Int i, Int j, ListBuf(Int) put, List
     }
     if (i >= a.len() || (j < b.len() && a[i].id > b[j].id)) { return walk(a, b, i, j + 1, put.push(j), was.push(-1), gone); }
     if (j >= b.len() || a[i].id < b[j].id) { return walk(a, b, i + 1, j, put, was, gone.push(i)); }
+    // the same number naming another widget is a new object (its path
+    // changes with its token): the old one goes, the new one comes
+    if (a[i].token != b[j].token) { return walk(a, b, i + 1, j + 1, put.push(j), was.push(-1), gone.push(i)); }
     if (sem_eq(a[i], b[j])) { return walk(a, b, i + 1, j + 1, put, was, gone); }
     return walk(a, b, i + 1, j + 1, put.push(j), was.push(i), gone);
 }
@@ -537,20 +487,19 @@ DMsg event(Int serial, Str path, Str member, Str detail, Int d1, Int d2, DV v) {
     return dsignal(serial, path, "org.a11y.atspi.Event.Object", member, [DStr(detail), DI32(d1), DI32(d2), DVar(v), DArr("{sv}", [])]);
 }
 
-/// The signals for the added and changed nodes, serials from `s`, then
-/// those for the nodes gone.
-ListBuf(DMsg) signals_put(A11y old, A11y now, Walk w, List(Int) idx_now, List(Int) idx_old, Int i, ListBuf(DMsg) out, Int s) {
-    if (i >= w.put.len()) { return signals_gone(old, w.gone, idx_old, 0, out, s); }
+/// The signals for the added and changed nodes, serials from `s`.
+ListBuf(DMsg) signals_put(A11y old, A11y now, Walk w, List(Int) idx_now, Int i, ListBuf(DMsg) out, Int s) {
+    if (i >= w.put.len()) { return out; }
     Int j = w.put[i];
     SemNode n = now.tree[j];
     Int was = w.was[i];
     if (was < 0) {
         Int p = parent_of(now, n.id);
         DMsg m = event(s, path_in(now, p), "ChildrenChanged", "add", if (j < idx_now.len()) { idx_now[j] } else { 0 }, 0, ref(now, n.id));
-        return signals_put(old, now, w, idx_now, idx_old, i + 1, out.push(m), s + 1);
+        return signals_put(old, now, w, idx_now, i + 1, out.push(m), s + 1);
     }
     List(DMsg) ms = node_changes(now, old.tree[was], n, s);
-    return signals_put(old, now, w, idx_now, idx_old, i + 1, push_all_msgs(out, ms, 0), s + ms.len());
+    return signals_put(old, now, w, idx_now, i + 1, push_all_msgs(out, ms, 0), s + ms.len());
 }
 
 List(DMsg) node_changes(A11y now, SemNode o, SemNode n, Int s) {
@@ -574,14 +523,15 @@ List(DMsg) node_changes(A11y now, SemNode o, SemNode n, Int s) {
 }
 
 /// A removal per old position in `gone`, from its old parent, at its old
-/// place there.
+/// place there, from the last (`i`) to the first: a sibling removed
+/// before a later one would shift the later one's place.
 ListBuf(DMsg) signals_gone(A11y old, List(Int) gone, List(Int) idx_old, Int i, ListBuf(DMsg) out, Int s) {
-    if (i >= gone.len()) { return out; }
+    if (i < 0 || i >= gone.len()) { return out; }
     Int k = gone[i];
     SemNode n = old.tree[k];
     Int p = if (n.parent < 0) { frame_id() } else { n.parent };
     DMsg m = event(s, path_in(old, p), "ChildrenChanged", "remove", if (k < idx_old.len()) { idx_old[k] } else { 0 }, 0, ref(old, n.id));
-    return signals_gone(old, gone, idx_old, i + 1, out.push(m), s + 1);
+    return signals_gone(old, gone, idx_old, i - 1, out.push(m), s + 1);
 }
 
 // ─── The connection ────────────────────────────────────────────────
@@ -608,7 +558,7 @@ pub A11y a11y_start(Str title) {
 /// name.
 @requires(display)
 pub A11y a11y_start_on(Int fd, Str title) {
-    A11y a0 = A11y { .fd = fd, .alive = true, .err = "", .buf = [], .serial = 1, .name = "", .title = title, .tree = [], .skip = 0, .gen = 0, .shape = 0 };
+    A11y a0 = A11y { .fd = fd, .alive = true, .err = "", .buf = [], .serial = 1, .name = "", .title = title, .tree = [], .skip = 0 };
     A11y a1 = send(a0, [dcall(1, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", [])], 0);
     A11y a2 = wait_name(with_serial(a1, 2), 20);
     if (!a2.alive || str_len(a2.name) == 0) {
@@ -628,7 +578,7 @@ A11y wait_name(A11y a, Int tries) {
     if (t.ok) {
         A11y rest = with_buf(a, t.rest);
         Str name = match (dmsg_decode(t.msg)) { Ok(m) => if (m.kind == msg_return() && m.reply_serial == 1) { arg_str(m.body, 0) } else { "" }, Err(e) => "" };
-        return wait_name(if (str_len(name) > 0) { A11y { .fd = rest.fd, .alive = true, .err = "", .buf = rest.buf, .serial = rest.serial, .name = name, .title = rest.title, .tree = rest.tree, .skip = rest.skip, .gen = rest.gen, .shape = rest.shape } } else { rest }, tries);
+        return wait_name(if (str_len(name) > 0) { A11y { .fd = rest.fd, .alive = true, .err = "", .buf = rest.buf, .serial = rest.serial, .name = name, .title = rest.title, .tree = rest.tree, .skip = rest.skip } } else { rest }, tries);
     }
     List(Int) ready = resid_disp_poll([a.fd], [1], 200);
     if (ready.len() == 0 || (ready[0] & 1) == 0) { return wait_name(a, tries - 1); }
@@ -697,12 +647,11 @@ Served refuse(A11y a, List(Int) msg, Str why) {
 @requires(display)
 A11yStep drained(Served s, List(Event) acc) { return drain(send(s.a, s.out, 0), acc.concat(s.events)); }
 
-/// Publish a new tree, made from a view of shape `shape`
-/// (`changed_shape`): signals for what changed.
+/// Publish a new tree: signals for what changed.
 @requires(display)
-pub A11y a11y_tree(A11y a, List(SemNode) now, Int shape) {
-    if (!a.alive) { return with_gen(with_tree(a, now), if (shape == a.shape) { a.gen } else { a.gen + 1 }, shape); }
-    Served s = changed_shape(a, now, shape);
+pub A11y a11y_tree(A11y a, List(SemNode) now) {
+    if (!a.alive) { return with_tree(a, now); }
+    Served s = changed(a, now);
     return send(s.a, s.out, 0);
 }
 
@@ -714,7 +663,7 @@ pub Int a11y_fd(A11y a) { return a.fd; }
 A11y sample() {
     List(SemNode) t = semantics(Column([Text("count: 1"), Button("+1", Clicked), Checkbox("Alerts", true, Toggled), TextInput("hello", 5, Submitted)]),
                                 Rect { .x = 0, .y = 0, .w = 200, .h = 160 }, ui_with_focus(ui_new(), 4));
-    return with_tree(A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Counter", .tree = [], .skip = 0, .gen = 0, .shape = 0 }, t);
+    return with_tree(A11y { .fd = -1, .alive = true, .err = "", .buf = [], .serial = 10, .name = ":1.7", .title = "Counter", .tree = [], .skip = 0 }, t);
 }
 
 DMsg call(Str path, Str iface, Str member, List(DV) body) {
@@ -740,7 +689,7 @@ test "the tree hangs from an application and its window" {
     expect(top.len()).toEqual(4);
     expect(atspi_role(a, top[1])).toEqual(43);
     expect(role_name(atspi_role(a, top[2]))).toEqual("check box");
-    DMsg name = reply_of(serve(a, call(path_of(top[1]), "org.freedesktop.DBus.Properties", "Get", [DStr("org.a11y.atspi.Accessible"), DStr("Name")])));
+    DMsg name = reply_of(serve(a, call(path_in(a, top[1]), "org.freedesktop.DBus.Properties", "Get", [DStr("org.a11y.atspi.Accessible"), DStr("Name")])));
     Bool plus = match (name.body[0]) { DVar(v) => match (v) { DStr(s) => s == "+1", _ => false }, _ => false };
     expect(plus).toEqual(true);
 }
@@ -751,7 +700,7 @@ test "states carry checked, focused and editable" {
     expect(index_in(states(a, top[2]), 4, 0) >= 0).toEqual(true);     // checked
     expect(index_in(states(a, top[3]), 12, 0) >= 0).toEqual(true);    // focused
     expect(index_in(states(a, top[3]), 7, 0) >= 0).toEqual(true);     // editable
-    DMsg r = reply_of(serve(a, call(path_of(top[2]), "org.a11y.atspi.Accessible", "GetState", [])));
+    DMsg r = reply_of(serve(a, call(path_in(a, top[2]), "org.a11y.atspi.Accessible", "GetState", [])));
     Int lo = match (r.body[0]) { DArr(es, xs) => arg_int(xs, 0), _ => 0 };
     expect((lo & (1 << 4)) != 0).toEqual(true);
 }
@@ -759,14 +708,14 @@ test "states carry checked, focused and editable" {
 test "a reader's actions become Assist events" {
     A11y a = sample();
     List(Int) top = children_of(a, -3);
-    Served s = serve(a, call(path_of(top[1]), "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    Served s = serve(a, call(path_in(a, top[1]), "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
     Bool assist = s.events.len() == 1 && match (s.events[0]) { Assist(n, act) => n == top[1] && act == act_activate(), _ => false };
     expect(assist).toEqual(true);
-    Served f = serve(a, call(path_of(top[3]), "org.a11y.atspi.Component", "GrabFocus", []));
+    Served f = serve(a, call(path_in(a, top[3]), "org.a11y.atspi.Component", "GrabFocus", []));
     Bool focus = f.events.len() == 1 && match (f.events[0]) { Assist(n, act) => act == act_focus(), _ => false };
     expect(focus).toEqual(true);
     // a label has no actions
-    expect(reply_of(serve(a, call(path_of(top[0]), "org.a11y.atspi.Action", "DoAction", [DI32(0)]))).kind).toEqual(msg_error());
+    expect(reply_of(serve(a, call(path_in(a, top[0]), "org.a11y.atspi.Action", "DoAction", [DI32(0)]))).kind).toEqual(msg_error());
 }
 
 test "unknown objects and methods are errors, and no-reply calls get none" {
@@ -783,11 +732,11 @@ test "unknown objects and methods are errors, and no-reply calls get none" {
 test "text fields give their text; extents and hit testing use the layout" {
     A11y a = sample();
     List(Int) top = children_of(a, -3);
-    DMsg t = reply_of(serve(a, call(path_of(top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)])));
+    DMsg t = reply_of(serve(a, call(path_in(a, top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)])));
     expect(arg_str(t.body, 0)).toEqual("ello");
     Rect r = node(a, top[1]).bounds;
     expect(at_point(a, r.x + 1, r.y + 1, 0, -3)).toEqual(top[1]);
-    DMsg e = reply_of(serve(a, call(path_of(top[1]), "org.a11y.atspi.Component", "GetExtents", [DU32(1)])));
+    DMsg e = reply_of(serve(a, call(path_in(a, top[1]), "org.a11y.atspi.Component", "GetExtents", [DU32(1)])));
     Int w = match (e.body[0]) { DStruct(xs) => arg_int(xs, 2), _ => 0 };
     expect(w).toEqual(r.w);
 }
@@ -817,7 +766,7 @@ List(Int) wire(Int serial, Str path, Str iface, Str member, List(DV) body) {
 }
 
 A11y on_fd(A11y a, Int fd) {
-    return A11y { .fd = fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip, .gen = a.gen, .shape = a.shape };
+    return A11y { .fd = fd, .alive = a.alive, .err = a.err, .buf = a.buf, .serial = a.serial, .name = a.name, .title = a.title, .tree = a.tree, .skip = a.skip };
 }
 
 /// How many whole messages `b` holds: the replies, counted by framing.
@@ -872,7 +821,7 @@ test "a message that does not decode is refused, and the bus stays open" {
     List(Int) bad = b7.with(b7.len() - 4, 7);
     List(Int) be = [66, 1, 0, 1, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
     List(Int) dbl = x_to_d(wire(32, root_path(), "org.a11y.atspi.Nope", "X", [DI64(7)]), 0);
-    List(Int) good = wire(30, path_of(top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)]);
+    List(Int) good = wire(30, path_in(a, top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)]);
     _ = resid_disp_send(pair[0], bad.concat(be).concat(dbl).concat(good), -1);
     A11yStep s = a11y_pump(a);
     expect(s.a.alive).toEqual(true);
@@ -898,7 +847,7 @@ test "a message past 1 MB is skipped as it arrives, and the bus stays open" {
     A11y a1 = feed_zeros(a11y_pump(a).a, pair[0], 24, zero_bytes(65536, ListBuf()));
     expect(a1.alive).toEqual(true);
     // then the call's last bytes and an honest call, which is answered
-    List(Int) good = wire(41, path_of(top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)]);
+    List(Int) good = wire(41, path_in(a, top[3]), "org.a11y.atspi.Text", "GetText", [DI32(1), DI32(-1)]);
     _ = resid_disp_send(pair[0], zero_bytes(body - 24 * 65536, ListBuf()).concat(good), -1);
     A11yStep s = a11y_pump(a1);
     expect(s.a.alive).toEqual(true);
@@ -921,12 +870,12 @@ test "an off-screen node is read, not SHOWING, and can only be scrolled to (R3-3
     expect(index_in(st, 30, 0) >= 0).toEqual(true);           // visible
     expect(index_in(states(a, 2), 25, 0) >= 0).toEqual(true); // "top" shows
     // clicking it through Action is refused; ScrollTo asks the program to scroll
-    expect(reply_of(serve(a, call(path_of(5), "org.a11y.atspi.Action", "DoAction", [DI32(0)]))).kind).toEqual(msg_error());
-    Served s = serve(a, call(path_of(5), "org.a11y.atspi.Component", "ScrollTo", [DU32(6)]));
+    expect(reply_of(serve(a, call(path_in(a, 5), "org.a11y.atspi.Action", "DoAction", [DI32(0)]))).kind).toEqual(msg_error());
+    Served s = serve(a, call(path_in(a, 5), "org.a11y.atspi.Component", "ScrollTo", [DU32(6)]));
     Bool asked = s.events.len() == 1 && match (s.events[0]) { Assist(n, act) => n == 5 && act == act_scroll(), _ => false };
     expect(asked).toEqual(true);
     // one already showing needs no scroll
-    expect(serve(a, call(path_of(2), "org.a11y.atspi.Component", "ScrollTo", [DU32(6)])).events.len()).toEqual(0);
+    expect(serve(a, call(path_in(a, 2), "org.a11y.atspi.Component", "ScrollTo", [DU32(6)])).events.len()).toEqual(0);
     // a point over where it would be finds it not
     Rect fb = node(a, 5).bounds;
     expect(at_point(a, fb.x + 1, fb.y + 1, 0, -3)).toEqual(-3);

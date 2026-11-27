@@ -1,0 +1,42 @@
+// readfile.resid — the bytes of a file a program was given, read with a
+// limit.
+//
+// A path from the command line can name anything: a directory, a FIFO
+// that blocks until something writes to it, a device such as /dev/zero
+// that never ends, or a file larger than the native decoders take.
+// `filesystem.read_bytes` would read any of them whole. A font or an
+// image comes through `read_file_limited` instead (E1).
+
+/// The bytes of the regular file at `path`, at most `max` of them, or
+/// why not: a missing file, a directory, an empty file or one of no known
+/// size (a FIFO or a device stats as 0, and could block or never end), a
+/// file larger than `max`, or one that changed while it was read. It
+/// reads the size it found, never more.
+@requires(filesystem(readonly))
+pub Result(List(Int), Str) read_file_limited(Str path, Int max) {
+    if (!filesystem.exists(path)) { return Err("no such file"); }
+    if (filesystem.is_dir(path)) { return Err("a directory, not a file"); }
+    Int n = filesystem.size(path);
+    if (n < 0) { return Err("cannot be read"); }
+    if (n == 0) { return Err("empty, or not a regular file"); }
+    if (n > max) { return Err(f"larger than {max} bytes"); }
+    List(Int) b = filesystem.read_range(path, 0, n);
+    return if (b.len() != n) { Err("changed while it was read") } else { Ok(b) };
+}
+
+/// Why a read failed, or "" when it did not.
+pub Str read_error(Result(List(Int), Str) r) { return match (r) { Ok(b) => "", Err(e) => e }; }
+
+@requires(filesystem)
+test "a file is read whole up to its limit, and nothing that is not a file (E1)" {
+    Str p = "/tmp/resid-gui-readfile-test.bin";
+    _ = filesystem.write_bytes(p, [1, 2, 3, 4]);
+    List(Int) got = read_file_limited(p, 16) else { [] };
+    expect(got).toEqual([1, 2, 3, 4]);
+    expect(str_contains(read_error(read_file_limited(p, 3)), "larger")).toEqual(true);
+    // a device that never ends, a directory, nothing
+    expect(str_len(read_error(read_file_limited("/dev/zero", 16))) > 0).toEqual(true);
+    expect(str_len(read_error(read_file_limited("/tmp", 16))) > 0).toEqual(true);
+    expect(str_len(read_error(read_file_limited("/tmp/resid-gui-no-such-file", 16))) > 0).toEqual(true);
+    _ = filesystem.remove(p);
+}

@@ -154,8 +154,10 @@ font, and `Bitmap` shows pixels the program has. Both can come from files
 through the optional native modules (docs/reference_native.md):
 
 ```resid
-List(Font) fonts = fonts_from_ttf(filesystem.read_bytes(path), 16);   // native_font
-Result(Image, Str) img = image_from_bytes(filesystem.read_bytes(png)); // native_image
+// read_file_limited: a regular file, at most the size given (never a FIFO,
+// a device or a directory, which could block or never end)
+List(Font) fonts = fonts_from_ttf(read_file_limited(path, 16777216) else { [] }, 16);   // native_font
+Result(Image, Str) img = image_from_bytes(read_file_limited(png, image_max_bytes()) else { [] }); // native_image
 return gui_run_with(opts, fonts);
 ```
 

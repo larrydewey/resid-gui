@@ -39,7 +39,13 @@ Int main() {
         eprintln("usage: fonts FONT.ttf");
         return 2;
     }
-    List(Font) fonts = fonts_from_ttf(filesystem.read_bytes(path), 16);
+    // a regular file of at most 16 MB: not a FIFO, a device or a directory
+    Result(List(Int), Str) bytes = read_file_limited(path, 16777216);
+    if (str_len(read_error(bytes)) > 0) {
+        eprintln(f"{path}: {read_error(bytes)}");
+        return 1;
+    }
+    List(Font) fonts = fonts_from_ttf(bytes else { [] }, 16);
     if (fonts.len() == 0) {
         eprintln(f"{path}: not a TrueType font");
         return 1;

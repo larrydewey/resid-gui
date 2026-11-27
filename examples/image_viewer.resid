@@ -64,7 +64,9 @@ Int main() {
     if (str_len(path) == 0) {
         return gui_run(WindowOptions { .title = "Image Viewer", .width = 320, .height = 260, .resizable = true });
     }
-    Result(Image, Str) r = image_from_bytes(filesystem.read_bytes(path));
+    // a regular file of at most 16 MB: not a FIFO, a device or a directory
+    Result(List(Int), Str) bytes = read_file_limited(path, image_max_bytes());
+    Result(Image, Str) r = match (bytes) { Ok(b) => image_from_bytes(b), Err(e) => Err(f"{path}: {e}") };
     Image none = image_new(0, 0);
     Image im = r else { none };
     if (im.w == 0) {

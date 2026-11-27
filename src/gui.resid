@@ -44,6 +44,7 @@ import "ui/theme.resid";
 import "a11y/atspi.resid";
 import "rsp/client.resid";
 import "rsp/wire.resid";
+import "gfx/readfile.resid";
 
 /// The caret blinks, and `FrameTick` arrives, this often.
 pub Int blink_ms() { return 500; }

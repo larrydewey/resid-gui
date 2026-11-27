@@ -8,6 +8,7 @@
 
 import "font.resid";
 import "ttf.resid";
+import "readfile.resid";
 
 /// Atlases of the TrueType font at `path`, `size` logical pixels per em,
 /// for scales 1 and 2; none when the file is missing or malformed.
@@ -28,10 +29,12 @@ pub Int max_font_file() { return 16777216; }
 /// a hostile font costs at most twice it, about 0.7 s, here.
 @requires(filesystem(readonly))
 pub Result(List(Font), Str) read_ttf(Str path, Int size) {
-    if (filesystem.size(path) > max_font_file()) { return Err("larger than 16 MB"); }
-    List(Int) bytes = filesystem.read_bytes(path);
-    return match (ttf_font(bytes, size, 1)) {
-        Ok(one) => match (ttf_font(bytes, size, 2)) { Ok(two) => Ok([one, two]), Err(e) => Ok([one]) },
+    // a regular file of known size, at most 16 MB (not a FIFO or device)
+    return match (read_file_limited(path, max_font_file())) {
+        Ok(bytes) => match (ttf_font(bytes, size, 1)) {
+            Ok(one) => match (ttf_font(bytes, size, 2)) { Ok(two) => Ok([one, two]), Err(e) => Ok([one]) },
+            Err(e) => Err(e)
+        },
         Err(e) => Err(e)
     };
 }

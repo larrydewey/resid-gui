@@ -233,6 +233,9 @@ test "a font file past 16 MB is not read" {
     expect(filesystem.write_bytes(big, padded(f, 16777216))).toEqual(true);
     expect(load_ttf(small, 15).len()).toEqual(2);
     expect(load_ttf(big, 15).len()).toEqual(0);
+    // nor a device that never ends, nor a directory (E1)
+    expect(load_ttf("/dev/zero", 15).len()).toEqual(0);
+    expect(load_ttf("/tmp", 15).len()).toEqual(0);
 }
 
 // ─── GP-3: coordinates whose products overflow ─────────────────────

@@ -34,7 +34,9 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
+import atexit
 
 WIDGETS = {
     "Text": [], "Button": [], "Checkbox": [], "TextInput": [], "Slider": [], "Bitmap": [], "Spacer": [],
@@ -184,8 +186,15 @@ def free(e, dyn):
 
 # ─── The reduced program ────────────────────────────────────────────────────
 
+def scratch():
+    """A temporary directory, removed when the tool exits."""
+    d = tempfile.mkdtemp(prefix="resid-lens-")
+    atexit.register(shutil.rmtree, d, True)
+    return d
+
+
 def reduced(program, residc):
-    out = tempfile.mkdtemp()
+    out = scratch()
     dump = os.path.join(out, "reduced.txt")
     r = subprocess.run([residc, program, "-o", os.path.join(out, "prog"), "--dump-reduced", dump], capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(dump):
@@ -342,7 +351,7 @@ def main():
         print(f"  then: {lost}")
     if a.text_only:
         return 0
-    work = tempfile.mkdtemp()
+    work = scratch()
     shell = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rsp_shell.py")
     steps = sum([["--step", s] for s in a.step + ["shot:frame", "tree:tree", "close"]], [])
     r = subprocess.run([sys.executable, "-I", shell, binary, "--scale", str(a.scale), "--out", work] + steps)

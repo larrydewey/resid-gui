@@ -20,5 +20,13 @@ for m in ${MODULES:-font image}; do
         echo "$bad" >&2
         exit 1
     fi
+    # Nor any assembly: inline `asm` in a call, or `module asm` at the top,
+    # would run instructions the check above never sees.
+    asm=$(grep -nE '^module asm|[[:space:]]asm[[:space:]]+(sideeffect[[:space:]]+|alignstack[[:space:]]+|inteldialect[[:space:]]+|unwind[[:space:]]+)*"' "$m/$m.ll" || true)
+    if [ -n "$asm" ]; then
+        echo "$m: the artifact holds assembly:" >&2
+        echo "$asm" >&2
+        exit 1
+    fi
     echo "$m/$m.ll $(sha256sum "$m/$m.ll" | cut -d' ' -f1)"
 done

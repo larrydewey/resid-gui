@@ -43,12 +43,15 @@ pub type UiState = {
                     // it runs from here to the caret
     Bool shift;     // a Shift key is held
     Bool ctrl;      // a Ctrl key is held
+    List(Int) pwkeys; // keys that went down while a PasswordInput had
+                    // focus and have not come up: their release is
+                    // withheld wherever focus is then (R5-6); at most 16
 };
 
 /// Nothing focused, nothing pressed, caret visible.
 pub UiState ui_new() {
     return UiState { .focus = -1, .fmsg = Clicked, .fecho = false, .fpw = false, .ford = 0, .pressed = -1, .pmsg = Clicked, .plabel = "", .prect = rect_none(), .pprint = 0,
-                     .caret_on = true, .anchor = -1, .shift = false, .ctrl = false };
+                     .caret_on = true, .anchor = -1, .shift = false, .ctrl = false, .pwkeys = [] };
 }
 
 /// A new focus drops the selection; the focused input's message is kept.
@@ -63,28 +66,32 @@ pub UiState ui_with_focus_msg(UiState u, Int f, Msg m, Bool echo) { return ui_wi
 /// it.
 pub UiState ui_with_focus_input(UiState u, Int f, Msg m, Bool echo, Bool pw, Int ord) {
     return UiState { .focus = f, .fmsg = m, .fecho = echo, .fpw = pw, .ford = ord, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = true,
-                     .anchor = if (f == u.focus) { u.anchor } else { -1 }, .shift = u.shift, .ctrl = u.ctrl };
+                     .anchor = if (f == u.focus) { u.anchor } else { -1 }, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = u.pwkeys };
 }
 /// The focused input renumbered to `f` (the view moved it): the same
 /// input, so the selection and caret phase stay.
 pub UiState ui_with_focus_moved(UiState u, Int f) {
     return UiState { .focus = f, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on,
-                     .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl };
+                     .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = u.pwkeys };
 }
 pub UiState ui_with_pressed(UiState u, Int p) { return ui_with_press(u, p, u.pmsg, u.plabel, u.prect, u.pprint); }
 /// Widget `p`, whose message is `m`, label `l` and box `r`, pressed, the
 /// widgets up to it fingerprinted `fp`.
 pub UiState ui_with_press(UiState u, Int p, Msg m, Str l, Rect r, Int fp) {
-    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = p, .pmsg = m, .plabel = l, .prect = r, .pprint = fp, .caret_on = u.caret_on, .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl };
+    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = p, .pmsg = m, .plabel = l, .prect = r, .pprint = fp, .caret_on = u.caret_on, .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = u.pwkeys };
 }
 pub UiState ui_with_caret(UiState u, Bool on) {
-    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = on, .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl };
+    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = on, .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = u.pwkeys };
 }
 pub UiState ui_with_anchor(UiState u, Int a) {
-    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on, .anchor = a, .shift = u.shift, .ctrl = u.ctrl };
+    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on, .anchor = a, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = u.pwkeys };
 }
 pub UiState ui_with_mods(UiState u, Bool shift, Bool ctrl) {
-    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on, .anchor = u.anchor, .shift = shift, .ctrl = ctrl };
+    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on, .anchor = u.anchor, .shift = shift, .ctrl = ctrl, .pwkeys = u.pwkeys };
+}
+/// `u` with the held password keys `ks`.
+pub UiState ui_with_pwkeys(UiState u, List(Int) ks) {
+    return UiState { .focus = u.focus, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on, .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = ks };
 }
 
 test "state updates one field at a time" {

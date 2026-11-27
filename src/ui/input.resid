@@ -139,7 +139,8 @@ pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) { return ui_eve
 /// A key that types into a focused `PasswordInput`, and any key's
 /// release there but Shift's and Ctrl's, is not passed on raw: its code
 /// and text are the password (the edit itself arrives as
-/// `PasswordEdited`).
+/// `PasswordEdited`). A key that went down there has its release withheld
+/// even if focus has moved by then.
 @requires(declassify)
 pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
     UiStep s = match (e) {
@@ -152,12 +153,39 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
         Assist(node, act) => assist(ui, root, area, node, act, f),
         _ => none(ui)
     };
+    Bool pw = match (e) { KeyDown(code, text) => password_focused(ui, root, area, f), KeyUp(code) => password_focused(ui, root, area, f), _ => false };
     Bool withheld = match (e) {
-        KeyDown(code, text) => str_len(text) > 0 && password_focused(ui, root, area, f),
-        KeyUp(code) => !is_shift(code) && !is_ctrl(code) && password_focused(ui, root, area, f),
+        KeyDown(code, text) => str_len(text) > 0 && pw,
+        KeyUp(code) => index_of_int(ui.pwkeys, code, 0) >= 0 || (!is_shift(code) && !is_ctrl(code) && pw),
         _ => false
     };
-    return UiStep { .ui = s.ui, .out = if (withheld) { s.out } else { [e].concat(s.out) } };
+    // a key that went down in a password is remembered until it comes up,
+    // so its release is withheld even once focus has moved (R5-6)
+    List(Int) held = match (e) {
+        KeyDown(code, text) => if (pw && !is_shift(code) && !is_ctrl(code)) { held_add(s.ui.pwkeys, code) } else { s.ui.pwkeys },
+        KeyUp(code) => without_int(s.ui.pwkeys, code, 0, ListBuf()),
+        _ => s.ui.pwkeys
+    };
+    return UiStep { .ui = ui_with_pwkeys(s.ui, held), .out = if (withheld) { s.out } else { [e].concat(s.out) } };
+}
+
+/// Where `x` is in `xs` from `i`, or -1.
+Int index_of_int(List(Int) xs, Int x, Int i) {
+    if (i >= xs.len()) { return -1; }
+    return if (xs[i] == x) { i } else { index_of_int(xs, x, i + 1) };
+}
+
+/// `xs` without `x`.
+List(Int) without_int(List(Int) xs, Int x, Int i, ListBuf(Int) acc) {
+    if (i >= xs.len()) { return acc.finish(); }
+    return without_int(xs, x, i + 1, if (xs[i] == x) { acc } else { acc.push(xs[i]) });
+}
+
+/// The held password keys with `code` added: once each, the 16 most
+/// recent (a release that never came does not grow it).
+List(Int) held_add(List(Int) ks, Int code) {
+    List(Int) all = without_int(ks, code, 0, ListBuf()).concat([code]);
+    return if (all.len() > 16) { all[all.len() - 16..all.len()] } else { all };
 }
 
 /// Whether the input with focus (followed through a renumbering, as keys
@@ -1029,4 +1057,35 @@ test "inputs whose messages echo their text keep their own focus (R5-5)" {
     UiStep k2 = ui_event(k1.ui, Column([TextInput("namex", 5, Changed("name"))]), r, KeyDown(30, "y"));
     expect(edited(k2, Changed("name"), 0)).toEqual(true);
     expect(k2.ui.focus).toEqual(1);
+}
+
+/// Whether the step passed a raw `KeyUp` of `code` on.
+Bool raw_up(UiStep s, Int code, Int i) {
+    if (i >= s.out.len()) { return false; }
+    Bool hit = match (s.out[i]) { KeyUp(c) => c == code, _ => false };
+    return hit || raw_up(s, code, i + 1);
+}
+
+@requires(declassify)
+test "a password key's release is withheld after focus has left it (R5-6)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted), TextInput("", 0, Custom(2))]);
+    UiState on = ui_event(ui_new(), login, r, Assist(2, act_focus())).ui;
+    UiStep down = ui_event(on, login, r, KeyDown(30, "x"));
+    expect(raw_key(down, 0)).toEqual(false);
+    // the key's edit moves focus away before it is released: a page with
+    // no password on it
+    Widget next = Column([Text("Signing in")]);
+    UiStep up = ui_event(down.ui, next, r, KeyUp(30));
+    expect(raw_up(up, 30, 0)).toEqual(false);
+    // withheld once: the next release of that key, typed elsewhere, is passed on
+    expect(raw_up(ui_event(up.ui, next, r, KeyUp(30)), 30, 0)).toEqual(true);
+    // Tab moves focus to the text input while the password's key is held
+    UiStep held = ui_event(on, login, r, KeyDown(31, "y"));
+    UiStep tab = ui_event(held.ui, login, r, KeyDown(key_tab(), ""));
+    expect(tab.ui.focus).toEqual(3);
+    expect(raw_up(ui_event(tab.ui, login, r, KeyUp(31)), 31, 0)).toEqual(false);
+    // a key pressed in a text input is released as usual
+    UiStep t = ui_event(tab.ui, login, r, KeyDown(32, "z"));
+    expect(raw_up(ui_event(t.ui, login, r, KeyUp(32)), 32, 0)).toEqual(true);
 }

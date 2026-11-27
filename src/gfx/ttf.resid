@@ -584,7 +584,11 @@ pub Int max_glyph_cost() { return 20000000; }
 
 /// What filling all of a font's printable characters may cost: some
 /// 0.4 s. All of DejaVu Sans at 256 pixels costs 8.2 million, about 1/25
-/// of it; at 48 pixels, 1.6 million.
+/// of it; at 48 pixels, 1.6 million. The budget is per atlas: `read_ttf`
+/// (fontfile.resid) makes two, at scales 1 and 2, so a hostile font can
+/// cost a program up to twice it, 4e8 units (about 0.7 s) before
+/// both are refused or made. That is bounded, and paid once, when the
+/// font is loaded.
 pub Int max_font_cost() { return 200000000; }
 
 /// What filling `segs` into `h` pixel rows costs: every line is tested

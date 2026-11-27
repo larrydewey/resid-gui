@@ -23,7 +23,9 @@ pub List(Font) load_ttf(Str path, Int size) {
 /// The largest font file read: 16 MB, what the native module takes.
 pub Int max_font_file() { return 16777216; }
 
-/// `load_ttf`, with the reason when the font cannot be used.
+/// `load_ttf`, with the reason when the font cannot be used. Each of the
+/// two atlases has its own fill budget (`max_font_cost` in ttf.resid), so
+/// a hostile font costs at most twice it, about 0.7 s, here.
 @requires(filesystem(readonly))
 pub Result(List(Font), Str) read_ttf(Str path, Int size) {
     if (filesystem.size(path) > max_font_file()) { return Err("larger than 16 MB"); }

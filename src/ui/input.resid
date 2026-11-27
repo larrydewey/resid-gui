@@ -314,12 +314,15 @@ Found pressed_in(UiState ui, Widget root, Rect area, Font fo) {
     return if (same) { f } else { not_found() };
 }
 
-/// A fingerprint of the widgets numbered 0 to `upto`, in pre-order: each
-/// one's kind, its text or label, its message and its shape (how many
-/// children, padding, alignment), but not what using it changes (a
+/// A fingerprint of the widgets numbered 0 to `upto`, in pre-order: their
+/// structure only, each one's kind, its message and its shape (how many
+/// children, padding, alignment). Not what using a widget changes (a
 /// slider's value, a checkbox's mark, an input's text or caret, a scroll
-/// offset), so a drag does not cancel itself. Removing or replacing a
-/// widget before the pressed one changes it.
+/// offset), so a drag does not cancel itself, and not any text or label (a
+/// clock or a count ticking above a button must not cancel its press,
+/// R5-3); only the widget numbered `upto` adds its label.
+/// Removing, adding or replacing a widget before the pressed one changes
+/// it; a row whose text alone changed does not.
 pub Int press_print(Widget root, Int upto) { return fp_node(root, 0, upto, Fp { .h = 17, .id = 0 }).h; }
 
 /// A fingerprint so far, and the number of the next widget.
@@ -344,9 +347,9 @@ Int fp_msg(Int h, Msg m, Bool text) {
 
 Int fp_one(Int h, Widget w) {
     return match (w) {
-        Text(s) => fp_str(fp_mix(h, 101), s, 0),
-        Button(s, m) => fp_msg(fp_str(fp_mix(h, 102), s, 0), m, true),
-        Checkbox(s, c, m) => fp_msg(fp_str(fp_mix(h, 103), s, 0), m, true),
+        Text(s) => fp_mix(h, 101),
+        Button(s, m) => fp_msg(fp_mix(h, 102), m, true),
+        Checkbox(s, c, m) => fp_msg(fp_mix(h, 103), m, true),
         TextInput(s, k, m) => fp_msg(fp_mix(h, 104), m, false),
         Row(xs) => fp_mix(fp_mix(h, 105), xs.len()),
         Column(xs) => fp_mix(fp_mix(h, 106), xs.len()),
@@ -365,7 +368,9 @@ Int fp_one(Int h, Widget w) {
 
 Fp fp_node(Widget w, Int id, Int upto, Fp acc) {
     if (id > upto) { return acc; }
-    return fp_kids(children(w), 0, upto, Fp { .h = fp_one(acc.h, w), .id = id + 1 });
+    // the widget printed for is known by its label too
+    Int h = if (id == upto) { fp_str(fp_one(acc.h, w), label_of(w), 0) } else { fp_one(acc.h, w) };
+    return fp_kids(children(w), 0, upto, Fp { .h = h, .id = id + 1 });
 }
 
 Fp fp_kids(List(Widget) xs, Int i, Int upto, Fp acc) {
@@ -920,4 +925,20 @@ test "inputs told apart by Changed tags keep their own focus (R4-6)" {
     // but a tag input is not taken for an echo of another's text
     Widget tag = Column([Text("new"), TextInput("q", 1, Changed("other")), TextInput("z", 1, Custom(9))]);
     expect(ui_event(one, tag, r, KeyDown(30, "x")).ui.focus).toEqual(-1);
+}
+
+@requires(declassify)
+test "a release still clicks when only text before the button changed (R5-3)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    // a clock or a counter above a button ticks between press and release
+    Widget before = Column([Text("12:00:01"), Checkbox("loud", false, Custom(2)), Button("Save", Custom(1))]);
+    Widget after = Column([Text("12:00:02"), Checkbox("quiet", true, Custom(2)), Button("Save", Custom(1))]);
+    Found b = find(before, r, 3);
+    UiStep down = ui_event(ui_new(), before, r, PointerDown(b.r.x + 2, b.r.y + 2, 1));
+    expect(down.ui.pressed).toEqual(3);
+    expect(raised(ui_event(down.ui, after, r, PointerUp(b.r.x + 2, b.r.y + 2, 1)), Custom(1), 0)).toEqual(true);
+    // a reader's action survives the same tick
+    expect(press_print(before, 3)).toEqual(press_print(after, 3));
+    // but not one whose own label changed
+    expect(press_print(before, 3) == press_print(Column([Text("x"), Checkbox("loud", false, Custom(2)), Button("Delete", Custom(1))]), 3)).toEqual(false);
 }

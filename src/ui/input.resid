@@ -168,6 +168,13 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
     List(Int) held = match (e) {
         KeyDown(code, text) => if (pw && (str_len(text) > 0 || !pw_key_allowed(code))) { held_add(s.ui.pwkeys, code) } else { s.ui.pwkeys },
         KeyUp(code) => without_int(s.ui.pwkeys, code, 0, ListBuf()),
+        // Losing the window forgets them (R6-6). A window server sends no
+        // release for a key let go while another window has the keyboard,
+        // so a key kept here could swallow the release of a later press
+        // of the same key typed anywhere. The trade-off: a release that
+        // does arrive after the window is lost (X11 can deliver one late)
+        // is passed on raw; it carries a key code and no text.
+        Blurred => [],
         _ => s.ui.pwkeys
     };
     return UiStep { .ui = ui_with_pwkeys(s.ui, held), .out = if (withheld) { s.out } else { [e].concat(s.out) } };
@@ -1130,4 +1137,15 @@ test "a password's key codes are withheld even when the text comes apart (R6-1)"
     expect(raw_up(ui_event(on, login, r, KeyUp(key_left())), key_left(), 0)).toEqual(true);
     // a key on the list that types text is still withheld
     expect(raw_key(ui_event(on, login, r, KeyDown(key_enter(), "\n")), 0)).toEqual(false);
+}
+
+@requires(declassify)
+test "losing the window forgets the password keys held (R6-6)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
+    UiState on = ui_event(ui_new(), login, r, Assist(2, act_focus())).ui;
+    UiStep down = ui_event(on, login, r, KeyDown(30, "x"));
+    expect(down.ui.pwkeys).toEqual([30]);
+    UiStep blur = ui_event(down.ui, login, r, Blurred);
+    expect(blur.ui.pwkeys.len()).toEqual(0);
 }

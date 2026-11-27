@@ -45,7 +45,8 @@ pub type UiState = {
     Bool ctrl;      // a Ctrl key is held
     List(Int) pwkeys; // keys that went down while a PasswordInput had
                     // focus and have not come up: their release is
-                    // withheld wherever focus is then (R5-6); at most 16
+                    // withheld wherever focus is then (R5-6); at most 16;
+                    // forgotten when the window loses focus (R6-6)
 };
 
 /// Nothing focused, nothing pressed, caret visible.

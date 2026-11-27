@@ -215,7 +215,10 @@ grant, at the point it chooses (checking a login). The library draws
 and announces one bullet per character, and never passes on the keys
 that typed it: while a password has focus, `update` sees only the keys
 that say nothing of it (Shift, Ctrl, Alt, Super, Tab, Enter, Escape, the
-arrows, Home, End, Backspace and Delete), and no key's text.
+arrows, Home, End, Backspace and Delete), and no key's text. A key that
+went down in the password has its release withheld wherever focus has
+moved, until the window loses focus: a release that arrives after that
+is passed on (with its key code, never text).
 
 ## Next steps
 

@@ -869,6 +869,17 @@ test "an off-screen field under a modal cannot be scrolled to (R4-1)" {
     expect(ui_event(ui_new(), w, r, Assist(5, act_focus())).ui.focus).toEqual(-1);
 }
 
+@requires(declassify)
+test "a field under an overlay that scrolls with it cannot be scrolled to (R5-2)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
+    // Scroll 0, Column 1, Padding 2, Spacer 3, Stack 4, TextInput 5, Button 6
+    Widget w = Scroll(0, Column([Padding(200, Spacer), Stack([TextInput("secret", 0, Custom(1)), Button("modal", Custom(2))])]));
+    UiStep s = ui_event(ui_new(), w, r, Assist(5, act_scroll()));
+    expect(s.out.len()).toEqual(1);
+    // the modal itself can be
+    expect(ui_event(ui_new(), w, r, Assist(6, act_scroll())).out.len()).toEqual(2);
+}
+
 /// A row per name, each with a Dismiss button keyed by its index.
 Widget dismiss_rows(List(Str) names, Int i, ListBuf(Widget) acc) {
     if (i >= names.len()) { return Column(acc.finish()); }

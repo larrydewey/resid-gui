@@ -145,15 +145,19 @@ SemNode mk(Int id, Int parent, Int role, Int flags, Rect r, Int actions, Str lab
 /// `port` is where an off-screen node would be read: the visible part of
 /// the nearest `Scroll` or `Rows` that shows, else the window. A node that
 /// shows is covered when its visible part's centre is; one that does not,
-/// when its port's is (R4-1): its own box lies outside every layer, and
-/// scrolling it into view would bring it under the one over its port.
+/// when its own box's centre is (a layer that scrolls with it, R5-2) or
+/// its port's is (R4-1: a layer fixed over its `Scroll`, which scrolling
+/// it into view would bring it under).
 ListBuf(SemNode) sem_node(ListBuf(SemNode) acc, Widget w, Rect r, UiState ui, Font f, Int id, Int parent, Rect clip, Rect port, List(Layer) over, Bool scrolled) {
     Rect v = rect_intersect(r, clip);
     Bool shown = !rect_is_empty(v);
     // an off-screen node is exported only near its port, as `Rows` lays
     // out only the rows in view (R4-3); the focused node always is
     Bool near = shown || ui.focus == id || near_port(r, port);
-    Bool own = role_of(w) != 0 && near && !covered(over, if (shown) { v } else { port }, f, 0);
+    // off screen, it is hidden by a layer over its own box (one that
+    // scrolls with it, R5-2) or over its port (R4-1)
+    Bool hidden = if (shown) { covered(over, v, f, 0) } else { covered(over, r, f, 0) || covered(over, port, f, 0) };
+    Bool own = role_of(w) != 0 && near && !hidden;
     ListBuf(SemNode) here = if (own) { acc.push(if (shown) { node_of(w, r, ui, id, parent) } else { offscreen(node_of(w, r, ui, id, parent), scrolled) }) } else { acc };
     Int up = if (own) { id } else { parent };
     Rect inner = if (shown) { v } else { port };
@@ -355,6 +359,16 @@ test "content under an overlay is not read, scrolled out of view or not (R4-1)" 
     Widget beside = Row([Scroll(0, Column([Padding(200, Spacer), TextInput("far", 0, Custom(1))])),
                          Stack([Spacer, Button("modal", Custom(2))])]);
     expect(str_contains(sem_speech(semantics(beside, r, ui_new())), "text field = far, off screen")).toEqual(true);
+}
+
+test "an overlay scrolled with its content still hides what it covers (R5-2)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 100 * str_len(rt "xx"), .h = 100 };
+    // Scroll 0, Column 1, Padding 2, Spacer 3, Stack 4, TextInput 5, Button 6:
+    // the modal lies over the field, both below the view
+    Widget w = Scroll(0, Column([Padding(200, Spacer), Stack([TextInput("secret", 0, Custom(1)), Button("modal", Custom(2))])]));
+    Str said = sem_speech(semantics(w, r, ui_new()));
+    expect(str_contains(said, "secret")).toEqual(false);
+    expect(str_contains(said, "button \"modal\", off screen")).toEqual(true);
 }
 
 test "a long scroll exports the nodes around its view, and the focused one (R4-3)" {

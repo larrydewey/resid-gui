@@ -733,3 +733,24 @@ test "a count before or beside an input does not move its path or its row's butt
     expect(node_tokens(alice)[3] == node_tokens(bob)[3]).toEqual(false);
     expect(node_tokens(alice)[4] == node_tokens(bob)[4]).toEqual(false);
 }
+
+/// Rooms with a name, a slider and a Remove button, keyed by index.
+Widget rooms(List(Str) names, Int i, ListBuf(Widget) acc) {
+    if (i >= names.len()) { return Column(acc.finish()); }
+    return rooms(names, i + 1, acc.push(Row([Text(names[i]), Slider(50, Custom(i)), Button("Remove", Custom(i))])));
+}
+
+test "rows named by digits keep their names as a button's context (R10-1)" {
+    // Column 0, Row 1, Text 2, Slider 3, Remove 4, Row 5, Text 6, Slider 7, Remove 8, ...
+    Widget a = rooms(["Room 101", "Room 102", "Room 103"], 0, ListBuf());
+    Widget b = rooms(["Room 102", "Room 103", "Room 104"], 0, ListBuf());
+    expect(node_tokens(a)[8] == node_tokens(b)[8]).toEqual(false);
+    A11y a1 = changed(reader_a11y(), exported(a)).a;
+    Str old = path_in(a1, 8);
+    Served stale = serve(changed(a1, exported(b)).a, reader_call(old, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    expect(stale.events.len()).toEqual(0);
+    // a count after the input is no name: the button keeps its path (R9-3)
+    Widget n78 = Column([Row([TextInput("ab", 2, Custom(1)), Text("78 left"), Button("Send", Custom(2))])]);
+    Widget n77 = Column([Row([TextInput("abc", 3, Custom(1)), Text("77 left"), Button("Send", Custom(2))])]);
+    expect(node_tokens(n78)[4]).toEqual(node_tokens(n77)[4]);
+}

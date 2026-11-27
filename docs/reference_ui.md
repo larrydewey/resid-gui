@@ -45,9 +45,14 @@ a payload (`Custom`, `Changed`), the text around it in the nearest
 `Row` holding it: for a slider or an input, the first Text before it
 (its name) without digits, as its value is often shown as a number
 before or after it; for a button or checkbox, every label and Text in
-the Row, without digits when the Row holds a slider or an input. Rows
-told apart only by digits ("Track 1", "Track 2") are not told apart
-there. **Keep each record of a list keyed by index in a `Row` of its
+the Row, and when the Row holds a slider or an input, its Texts
+without digits and its name whole (the first Text before the first
+slider or input, if it has a letter: "Room 101", not "2/80"). Sliders and inputs
+in rows told apart only by digits ("Track 1", "Track 2") are not told
+apart; their buttons are. A program that shows a slider's value inside
+the name ("Bob: 57%") with a button in the same row gives that button a
+new path as the slider moves (the reader is told; it is churn, not a
+misdirected action). **Keep each record of a list keyed by index in a `Row` of its
 own, with the text that names it**: a record laid out flat in a
 `Column` has no text around it, and a feed that drops one record and
 appends another can then put a different record's button under a

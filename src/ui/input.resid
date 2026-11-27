@@ -460,30 +460,93 @@ pub Int context_print(Widget root, Int n) {
 ///   "Bob: 57%" are one context and "Carol: 57%" another; Text after it is
 ///   left out (L8-1);
 /// - for a Button or Checkbox in a Row holding a Slider or an input, it is
-///   every label and Text with their digits left out (R9-3);
+///   every label and Text with their digits left out (R9-3), and the Row's
+///   first Text, its name, whole (`button_context`);
 /// - for one in any other Row, every label and Text, digits and all.
 ///
 /// The cost: rows told apart only by digits ("Track 1", "Track 2") have
-/// one context where a slider or an input is involved.
+/// one context for their sliders and inputs (their buttons do not).
 Int row_context(Widget row, Int rid, Widget w, Int n) {
-    if (shows_value(w)) { return first_before(row, rid, n, 31); }
-    return content_mode(row, holds_input(row), 19);
+    if (shows_value(w)) { return first_before(row, rid, n, 31, true); }
+    return button_context(row, rid);
 }
 
 /// The first Text in `w` (numbered `id`) numbered before `n`, its
 /// digits left out, from `h`; `h` if there is none.
-Int first_before(Widget w, Int id, Int n, Int h) {
+Int first_before(Widget w, Int id, Int n, Int h, Bool masked) {
     if (id >= n) { return h; }
     return match (w) {
-        Text(s) => fp_text(fp_mix(h, 201), s, 0, true),
-        _ => first_kids(children(w), 0, id + 1, n, h)
+        Text(s) => fp_text(fp_mix(h, 201), s, 0, masked),
+        _ => first_kids(children(w), 0, id + 1, n, h, masked)
     };
 }
 
-Int first_kids(List(Widget) xs, Int i, Int id, Int n, Int h) {
+Int first_kids(List(Widget) xs, Int i, Int id, Int n, Int h, Bool masked) {
     if (i >= xs.len() || id >= n) { return h; }
-    Int f = first_before(xs[i], id, n, h);
-    return if (f != h) { f } else { first_kids(xs, i + 1, id + node_count(xs[i]), n, h) };
+    Int f = first_before(xs[i], id, n, h, masked);
+    return if (f != h) { f } else { first_kids(xs, i + 1, id + node_count(xs[i]), n, h, masked) };
+}
+
+/// The context of a Button or Checkbox in `row`, numbered `rid`: every
+/// label and Text in it; when it holds a Slider or an input, the Texts
+/// without digits (a value echoed there, R9-3) and the row's name whole,
+/// digits and all ("Room 101", "Room 102"). The name is the first Text
+/// before the Row's first Slider or input, when it has a letter in it: a
+/// bare count there ("2/80") is a value, not a name, and a Text after the
+/// control ("78 left") is never the name.
+/// The cost: a program that echoes a slider's value inside the name
+/// ("Bob: 57%") and puts a button in that row gives the button a new
+/// token as the slider moves; the reader is told (a removal, an addition,
+/// focus re-announced), so a stale action still names nothing, but the
+/// button's path churns.
+Int button_context(Widget row, Int rid) {
+    if (!holds_input(row)) { return content_mode(row, false, 19); }
+    Str name = text_before(row, rid, first_input(row, rid));
+    return fp_mix(content_mode(row, true, 19), if (has_letter(name, 0)) { fp_str(37, name, 0) } else { 37 });
+}
+
+/// The number of the first Slider or input in `w` (numbered `id`), or
+/// the number after `w`.
+Int first_input(Widget w, Int id) {
+    if (shows_value(w)) { return id; }
+    return input_kids(children(w), 0, id + 1, id + node_count(w));
+}
+
+Int input_kids(List(Widget) xs, Int i, Int id, Int none) {
+    if (i >= xs.len()) { return none; }
+    Int f = first_input(xs[i], id);
+    return if (f < id + node_count(xs[i])) { f } else { input_kids(xs, i + 1, id + node_count(xs[i]), none) };
+}
+
+/// The text of the first Text in `w` (numbered `id`) numbered before
+/// `n`, or "".
+Str text_before(Widget w, Int id, Int n) {
+    if (id >= n) { return ""; }
+    return match (w) { Text(s) => s, _ => text_kids(children(w), 0, id + 1, n) };
+}
+
+Str text_kids(List(Widget) xs, Int i, Int id, Int n) {
+    if (i >= xs.len() || id >= n) { return ""; }
+    Bool has = has_text(xs[i], id, n);
+    return if (has) { text_before(xs[i], id, n) } else { text_kids(xs, i + 1, id + node_count(xs[i]), n) };
+}
+
+/// Whether `w` (numbered `id`) holds a Text numbered before `n`.
+Bool has_text(Widget w, Int id, Int n) {
+    if (id >= n) { return false; }
+    return match (w) { Text(s) => true, _ => has_text_kids(children(w), 0, id + 1, n) };
+}
+
+Bool has_text_kids(List(Widget) xs, Int i, Int id, Int n) {
+    return i < xs.len() && id < n && (has_text(xs[i], id, n) || has_text_kids(xs, i + 1, id + node_count(xs[i]), n));
+}
+
+/// Whether `s` has a letter: an ASCII letter, or any character past
+/// ASCII.
+Bool has_letter(Str s, Int i) {
+    if (i >= str_len(s)) { return false; }
+    Int c = str_char_at(s, i);
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c >= 128 || has_letter(s, i + 1);
 }
 
 /// `content_print`, with digits left out of Text when `masked`.
@@ -589,9 +652,9 @@ type Ctx = { Widget row; Int rid; Int all; };
 Tok tok_node(Widget w, Ctx c, Tok t) {
     Int h = fp_one(t.h, w);
     // as context_print gives it, for the widget numbered t.n
-    Int ctx = if (!keyed(w) || c.rid < 0) { 0 } else { if (shows_value(w)) { first_before(c.row, c.rid, t.n, 31) } else { c.all } };
+    Int ctx = if (!keyed(w) || c.rid < 0) { 0 } else { if (shows_value(w)) { first_before(c.row, c.rid, t.n, 31, true) } else { c.all } };
     Int mine = node_token(fp_mix(fp_str(h, label_of(w), 0), ctx));
-    Ctx inner = if (is_row(w)) { Ctx { .row = w, .rid = t.n, .all = content_mode(w, holds_input(w), 19) } } else { c };
+    Ctx inner = if (is_row(w)) { Ctx { .row = w, .rid = t.n, .all = button_context(w, t.n) } } else { c };
     return tok_kids(children(w), 0, inner, Tok { .h = h, .n = t.n + 1, .acc = t.acc.insert(t.n, mine) });
 }
 

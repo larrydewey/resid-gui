@@ -208,15 +208,40 @@ def _caps_list(text):
     return caps
 
 
+def _main_definitions(code):
+    """The matches of `Int main()` in `code` (comments and literals blanked)
+    that are definitions at the top level: brace depth 0 and a body `{`
+    next. A declaration inside a behavior (`Int main();`), or anything
+    nested in braces, is not the program's main (R5-7)."""
+    depth = [0] * (len(code) + 1)
+    d = 0
+    for i, ch in enumerate(code):
+        depth[i] = d
+        if ch == "{":
+            d += 1
+        elif ch == "}":
+            d = max(d - 1, 0)
+    depth[len(code)] = d
+    found = []
+    for m in _MAIN.finditer(code):
+        rest = code[m.end():].lstrip()
+        if depth[m.start()] == 0 and rest.startswith("{"):
+            found.append(m)
+    return found
+
+
 def requires_of_main(source):
     """The capabilities on `main`, as (family, mode) pairs, mode None for
     read-write. Raises ValueError when there is no `main`, or when what is
     written before it looks like attributes but does not parse: an empty
     list must mean no capabilities, never "could not read them"."""
     code = code_only(source)
-    m = _MAIN.search(code)
-    if not m:
-        raise ValueError("no `Int main()` found")
+    mains = _main_definitions(code)
+    if not mains:
+        raise ValueError("no `Int main() { ... }` definition found")
+    if len(mains) > 1:
+        raise ValueError(f"{len(mains)} `Int main()` definitions found; a program has one")
+    m = mains[0]
     attrs, start = _attributes_before(code, m.start())
     # whatever stands between the previous item and the attributes read
     prev = max(code.rfind(";", 0, start), code.rfind("}", 0, start), code.rfind("{", 0, start))
@@ -302,6 +327,20 @@ def self_test():
                       ("Int f() { return 1; }\nInt main() { return 0; }", [])):
         got = requires_of_main(src)
         assert got == want, (src, got)
+    # a main declared in a behavior is not the program's: only a top-level
+    # definition with a body counts, and there must be exactly one (R5-7)
+    decl = ("behavior Runner(R) {\n    @requires(display)\n    Int main();\n}\n"
+            "@requires(display, filesystem)\nInt main() { return 0; }\n")
+    assert requires_of_main(decl) == [("display", None), ("filesystem", None)], requires_of_main(decl)
+    nested = "Int f() { if (true) { Int main() { return 1; } } return 0; }\n@requires(device)\nInt main() { return 0; }\n"
+    assert requires_of_main(nested) == [("device", None)], requires_of_main(nested)
+    for bad in ("behavior Runner(R) {\n    @requires(display)\n    Int main();\n}\n",
+                "@requires(display)\nInt main() { return 0; }\n@requires(filesystem)\nInt main() { return 1; }\n"):
+        try:
+            got = requires_of_main(bad)
+        except ValueError:
+            continue
+        raise AssertionError(("accepted", bad, got))
     # attributes that do not parse are an error, never "no capabilities"
     for bad in ("@requires(display, network(x(y)))\nInt main() { return 0; }",
                 "@requires(display\nInt main() { return 0; }",

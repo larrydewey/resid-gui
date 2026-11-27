@@ -72,10 +72,11 @@ pub UiState ui_with_focus_input(UiState u, Int f, Msg m, Bool echo, Bool pw, Int
     return UiState { .focus = f, .fmsg = m, .fecho = echo, .fpw = pw, .ford = ord, .fcount = count, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = true,
                      .anchor = if (f == u.focus) { u.anchor } else { -1 }, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = u.pwkeys };
 }
-/// The focused input renumbered to `f` (the view moved it): the same
-/// input, so the selection and caret phase stay.
-pub UiState ui_with_focus_moved(UiState u, Int f) {
-    return UiState { .focus = f, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .fcount = u.fcount, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on,
+/// The focused input renumbered to `f` (the view moved it), with `count`
+/// inputs like it now: the same input, so the selection and caret phase
+/// stay.
+pub UiState ui_with_focus_moved(UiState u, Int f, Int count) {
+    return UiState { .focus = f, .fmsg = u.fmsg, .fecho = u.fecho, .fpw = u.fpw, .ford = u.ford, .fcount = count, .pressed = u.pressed, .pmsg = u.pmsg, .plabel = u.plabel, .prect = u.prect, .pprint = u.pprint, .caret_on = u.caret_on,
                      .anchor = u.anchor, .shift = u.shift, .ctrl = u.ctrl, .pwkeys = u.pwkeys };
 }
 pub UiState ui_with_pressed(UiState u, Int p) { return ui_with_press(u, p, u.pmsg, u.plabel, u.prect, u.pprint); }

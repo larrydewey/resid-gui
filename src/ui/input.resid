@@ -577,8 +577,11 @@ pub UiState ui_refocus(UiState ui, Widget root, Rect area, Font fo) {
     if (ui.focus < 0) { return ui; }
     Seek found = seek_like(root, ui, 0, Seek { .seen = 0, .at = -1 });
     Int at = if (found.seen > 1 && found.seen != ui.fcount) { -1 } else { found.at };
-    if (at == ui.focus) { return ui; }
-    return if (at < 0) { ui_with_focus(ui, -1) } else { ui_with_focus_moved(ui, at) };
+    if (at < 0) { return ui_with_focus(ui, -1); }
+    // followed: how many are alike is now this view's count, so the next
+    // change is judged against it (R7-3)
+    if (at == ui.focus && found.seen == ui.fcount) { return ui; }
+    return ui_with_focus_moved(ui, at, found.seen);
 }
 
 /// How many inputs like the focused one are numbered before `upto`.
@@ -1309,4 +1312,19 @@ test "a focused password passes no modifier on either (R7-5)" {
     expect(raw_up(ui_event(sh.ui, login, r, KeyUp(key_left_shift())), key_left_shift(), 0)).toEqual(false);
     // elsewhere they pass as before
     expect(raw_key(ui_event(ui_new(), login, r, KeyDown(key_left_shift(), "")), 0)).toEqual(true);
+}
+
+@requires(declassify)
+test "the count of inputs alike is kept current as focus follows (R7-3)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    Widget ab = Column([TextInput("a", 1, Submitted), TextInput("b", 1, Submitted)]);
+    UiState onA = ui_event(ui_new(), ab, r, Assist(1, act_focus())).ui;
+    // B goes: A is followed, and there is one input like it now
+    UiStep k1 = ui_event(onA, Column([TextInput("a", 1, Submitted)]), r, KeyDown(30, "x"));
+    expect(k1.ui.focus).toEqual(1);
+    expect(k1.ui.fcount).toEqual(1);
+    // X arrives above A: two alike again, but not the two focus knew
+    UiStep k2 = ui_event(k1.ui, Column([TextInput("x", 1, Submitted), TextInput("ax", 2, Submitted)]), r, KeyDown(31, "y"));
+    expect(k2.ui.focus).toEqual(-1);
+    expect(edited(k2, Submitted, 0)).toEqual(false);
 }

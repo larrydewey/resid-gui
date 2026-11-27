@@ -496,6 +496,12 @@ ListBuf(DMsg) signals_put(A11y old, A11y now, Walk w, List(Int) idx_now, Int i, 
     if (was < 0) {
         Int p = parent_of(now, n.id);
         DMsg m = event(s, path_in(now, p), "ChildrenChanged", "add", if (j < idx_now.len()) { idx_now[j] } else { 0 }, 0, ref(now, n.id));
+        // a focused node that comes (one whose path changed with its
+        // token, R6-3) is said to have focus, or the reader loses it (R7-2)
+        if ((n.flags & sem_focused()) != 0) {
+            DMsg f = event(s + 1, path_in(now, n.id), "StateChanged", "focused", 1, 0, DI32(0));
+            return signals_put(old, now, w, idx_now, i + 1, out.push(m).push(f), s + 2);
+        }
         return signals_put(old, now, w, idx_now, i + 1, out.push(m), s + 1);
     }
     List(DMsg) ms = node_changes(now, old.tree[was], n, s);

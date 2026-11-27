@@ -645,3 +645,41 @@ test "tokens tell apart texts a weak hash confused (R7-4)" {
     Served stale = serve(changed(a1, exported(aa)).a, reader_call(old, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
     expect(stale.events.len()).toEqual(0);
 }
+
+Bool says_focused(List(DMsg) ms, Int i) {
+    if (i >= ms.len()) { return false; }
+    return (ms[i].member == "StateChanged" && arg_str(ms[i].body, 0) == "focused" && arg_int(ms[i].body, 1) == 1) || says_focused(ms, i + 1);
+}
+
+List(SemNode) exported_focus(Widget v, Int focus) {
+    return with_tokens(semantics(v, Rect { .x = 0, .y = 0, .w = 200, .h = 200 }, ui_with_focus(ui_new(), focus)), node_tokens(v));
+}
+
+test "a focused input keeps reader focus while the text beside it changes (R7-2)" {
+    // Column 0, Row 1, TextInput 2, Text 3: a character count
+    Widget v2 = Column([Row([TextInput("ab", 2, Custom(1)), Text("2/80")])]);
+    Widget v3 = Column([Row([TextInput("abc", 3, Custom(1)), Text("3/80")])]);
+    A11y a1 = changed(reader_a11y(), exported_focus(v2, 2)).a;
+    Served s = changed(a1, exported_focus(v3, 2));
+    expect(path_in(s.a, 2)).toEqual(path_in(a1, 2));
+    // a focused node that does get a new path is said to be focused there
+    Widget u1 = Column([Row([TextInput("x", 1, Custom(1)), Button("Undo 1", Custom(2))])]);
+    Widget u2 = Column([Row([TextInput("x", 1, Custom(1)), Button("Undo 2", Custom(2))])]);
+    A11y b1 = changed(reader_a11y(), exported_focus(u1, 2)).a;
+    Served moved = changed(b1, exported_focus(u2, 2));
+    expect(path_in(moved.a, 2) == path_in(b1, 2)).toEqual(false);
+    expect(says_focused(moved.out, 0)).toEqual(true);
+    // the counter's and the gallery's buttons keep their paths as they are used
+    Widget c0 = Column([Text("count: 0"), Button("+1", Clicked)]);
+    Widget c1 = Column([Text("count: 1"), Button("+1", Clicked)]);
+    expect(path_in(changed(reader_a11y(), exported(c1)).a, 2)).toEqual(path_in(changed(reader_a11y(), exported(c0)).a, 2));
+    Widget g0 = Column([Row([Button("click", Clicked), Text("0 clicks"), Spacer, Checkbox("checked", false, Toggled)]),
+                        Row([Slider(30, Clicked), Text("30%")])]);
+    Widget g1 = Column([Row([Button("click", Clicked), Text("1 clicks"), Spacer, Checkbox("checked", true, Toggled)]),
+                        Row([Slider(57, Clicked), Text("57%")])]);
+    A11y ga = changed(reader_a11y(), exported(g0)).a;
+    A11y gb = changed(reader_a11y(), exported(g1)).a;
+    expect(path_in(gb, 2)).toEqual(path_in(ga, 2));
+    expect(path_in(gb, 5)).toEqual(path_in(ga, 5));
+    expect(path_in(gb, 7)).toEqual(path_in(ga, 7));
+}

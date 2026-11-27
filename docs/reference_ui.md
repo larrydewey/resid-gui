@@ -37,7 +37,17 @@ only along its container's axis. Children are 4 pixels apart; a line of
 controls is 24 pixels (28 for buttons and inputs).
 
 Widgets are numbered in pre-order (`node_count`); focus and presses name
-widgets by that number.
+widgets by that number. A number can name another widget once the view
+changes, so a press, a screen reader's object and a shell's action also
+carry a print of the widget (`press_print`, `node_tokens`): the
+structure before it, its label and, for a control whose message carries
+a payload (`Custom`, `Changed`), the labels and text of the nearest
+`Row` holding it (without Text when that Row holds a slider or an
+input). **Keep each record of a list keyed by index in a `Row` of its
+own, with the text that names it**: a record laid out flat in a
+`Column` has no text around it, and a feed that drops one record and
+appends another can then put a different record's button under a
+press or a reader's action.
 
 A `Rows(offset, row_h, rows)` stretches both ways and wants no size of its
 own. Row `i` is `row_rect(r, offset, row_h, i)`; `rows_in_view` names the

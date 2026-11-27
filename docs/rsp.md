@@ -104,7 +104,7 @@ the same batch that renumbered the view cannot redirect it.
 | 131 | `FrameDone` | | a good moment to present the next frame |
 | 132 | `Release` | `i` | buffer id: the shell no longer reads it |
 | 133 | `Pointer` | `iiiiiii` | kind (0 move, 1 down, 2 up, 3 leave), x, y (device px), button (1 primary, 2 middle, 3 secondary), pointer id, device (0 mouse, 1 touch, 2 pen), pressure (0–1000) |
-| 134 | `Scroll` | `iii` | dx, dy (device px; positive dy scrolls content up), phase (0 none, 1 begin, 2 update, 3 end, 4 momentum) |
+| 134 | `ScrollBy` | `iii` | dx, dy (device px; positive dy scrolls content up), phase (0 none, 1 begin, 2 update, 3 end, 4 momentum) |
 | 135 | `Key` | `iii` | evdev key code, down (1) or up (0), modifier bits (1 Shift, 2 Ctrl, 4 Alt, 8 Super) |
 | 136 | `TextCommit` | `s` | text an input method, layout or dead key produced |
 | 137 | `Preedit` | `si` | uncommitted composition text, cursor (code points) |

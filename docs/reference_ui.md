@@ -73,7 +73,8 @@ their children with `OpClipPush`/`OpClipPop`.
 ## Input
 
 ```resid
-type UiState = { Int focus; Int pressed; Bool caret_on; Int anchor; Bool shift; Bool ctrl; };
+// abbreviated: the whole record, with what each field is for, is in src/ui/state.resid
+type UiState = { Int focus; Int pressed; Bool caret_on; Int anchor; Bool shift; Bool ctrl; ... };
 type UiStep = { UiState ui; List(Event) out; };
 type Edited = { List(Event) out; Int anchor; };
 pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e)

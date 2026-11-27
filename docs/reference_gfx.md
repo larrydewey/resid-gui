@@ -20,8 +20,8 @@ servers read).
 ```resid
 pub type Color = { Int b; Int g; Int r; Int a; };
 pub type Rect = { Int x; Int y; Int w; Int h; };
-pub type Canvas = { Int w; Int h; List(Int) px; };
-pub type DrawOp = OpFill(Rect, Color) | OpText(Int, Int, Str, Color)
+pub type Canvas = { Int w; Int h; List(UInt(32)) px; };
+pub type DrawOp = OpFill(Rect, Color) | OpRound(Rect, Int, Color) | OpText(Int, Int, Str, Color)
                 | OpImage(Int, Int, Int, Int, List(Int)) | OpClipPush(Rect) | OpClipPop;
 pub type Image = { Int w; Int h; List(Int) px; };
 pub type Font = { Int scale; Int px; Int ascent; Int line; List(Int) glyphs; Map(Int, Int) kern;

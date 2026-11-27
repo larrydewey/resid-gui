@@ -117,11 +117,20 @@ behavior Backend(B) {
     Int be_scale(B b);
     Bool be_ready(B b);
     B be_present(B b, Frame fr, List(Rect) damage);
+    B be_semantics(B b, List(SemNode) nodes);
+    Int be_hints(B b);
+    Int be_fd(B b);
+    Bool be_pending(B b);
     Bool be_close(B b);
 }
 ```
 
 `Frame` (gfx/raster.resid) is `{ List(DrawOp) ops; Int scale; Font font; }`.
+`be_semantics` hands the semantics tree to a backend that serves a
+screen reader (RSP; X11 and Wayland ignore it, as AT-SPI is served by the
+loop), `be_hints` gives the platform's appearance hints, `be_fd` the
+descriptor to wait on with others (-1 for none), and `be_pending` says
+whole messages are already read and waiting.
 Sizes and pointer coordinates are device pixels here; the loop converts.
 `X11` (src/x11/x11.resid) and `Wl` (src/wayland/wayland.resid) are the two
 instances.
@@ -148,17 +157,22 @@ into it redraws the damage plus what it missed.
 ```resid
 pub type Mods = { Bool shift; Bool caps; Bool ctrl; Bool alt; Bool altgr; Bool num; };
 pub Mods mods_from_mask(Int held, Int locked)
-pub type Keymap = { List(Int) levels; };
+pub type Keymap = { List(Int) levels; List(Int) codes; };
 pub type Keys = { Mods mods; Keymap map; };
 pub Keymap keymap_us()
 pub Keymap keymap_of(List(Int) levels)
+pub Keymap keymap_with_codes(List(Int) levels, List(Int) functions)
+pub Int key_code_in(Keymap k, Int code)
 pub Str key_text_in(Keymap k, Int code, Mods m)
 pub Str key_text(Int code, Mods m)
 pub Int key_enter() ... key_delete()
 ```
 
 Evdev codes to text. A `Keymap` holds four code points per evdev code:
-plain, Shift, AltGr, and AltGr with Shift. Caps Lock capitalizes a key
+plain, Shift, AltGr, and AltGr with Shift; and per code the code the
+library acts on (`codes`, read with `key_code_in`): the function key its
+keysym names, so a key whose keysym is Escape is `key_esc()` wherever the
+layout puts it, else the code itself. Caps Lock capitalizes a key
 whose two levels are a letter's small and capital forms; a keypad key
 (nothing plain, a digit shifted) swaps them under Num Lock. Ctrl or Alt
 held types nothing. `key_text` is `key_text_in` under the US layout.

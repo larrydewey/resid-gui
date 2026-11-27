@@ -32,7 +32,8 @@ test "a file is read whole up to its limit, and nothing that is not a file (E1)"
     Str p = "/tmp/resid-gui-readfile-test.bin";
     _ = filesystem.write_bytes(p, [1, 2, 3, 4]);
     List(Int) got = read_file_limited(p, 16) else { [] };
-    expect(got).toEqual([1, 2, 3, 4]);
+    // toEqual on a list checks nothing yet (a Resid bug): compare the text
+    expect(f"{got}").toEqual("[1, 2, 3, 4]");
     expect(str_contains(read_error(read_file_limited(p, 3)), "larger")).toEqual(true);
     // a device that never ends, a directory, nothing
     expect(str_len(read_error(read_file_limited("/dev/zero", 16))) > 0).toEqual(true);

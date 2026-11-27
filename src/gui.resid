@@ -683,3 +683,35 @@ test "a focused input keeps reader focus while the text beside it changes (R7-2)
     expect(path_in(gb, 5)).toEqual(path_in(ga, 5));
     expect(path_in(gb, 7)).toEqual(path_in(ga, 7));
 }
+
+/// Rows with a name, an input and a Remove button, keyed by index.
+Widget people(List(Str) names, Int i, ListBuf(Widget) acc) {
+    if (i >= names.len()) { return Column(acc.finish()); }
+    return people(names, i + 1, acc.push(Row([Text(names[i]), TextInput("", 0, Custom(i)), Button("Remove", Custom(i))])));
+}
+
+/// A mixer: a name and a volume slider per row, keyed by index.
+Widget mixer(List(Str) names, Int i, ListBuf(Widget) acc) {
+    if (i >= names.len()) { return Column(acc.finish()); }
+    return mixer(names, i + 1, acc.push(Row([Text(names[i]), Slider(50, Custom(i)), Text("50%")])));
+}
+
+test "named rows holding an input or a slider keep their names as context (L8-1)" {
+    // Column 0, Row 1, Text 2, TextInput 3, Remove 4, Row 5, Text 6, TextInput 7, Remove 8, ...
+    Widget abc = people(["Alice", "Bob", "Carol"], 0, ListBuf());
+    Widget bcd = people(["Bob", "Carol", "Dave"], 0, ListBuf());
+    expect(node_tokens(abc)[8] == node_tokens(bcd)[8]).toEqual(false);
+    expect(node_tokens(abc)[7] == node_tokens(bcd)[7]).toEqual(false);
+    A11y a1 = changed(reader_a11y(), exported(abc)).a;
+    Str old = path_in(a1, 8);
+    Served stale = serve(changed(a1, exported(bcd)).a, reader_call(old, "org.a11y.atspi.Action", "DoAction", [DI32(0)]));
+    expect(stale.events.len()).toEqual(0);
+    // Column 0, Row 1, Text 2, Slider 3, Text 4, Row 5, Text 6, Slider 7, ...
+    Widget m1 = mixer(["Alice", "Bob", "Carol"], 0, ListBuf());
+    Widget m2 = mixer(["Bob", "Carol", "Dave"], 0, ListBuf());
+    expect(node_tokens(m1)[7] == node_tokens(m2)[7]).toEqual(false);
+    // the value echoed after the slider is not its context
+    Widget m3 = Column([Row([Text("Alice"), Slider(50, Custom(0)), Text("50%")]), Row([Text("Bob"), Slider(90, Custom(1)), Text("90%")]),
+                        Row([Text("Carol"), Slider(50, Custom(2)), Text("50%")])]);
+    expect(node_tokens(m3)[7]).toEqual(node_tokens(m1)[7]);
+}

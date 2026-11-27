@@ -391,27 +391,40 @@ pub Int shape_print(Widget root, Int upto) { return fp_node(root, 0, upto, Fp { 
 /// text of the nearest Row holding it (wrappers such as Padding and inner
 /// Columns are passed through), for a control whose message carries a
 /// payload (`Custom`, `Changed`), which can be an index. Rows of one shape
-/// whose buttons are keyed by index, Row([Text(name), Button("Delete",
+/// whose controls are keyed by index, Row([Text(name), Button("Delete",
 /// Custom(i))]), keep every widget's kind, message and number when a feed
 /// drops its first row and appends one; only the names say which row a
-/// button is in (R6-2, R6-3). Nothing else counts (R7-2):
+/// control is in (R6-2, R6-3). Nothing else counts (R7-2):
 ///
 /// - a Text, an image, a container, or a control whose message is
 ///   `Clicked`, `Toggled` or `Submitted` (the same in every row) has no
 ///   context, so a count beside a button changes nothing;
 /// - nor does text outside the nearest Row: a clock in a flat Column, or
 ///   a list's other rows;
-/// - in a Row holding a Slider or an input, Text is left out (it is
-///   usually the value echoed: "57%", "6/80"), and only buttons' and
-///   checkboxes' labels count.
+/// - for a Slider or an input, Text after it in its Row is left out (it
+///   is usually the value echoed: "57%", "6/80"); Text before it (a name)
+///   counts, and so does all of a Button's or Checkbox's Row, inputs or
+///   not (L8-1).
 ///
 /// So a program whose records are told apart by an index should keep each
-/// record in a Row of its own, with the text that names it: a record laid
-/// out flat in a Column has no context, and only its structure guards it.
+/// record in a Row of its own, with the text that names it first: a
+/// record laid out flat in a Column has no context, and only its
+/// structure guards it.
 pub Int context_print(Widget root, Int n) {
-    if (!keyed(widget_at(root, 0, n))) { return 0; }
-    Widget row = row_of(root, 0, n, Spacer);
-    return match (row) { Row(xs) => row_content(row), _ => 0 };
+    Widget w = widget_at(root, 0, n);
+    if (!keyed(w)) { return 0; }
+    Int rid = row_id_of(root, 0, n, -1);
+    if (rid < 0) { return 0; }
+    return row_context(widget_at(root, 0, rid), rid, w, n);
+}
+
+/// The text of `row`, numbered `rid`, around keyed control `w`, numbered
+/// `n` (`context_print`).
+Int row_context(Widget row, Int rid, Widget w, Int n) { return content_ids(row, rid, if (shows_value(w)) { n } else { -1 }, 19); }
+
+/// Whether `w` sets a value a program often shows beside it.
+Bool shows_value(Widget w) {
+    return match (w) { Slider(v, m) => true, TextInput(s, k, m) => true, PasswordInput(s, k, m) => true, _ => false };
 }
 
 /// Whether `w` is a control whose message carries a payload.
@@ -420,51 +433,43 @@ Bool keyed(Widget w) {
     return match (msg_of(w)) { Custom(x) => true, Changed(x) => true, _ => false };
 }
 
-/// What a Row says around its controls: `content_print`, without Text
-/// when the Row holds a Slider or an input.
-Int row_content(Widget row) { return content_at(row, if (holds_input(row)) { 23 } else { 19 }, !holds_input(row)); }
-
-Bool holds_input(Widget w) {
-    Bool here = match (w) { Slider(v, m) => true, TextInput(s, k, m) => true, PasswordInput(s, k, m) => true, _ => false };
-    return here || any_input(children(w), 0);
-}
-
-Bool any_input(List(Widget) xs, Int i) { return i < xs.len() && (holds_input(xs[i]) || any_input(xs, i + 1)); }
-
 /// Every Text's text and every Button's and Checkbox's label in `w`, in
 /// pre-order (not an input's text or a checkbox's mark, which using the
 /// widgets changes).
-pub Int content_print(Widget w) { return content_at(w, 19, true); }
+pub Int content_print(Widget w) { return content_ids(w, 0, -1, 19); }
 
-Int content_at(Widget w, Int h, Bool texts) {
+/// `content_print` from `h` of `w`, numbered `id`, leaving out the text
+/// of every Text numbered after `after` (none when it is -1).
+Int content_ids(Widget w, Int id, Int after, Int h) {
+    Bool text = after < 0 || id < after;
     Int own = match (w) {
-        Text(s) => if (texts) { fp_str(fp_mix(h, 201), s, 0) } else { fp_mix(h, 201) },
+        Text(s) => if (text) { fp_str(fp_mix(h, 201), s, 0) } else { fp_mix(h, 201) },
         Button(s, m) => fp_str(fp_mix(h, 202), s, 0),
         Checkbox(s, c, m) => fp_str(fp_mix(h, 203), s, 0),
         _ => fp_mix(h, 200)
     };
-    return content_kids(children(w), 0, own, texts);
+    return content_kids(children(w), 0, id + 1, after, own);
 }
 
-Int content_kids(List(Widget) xs, Int i, Int h, Bool texts) {
+Int content_kids(List(Widget) xs, Int i, Int id, Int after, Int h) {
     if (i >= xs.len()) { return h; }
-    return content_kids(xs, i + 1, content_at(xs[i], h, texts), texts);
+    return content_kids(xs, i + 1, id + node_count(xs[i]), after, content_ids(xs[i], id, after, h));
 }
 
 Bool is_row(Widget w) { return match (w) { Row(xs) => true, _ => false }; }
 
-/// The nearest Row holding widget `target` (`w` is numbered `id`), or
-/// `cand`, the nearest one above `w`.
-Widget row_of(Widget w, Int id, Int target, Widget cand) {
+/// The number of the nearest Row holding widget `target` (`w` is
+/// numbered `id`), or `cand`, the nearest one above `w` (-1: none).
+Int row_id_of(Widget w, Int id, Int target, Int cand) {
     if (target == id) { return cand; }
-    return row_kids(children(w), 0, id + 1, target, if (is_row(w)) { w } else { cand });
+    return row_id_kids(children(w), 0, id + 1, target, if (is_row(w)) { id } else { cand });
 }
 
-Widget row_kids(List(Widget) xs, Int i, Int id, Int target, Widget cand) {
+Int row_id_kids(List(Widget) xs, Int i, Int id, Int target, Int cand) {
     if (i >= xs.len()) { return cand; }
     Int n = node_count(xs[i]);
-    if (target < id + n) { return row_of(xs[i], id, target, cand); }
-    return row_kids(xs, i + 1, id + n, target, cand);
+    if (target < id + n) { return row_id_of(xs[i], id, target, cand); }
+    return row_id_kids(xs, i + 1, id + n, target, cand);
 }
 
 /// The widget numbered `target`, or a Spacer.
@@ -490,7 +495,7 @@ pub Int node_token(Int print) { return (print ^ (print >> 31)) & 2147483647; }
 /// now names another widget (a row removed above it, or a row of the same
 /// shape with other text) is refused (R6-3, R6-4).
 pub List(Int) node_tokens(Widget root) {
-    Tok t = tok_node(root, 0, Tok { .h = 17, .n = 0, .acc = {} });
+    Tok t = tok_node(root, Ctx { .row = Spacer, .rid = -1, .all = 0 }, Tok { .h = 17, .n = 0, .acc = {} });
     return tok_list(t.acc, 0, t.n, ListBuf());
 }
 
@@ -503,15 +508,21 @@ List(Int) tok_list(Map(Int, Int) m, Int i, Int n, ListBuf(Int) acc) {
     return tok_list(m, i + 1, n, acc.push(m.get(i) else { 0 }));
 }
 
-Tok tok_node(Widget w, Int ctx, Tok t) {
+/// The nearest Row above a widget, its number (-1: none) and all it says.
+type Ctx = { Widget row; Int rid; Int all; };
+
+Tok tok_node(Widget w, Ctx c, Tok t) {
     Int h = fp_one(t.h, w);
-    Int mine = node_token(fp_mix(fp_str(h, label_of(w), 0), if (keyed(w)) { ctx } else { 0 }));
-    return tok_kids(children(w), 0, if (is_row(w)) { row_content(w) } else { ctx }, Tok { .h = h, .n = t.n + 1, .acc = t.acc.insert(t.n, mine) });
+    // as context_print gives it, for the widget numbered t.n
+    Int ctx = if (!keyed(w) || c.rid < 0) { 0 } else { if (shows_value(w)) { content_ids(c.row, c.rid, t.n, 19) } else { c.all } };
+    Int mine = node_token(fp_mix(fp_str(h, label_of(w), 0), ctx));
+    Ctx inner = if (is_row(w)) { Ctx { .row = w, .rid = t.n, .all = content_ids(w, t.n, -1, 19) } } else { c };
+    return tok_kids(children(w), 0, inner, Tok { .h = h, .n = t.n + 1, .acc = t.acc.insert(t.n, mine) });
 }
 
-Tok tok_kids(List(Widget) xs, Int i, Int ctx, Tok t) {
+Tok tok_kids(List(Widget) xs, Int i, Ctx c, Tok t) {
     if (i >= xs.len()) { return t; }
-    return tok_kids(xs, i + 1, ctx, tok_node(xs[i], ctx, t));
+    return tok_kids(xs, i + 1, c, tok_node(xs[i], c, t));
 }
 
 /// `ns` with each node's token from `toks` (`node_tokens` of the view

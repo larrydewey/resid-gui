@@ -180,13 +180,13 @@ pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
     return UiStep { .ui = ui_with_pwkeys(s.ui, held), .out = if (withheld) { s.out } else { [e].concat(s.out) } };
 }
 
-/// The keys a focused password passes on raw: modifiers (Shift, Ctrl,
-/// Alt, Super), Tab, Enter, Escape, the arrows, Home, End, Backspace and
-/// Delete. Every other key's code is withheld, down and up, as it could
-/// say what was typed.
+/// The keys a focused password passes on raw: Tab, Enter, Escape, the
+/// arrows, Home, End, Backspace and Delete. Every other key's code is
+/// withheld, down and up, as it could say what was typed; modifiers too
+/// (R7-5), as Shift or AltGr held says which characters were shifted. The
+/// library follows Shift and Ctrl itself, withheld or not.
 pub Bool pw_key_allowed(Int code) {
-    return is_shift(code) || is_ctrl(code) || code == key_left_alt() || code == 100 || code == 125 || code == 126
-        || code == key_tab() || code == key_enter() || code == key_kp_enter() || code == key_esc()
+    return code == key_tab() || code == key_enter() || code == key_kp_enter() || code == key_esc()
         || code == key_left() || code == key_right() || code == key_up() || code == 108   // key_down(): the name is this file's handler
         || code == key_home() || code == key_end() || code == key_backspace() || code == key_delete();
 }
@@ -1226,8 +1226,8 @@ test "a password's key codes are withheld even when the text comes apart (R6-1)"
     expect(raw_key(text, 0)).toEqual(false);
     expect(pw_edited(text, 0)).toEqual(true);
     expect(raw_up(ui_event(text.ui, login, r, KeyUp(30)), 30, 0)).toEqual(false);
-    // the keys on the allow-list pass: Shift, arrows, Backspace, Tab
-    expect(raw_key(ui_event(on, login, r, KeyDown(key_left_shift(), "")), 0)).toEqual(true);
+    // the keys on the allow-list pass: arrows, Backspace, Tab (not Shift,
+    // R7-5)
     expect(raw_key(ui_event(on, login, r, KeyDown(key_left(), "")), 0)).toEqual(true);
     expect(raw_key(ui_event(on, login, r, KeyDown(key_backspace(), "")), 0)).toEqual(true);
     expect(raw_up(ui_event(on, login, r, KeyUp(key_left())), key_left(), 0)).toEqual(true);
@@ -1293,4 +1293,20 @@ test "a release raises nothing when a row of the same shape replaced it (R6-2)" 
     UiStep sd = ui_event(ui_new(), t1, r, PointerDown(s.r.x + 2, s.r.y + 2, 1));
     expect(sd.ui.pressed).toEqual(4);
     expect(raised(ui_event(sd.ui, t2, r, PointerUp(s.r.x + 2, s.r.y + 2, 1)), Custom(9), 0)).toEqual(true);
+}
+
+@requires(declassify)
+test "a focused password passes no modifier on either (R7-5)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
+    Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
+    UiState on = ui_event(ui_new(), login, r, Assist(2, act_focus())).ui;
+    // Shift and AltGr would say which characters were shifted
+    UiStep sh = ui_event(on, login, r, KeyDown(key_left_shift(), ""));
+    expect(raw_key(sh, 0)).toEqual(false);
+    expect(sh.ui.shift).toEqual(true);
+    expect(raw_key(ui_event(on, login, r, KeyDown(100, "")), 0)).toEqual(false);
+    expect(raw_key(ui_event(on, login, r, KeyDown(key_left_ctrl(), "")), 0)).toEqual(false);
+    expect(raw_up(ui_event(sh.ui, login, r, KeyUp(key_left_shift())), key_left_shift(), 0)).toEqual(false);
+    // elsewhere they pass as before
+    expect(raw_key(ui_event(ui_new(), login, r, KeyDown(key_left_shift(), "")), 0)).toEqual(true);
 }

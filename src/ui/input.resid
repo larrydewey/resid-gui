@@ -357,16 +357,16 @@ Str label_of(Widget w) {
 /// by index (Custom(i)) renumber when one is removed, and the next row's
 /// button arrives under the pointer with the message the pressed one had,
 /// and with its label and box too when every row has the same button
-/// (R4-5). A release (`ctx`) also needs its box and the text around it
-/// unchanged (`context_print`, R6-2); a drag needs neither, as the value
-/// it sets is often shown beside it (a slider's percentage, an input's
-/// character count, which can widen and move the input's box), and the
-/// drag must not stop at its first step (R7-1). The structure up to it
-/// and its own label still say it is the widget pressed.
+/// (R4-5), and the text around it (`context_print`, R6-2), which for a
+/// Slider or an input leaves out the value echoed after it, so a drag
+/// goes on as the value it sets changes (R7-1) but does not move onto
+/// another row's slider when a feed rotates its rows (L8-3). A release
+/// (`ctx`) also needs its box unchanged; a drag does not, as a count
+/// beside an input can widen and move its box.
 Found pressed_in(UiState ui, Widget root, Rect area, Font fo, Bool ctx) {
     Found f = find_in(root, area, ui.pressed, fo);
     Bool same = f.id >= 0 && msg_eq(msg_of(f.w), ui.pmsg) && label_of(f.w) == ui.plabel && (!ctx || rect_eq(f.r, ui.prect))
-                && shape_print(root, ui.pressed) == ui.pprint && (!ctx || context_print(root, ui.pressed) == ui.pctx);
+                && shape_print(root, ui.pressed) == ui.pprint && context_print(root, ui.pressed) == ui.pctx;
     return if (same) { f } else { not_found() };
 }
 
@@ -1435,4 +1435,20 @@ test "a clock in a flat Column does not cancel a press; a record's own Row does 
     // a counter beside a Clicked button is not its context either
     expect(press_print(Column([Row([Button("click", Clicked), Text("0 clicks")])]), 2))
         .toEqual(press_print(Column([Row([Button("click", Clicked), Text("1 clicks")])]), 2));
+}
+
+@requires(declassify)
+test "a drag does not move onto another row's slider (L8-3)" {
+    Rect r = Rect { .x = 0, .y = 0, .w = 300, .h = 200 };
+    // Column 0, Row 1, Text 2, Slider 3, Text 4, Row 5, Text 6, Slider 7, Text 8
+    Widget m1 = Column([Row([Text("Alice"), Slider(50, Custom(0)), Text("50%")]), Row([Text("Bob"), Slider(50, Custom(1)), Text("50%")])]);
+    Found s = find(m1, r, 7);
+    UiStep down = ui_event(ui_new(), m1, r, PointerDown(s.r.x + 4, s.r.y + 2, 1));
+    expect(down.ui.pressed).toEqual(7);
+    // the feed drops Alice and appends Carol: number 7 is Carol's slider, Custom(1)
+    Widget m2 = Column([Row([Text("Bob"), Slider(50, Custom(0)), Text("50%")]), Row([Text("Carol"), Slider(50, Custom(1)), Text("50%")])]);
+    expect(ui_event(down.ui, m2, r, PointerMoved(s.r.x + 40, s.r.y + 2)).out.len()).toEqual(1);
+    // its own value changing beside it does not stop the drag
+    Widget m3 = Column([Row([Text("Alice"), Slider(50, Custom(0)), Text("50%")]), Row([Text("Bob"), Slider(70, Custom(1)), Text("70%")])]);
+    expect(ui_event(down.ui, m3, r, PointerMoved(s.r.x + 40, s.r.y + 2)).out.len()).toEqual(2);
 }

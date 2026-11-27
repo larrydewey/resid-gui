@@ -41,8 +41,10 @@ pub type UiState = {
                     // row removed above it renumbers rows whose message,
                     // label and box can all repeat (input.resid's
                     // shape_print)
-    Int pctx;       // the text around it then (context_print): a release
-                    // must find it unchanged, a drag need not (R7-1)
+    Int pctx;       // the text around it then (context_print, which for a
+                    // slider or input leaves out the value echoed after
+                    // it): a release and a drag must find it unchanged
+                    // (R7-1, L8-3)
     Bool caret_on;  // the caret's blink phase
     Int anchor;     // where the focused input's selection starts, or -1;
                     // it runs from here to the caret

@@ -42,16 +42,17 @@ MAX_BYTES = 1024 * 1024
 MAX_WORDS = 16384
 MAX_BUFFERS = 8          # attached at once; the core uses two
 MAX_NODES = 65536        # semantics nodes kept
+VERSION = 2              # docs/rsp.md: SemPut carries a token, A11yAction returns it
 MAX_FDS = 16             # descriptors waiting for their Attach
 
 TO_SHELL = {1: ("Hello", "is"), 2: ("Window", "siiiii"), 3: ("Attach", "iiii"), 4: ("Present", "ia"),
             5: ("Detach", "i"), 6: ("Cursor", "i"), 7: ("TextInputState", "iiiiiisii"), 8: ("SemReset", ""),
-            9: ("SemPut", "iiiiiiiiiss"), 10: ("SemRemove", "i"), 11: ("SemCommit", ""), 12: ("ClipboardSet", "sb"),
+            9: ("SemPut", "iiiiiiiiissi"), 10: ("SemRemove", "i"), 11: ("SemCommit", ""), 12: ("ClipboardSet", "sb"),
             13: ("ClipboardGet", "s"), 14: ("MenuItem", "iiiss"), 15: ("MenuCommit", ""), 16: ("Dialog", "iiss"),
             17: ("Bye", "")}
 FROM_SHELL = {"Welcome": (129, "iis"), "Configure": (130, "iiiiiiii"), "FrameDone": (131, ""), "Release": (132, "i"),
               "Pointer": (133, "iiiiiii"), "ScrollBy": (134, "iii"), "Key": (135, "iii"), "TextCommit": (136, "s"),
-              "Preedit": (137, "si"), "Lifecycle": (138, "i"), "A11yAction": (139, "ii"),
+              "Preedit": (137, "si"), "Lifecycle": (138, "i"), "A11yAction": (139, "iii"),
               "ClipboardData": (140, "sb"), "DialogResult": (141, "ii"), "MenuActivated": (142, "i")}
 ROLES = ["group", "text", "button", "checkbox", "text field", "slider", "image", "scroll area", "list", "password field"]
 
@@ -175,9 +176,9 @@ class Shell:
     # ─── messages ───
     def handle(self, name, f):
         if name == "Hello":
-            if f[0] != 1:
+            if f[0] != VERSION:
                 raise ProtocolError(f"core speaks version {f[0]}")
-            self.send("Welcome", 1, 1, "python-reference")
+            self.send("Welcome", VERSION, 1, "python-reference")
         elif name == "Window":
             self.title = f[0]
             w, h = self.size or (f[1], f[2])
@@ -227,7 +228,7 @@ class Shell:
                     raise ProtocolError("too many semantics nodes")
                 self.fresh += 1
             self.pending[f[0]] = dict(id=f[0], parent=f[1], role=f[2], flags=f[3], x=f[4], y=f[5], w=f[6], h=f[7],
-                                      actions=f[8], label=f[9], value=f[10])
+                                      actions=f[8], label=f[9], value=f[10], token=f[11])
         elif name == "SemRemove":
             # Only a node in the tree can go: removing anything else is a
             # no-op at the commit, so it is not kept (the set stays within
@@ -308,7 +309,8 @@ class Shell:
                     self.send("Pointer", 1, x, y, 1, 0, 0, 0)
                     self.send("Pointer", 2, x, y, 1, 0, 0, 0)
                 else:
-                    self.send("A11yAction", n["id"], 2 if n["role"] in (4, 9) else 1)
+                    # the node's token, as the core sent it, says which widget is meant
+                    self.send("A11yAction", n["id"], 2 if n["role"] in (4, 9) else 1, n["token"])
             elif verb == "type":
                 self.send("TextCommit", arg)
             elif verb == "key":
@@ -389,19 +391,19 @@ def self_test():
     except OSError:
         pass
     # a label that is a terminal escape is spoken, not obeyed
-    sh.handle("SemPut", [1, -1, 2, 0, 0, 0, 10, 10, 1, "\x1b[2Jok\x9b", ""])
+    sh.handle("SemPut", [1, -1, 2, 0, 0, 0, 10, 10, 1, "\x1b[2Jok\x9b", "", 7])
     sh.handle("SemCommit", [])
     assert sh.speech() == ['button "\\x1b[2Jok\\x9b"'], sh.speech()
     # a full tree re-put is an update, not twice as many nodes (R3-8)
     sh.tree, sh.pending, sh.gone, sh.fresh = {}, {}, set(), 0
     for i in range(MAX_NODES):
-        sh.handle("SemPut", [i, -1, 0, 0, 0, 0, 1, 1, 0, "", ""])
+        sh.handle("SemPut", [i, -1, 0, 0, 0, 0, 1, 1, 0, "", "", 0])
     sh.handle("SemCommit", [])
     for i in range(MAX_NODES):
-        sh.handle("SemPut", [i, -1, 0, 0, 0, 0, 1, 1, 0, "x", ""])
+        sh.handle("SemPut", [i, -1, 0, 0, 0, 0, 1, 1, 0, "x", "", 0])
     sh.handle("SemCommit", [])
     assert len(sh.tree) == MAX_NODES and sh.tree[0]["label"] == "x"
-    refused("SemPut", [MAX_NODES, -1, 0, 0, 0, 0, 1, 1, 0, "", ""], "too many")
+    refused("SemPut", [MAX_NODES, -1, 0, 0, 0, 0, 1, 1, 0, "", "", 0], "too many")
     # removes of nodes that are not there are not kept (R3-8)
     for i in range(MAX_NODES, 4 * MAX_NODES):
         sh.handle("SemRemove", [i])

@@ -130,7 +130,7 @@ Sh committed(Int fd, Sh s) {
     if (s1.stage == 0) { return click_if_ready(fd, s1); }
     if (s1.stage == 1 && label == "count: 1") {
         SemNode b = find_role(t, role_button(), 0);
-        if (!out(fd, [A11yAction(b.id, act_activate())], 0)) { return fail(s1, "send"); }
+        if (!out(fd, [A11yAction(b.id, act_activate(), b.token)], 0)) { return fail(s1, "send"); }
         return sh(s1, 2, s1.title, s1.attaches, s1.presents, s1.commits, t, [], [], s1.bye, "");
     }
     if (s1.stage == 2 && label == "count: 2") {

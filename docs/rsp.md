@@ -1,4 +1,4 @@
-# The Resid Surface Protocol (RSP), version 1
+# The Resid Surface Protocol (RSP), version 2
 
 RSP is how a resid-gui program (the **core**) talks to a per-platform host
 program (the **shell**) on platforms where Resid cannot speak the window
@@ -67,7 +67,7 @@ what the agreed version does not have.
 | 6 | `Cursor` | `i` | shape: 0 default, 1 pointer, 2 text, 3 grab |
 | 7 | `TextInputState` | `iiiiiisii` | active (0/1), kind (0 plain, 1 password, 2 number, 3 email), caret x, y, w, h (logical px), surrounding text, selection start, selection end (code points) |
 | 8 | `SemReset` | | discard the pending semantics tree |
-| 9 | `SemPut` | `iiiiiiiiiss` | id, parent (-1 top), role, flags, x, y, w, h, actions, label, value |
+| 9 | `SemPut` | `iiiiiiiiissi` | id, parent (-1 top), role, flags, x, y, w, h, actions, label, value, token |
 | 10 | `SemRemove` | `i` | id |
 | 11 | `SemCommit` | | apply the puts and removes since the last commit, atomically |
 | 12 | `ClipboardSet` | `sb` | MIME type, bytes |
@@ -84,6 +84,17 @@ the tree, not shown; its only action is scroll, which brings it into
 view). Actions: 1 activate, 2 focus, 4 set value, 8 scroll.
 `src/ui/semantics.resid` defines them.
 
+A node's id is its widget's number in the view, and the same number can
+name another widget after the view changes (a row removed above it, or
+a row of the same shape with other text). So each node carries a
+**token** (31 bits: the structure before the widget, its label and the
+text of the row holding it), and a node whose token changes is put
+again. A shell sends `A11yAction` with the id and the token it last
+got for that id; the core drops an action whose token is not the one it
+last sent for that node, and checks the action again against the view
+when it reaches it in the order the events came, so a click earlier in
+the same batch that renumbered the view cannot redirect it.
+
 ## 4. Messages from the shell (opcodes 129–142)
 
 | Op | Name | Schema | Fields |
@@ -98,7 +109,7 @@ view). Actions: 1 activate, 2 focus, 4 set value, 8 scroll.
 | 136 | `TextCommit` | `s` | text an input method, layout or dead key produced |
 | 137 | `Preedit` | `si` | uncommitted composition text, cursor (code points) |
 | 138 | `Lifecycle` | `i` | 0 visible, 1 hidden, 2 suspended, 3 close requested |
-| 139 | `A11yAction` | `ii` | semantics node id, action bit |
+| 139 | `A11yAction` | `iii` | semantics node id, action bit, the node's token as last put |
 | 140 | `ClipboardData` | `sb` | MIME type, bytes (empty when the clipboard holds none of that type) |
 | 141 | `DialogResult` | `ii` | request id, status (0 ok, 1 cancelled). On ok for open or save, the chosen file's descriptor rides beside it: the app gets that file, never a path. |
 | 142 | `MenuActivated` | `i` | menu item id |
@@ -111,8 +122,8 @@ platform's.
 ## 5. Sequence
 
 ```
-core  → Hello(1, "dev.resid.todo")
-shell → Welcome(1, platform, name)
+core  → Hello(2, "dev.resid.todo")
+shell → Welcome(2, platform, name)
 core  → Window(title, w, h, resizable, min_w, min_h)
 shell → Configure(w, h, scale, insets…, theme)
 core  → Attach(0, w, h, stride) + fd     Attach(1, …) + fd
@@ -138,5 +149,9 @@ buffers before presenting again.
 ## 7. Versioning
 
 `Hello` and `Welcome` carry the version. A peer that cannot speak the
-other's version closes the connection. A later version adds opcodes and
-never changes an existing schema.
+other's version closes the connection. Peers speak one version exactly.
+
+- Version 2 added the token to `SemPut` and `A11yAction`: a version 1
+  action named a node by number alone and could land on another widget.
+  This is the one change to an existing schema. From version 2 on, a
+  later version only adds opcodes.

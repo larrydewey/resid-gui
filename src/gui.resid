@@ -221,8 +221,10 @@ Loop(M) run_loop(B b, Loop(M) st0) {
     // A reader's actions first, while the view is the one its tree was
     // made from; each keeps a print of the widget it named, and is
     // dropped if an earlier event has changed that widget or those
-    // numbered before it (R4-2, HP-6). Then the display's events.
-    List(Int) prints = assist_prints(ax.events, 0, st2.view, ListBuf());
+    // numbered before it (R4-2, HP-6). Then the display's events, whose
+    // Assists (a shell's reader) are printed and checked the same way
+    // (R6-4).
+    List(Int) prints = turn_prints(ax.events, p.events, st2.view);
     Loop(M) st3 = fold_events(ax.events.concat(p.events), prints, 0, with_a11y(st2, ax.a), be_scale(p.b), be_width(p.b), be_height(p.b));
     Loop(M) st4 = tick(st3, now_ms());
     return run_loop(p.b, st4);
@@ -297,6 +299,14 @@ pub Event to_logical(Event e, Int s) {
         _ => e
     };
 }
+
+/// The prints (`assist_prints`) of a turn's events, the reader's `ax`
+/// then the display's `p`, all against view `v`, the one the tree they
+/// were aimed at was made from: a shell's action (`A11yAction`, among the
+/// display's events) is checked as a bus's is, so a click earlier in the
+/// same pump that renumbers the view cannot send it to another widget
+/// (R6-4).
+pub List(Int) turn_prints(List(Event) ax, List(Event) p, Widget v) { return assist_prints(ax.concat(p), 0, v, ListBuf()); }
 
 /// For each event, the print (`press_print`) of the widget an `Assist`
 /// names in view `v`, or -1 for any other event.
@@ -548,10 +558,14 @@ test "a reader's path names nothing once a row of the same shape replaced it (R6
 
 /// The events a turn's pump turns `msgs` from a shell into.
 @requires(display)
-List(Event) shell_says(List(FromShell) msgs) {
+List(Event) shell_says(List(FromShell) msgs) { return shell_says_over([], msgs); }
+
+/// `shell_says` to a core that sent the shell tree `sem`.
+@requires(display)
+List(Event) shell_says_over(List(SemNode) sem, List(FromShell) msgs) {
     List(Int) pair = resid_disp_pair();
     Rsp r = rsp_failed("");
-    Rsp r0 = Rsp { .fd = pair[1], .alive = true, .err = "", .buf = [], .win = r.win, .bufs = r.bufs, .frame_ok = true, .sem = [], .sent = 0 };
+    Rsp r0 = Rsp { .fd = pair[1], .alive = true, .err = "", .buf = [], .win = r.win, .bufs = r.bufs, .frame_ok = true, .sem = sem, .sent = 0 };
     _ = resid_disp_send(pair[0], shell_bytes(msgs, 0, ListBuf()), -1);
     List(Event) es = be_pump(r0, 100).events;
     _ = resid_disp_close(pair[0]);
@@ -585,4 +599,39 @@ test "a password typed through a shell passes no key on (R6-1)" {
     List(Event) es = shell_says([Key(30, 1, 0), TextCommit("a"), Key(30, 0, 0)]);
     expect(es.len()).toEqual(3);
     expect(any_key(passed_on(on, login, es, 0, []), 0)).toEqual(false);
+}
+
+Widget dismiss_feed(List(Str) names, Int i, ListBuf(Widget) acc) {
+    if (i >= names.len()) { return Column(acc.finish()); }
+    return dismiss_feed(names, i + 1, acc.push(Row([Text(names[i]), Button("Dismiss", Custom(i))])));
+}
+
+test "a shell's action after a click in the same pump hits its widget or nothing (R6-4)" {
+    // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...
+    Widget abc = dismiss_feed(["A", "B", "C"], 0, ListBuf());
+    // one pump from a shell: a click that dismisses A, then the reader's
+    // action on B's Dismiss (number 6 in the tree it was given)
+    List(Event) es = [PointerDown(5, 5, 1), PointerUp(5, 5, 1), Assist(6, act_activate())];
+    List(Int) ps = turn_prints([], es, abc);
+    expect(ps.len()).toEqual(3);
+    // the click's update removed A: number 6 is C's Dismiss, Custom(1)
+    Widget bc = dismiss_feed(["B", "C"], 0, ListBuf());
+    expect(assist_current(es[2], ps[2], bc)).toEqual(false);
+    expect(assist_current(es[2], ps[2], abc)).toEqual(true);
+}
+
+@requires(display)
+test "a shell's action with a stale token is dropped (R6-4)" {
+    Widget abc = dismiss_feed(["A", "B", "C"], 0, ListBuf());
+    List(SemNode) sent = exported(abc);
+    Int t6 = node_tokens(abc)[6];
+    // the shell names node 6 with the token the core sent: an Assist
+    List(Event) ok = shell_says_over(sent, [A11yAction(6, act_activate(), t6)]);
+    Bool acts = ok.len() == 1 && match (ok[0]) { Assist(n, act) => n == 6, _ => false };
+    expect(acts).toEqual(true);
+    // after the core sent rows B, C, the old token names nothing
+    List(SemNode) now = exported(dismiss_feed(["B", "C"], 0, ListBuf()));
+    expect(shell_says_over(now, [A11yAction(6, act_activate(), t6)]).len()).toEqual(0);
+    // nor does a node the core never sent
+    expect(shell_says_over(now, [A11yAction(99, act_activate(), 0)]).len()).toEqual(0);
 }

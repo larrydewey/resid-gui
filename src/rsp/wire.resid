@@ -23,7 +23,9 @@ import "../gfx/color.resid";
 import "../ui/semantics.resid";
 
 /// The protocol version this codec speaks.
-pub Int rsp_version() { return 1; }
+/// Version 2: `SemPut` carries each node's token and `A11yAction` names
+/// a node by number and token (R6-4).
+pub Int rsp_version() { return 2; }
 
 /// Limits. A message is at most 4 MiB, a string 64 KiB, a byte field
 /// 1 MiB, a word array 16384 words.
@@ -49,7 +51,8 @@ pub type RspField = FInt(Int) | FStr(Str) | FBytes(List(Int)) | FWords(List(Int)
 /// - `TextInputState(active, kind, caret, surrounding, sel_start, sel_end)`:
 ///   the focused editable text, for the platform's input methods.
 /// - `SemReset`, `SemPut(node)`, `SemRemove(id)`, `SemCommit`: the
-///   semantics tree, applied atomically at commit.
+///   semantics tree, applied atomically at commit; a node carries its
+///   token, which a shell returns with an action on it.
 /// - `ClipboardSet(mime, bytes)`, `ClipboardGet(mime)`.
 /// - `MenuItem(id, parent, flags, label, shortcut)`, `MenuCommit`.
 /// - `Dialog(id, kind, title, filter)`: open/save/alert; see `dialog_*`.
@@ -86,7 +89,8 @@ pub type ToShell =
 /// - `Key(code, down, mods)`: evdev code, 1 down / 0 up, `mod_*` bits.
 /// - `TextCommit(text)`, `Preedit(text, cursor)`: from input methods.
 /// - `Lifecycle(state)`: `life_*`.
-/// - `A11yAction(node, action)`: a screen reader acting on a node.
+/// - `A11yAction(node, action, token)`: a screen reader acting on a node,
+///   with the token the core sent for it.
 /// - `ClipboardData(mime, bytes)`.
 /// - `DialogResult(id, status)`: a picked file's descriptor beside it.
 /// - `MenuActivated(id)`.
@@ -101,7 +105,7 @@ pub type FromShell =
     TextCommit(Str) |
     Preedit(Str, Int) |
     Lifecycle(Int) |
-    A11yAction(Int, Int) |
+    A11yAction(Int, Int, Int) |
     ClipboardData(Str, List(Int)) |
     DialogResult(Int, Int) |
     MenuActivated(Int);
@@ -178,7 +182,7 @@ pub Int from_shell_op(FromShell m) {
         Welcome(v, p, n) => 129, Configure(w, h, s, t, r, b, l, th) => 130, FrameDone => 131,
         Release(b) => 132, Pointer(k, x, y, b, i, d, p) => 133, ScrollBy(x, y, p) => 134,
         Key(c, d, m) => 135, TextCommit(t) => 136, Preedit(t, c) => 137,
-        Lifecycle(s) => 138, A11yAction(n, a) => 139, ClipboardData(m, b) => 140,
+        Lifecycle(s) => 138, A11yAction(n, a, t) => 139, ClipboardData(m, b) => 140,
         DialogResult(i, s) => 141, MenuActivated(i) => 142
     };
 }
@@ -186,9 +190,9 @@ pub Int from_shell_op(FromShell m) {
 /// The field kinds an opcode carries, one letter per field; "" for an
 /// opcode this version does not know.
 pub Str rsp_schema(Int op) {
-    List(Str) to = ["", "is", "siiiii", "iiii", "ia", "i", "i", "iiiiiisii", "-", "iiiiiiiiiss", "i", "-",
+    List(Str) to = ["", "is", "siiiii", "iiii", "ia", "i", "i", "iiiiiisii", "-", "iiiiiiiiissi", "i", "-",
                     "sb", "s", "iiiss", "-", "iiss", "-"];
-    List(Str) from = ["iis", "iiiiiiii", "-", "i", "iiiiiii", "iii", "iii", "s", "si", "i", "ii", "sb", "ii", "i"];
+    List(Str) from = ["iis", "iiiiiiii", "-", "i", "iiiiiii", "iii", "iii", "s", "si", "i", "iii", "sb", "ii", "i"];
     if (op >= 1 && op < to.len()) { return to[op]; }
     if (op >= 129 && op - 129 < from.len()) { return from[op - 129]; }
     return "";
@@ -271,7 +275,7 @@ pub List(RspField) to_shell_fields(ToShell m) {
         TextInputState(a, k, r, s, x, y) => [FInt(a), FInt(k), FInt(r.x), FInt(r.y), FInt(r.w), FInt(r.h), FStr(s), FInt(x), FInt(y)],
         SemReset => [],
         SemPut(n) => [FInt(n.id), FInt(n.parent), FInt(n.role), FInt(n.flags), FInt(n.bounds.x), FInt(n.bounds.y),
-                      FInt(n.bounds.w), FInt(n.bounds.h), FInt(n.actions), FStr(n.label), FStr(n.value)],
+                      FInt(n.bounds.w), FInt(n.bounds.h), FInt(n.actions), FStr(n.label), FStr(n.value), FInt(n.token)],
         SemRemove(i) => [FInt(i)],
         SemCommit => [],
         ClipboardSet(t, b) => [FStr(t), FBytes(b)],
@@ -296,7 +300,7 @@ pub List(RspField) from_shell_fields(FromShell m) {
         TextCommit(t) => [FStr(t)],
         Preedit(t, c) => [FStr(t), FInt(c)],
         Lifecycle(s) => [FInt(s)],
-        A11yAction(n, a) => [FInt(n), FInt(a)],
+        A11yAction(n, a, t) => [FInt(n), FInt(a), FInt(t)],
         ClipboardData(t, b) => [FStr(t), FBytes(b)],
         DialogResult(i, s) => [FInt(i), FInt(s)],
         MenuActivated(i) => [FInt(i)]
@@ -460,7 +464,7 @@ Result(FromShell, Str) from_shell_typed(Int op, List(RspField) f) {
     if (op == 136) { return Ok(TextCommit(fstr(f, 0))); }
     if (op == 137) { return Ok(Preedit(fstr(f, 0), fi(f, 1))); }
     if (op == 138) { return Ok(Lifecycle(fi(f, 0))); }
-    if (op == 139) { return Ok(A11yAction(fi(f, 0), fi(f, 1))); }
+    if (op == 139) { return Ok(A11yAction(fi(f, 0), fi(f, 1), fi(f, 2))); }
     if (op == 140) { return Ok(ClipboardData(fstr(f, 0), fb(f, 1))); }
     if (op == 141) { return Ok(DialogResult(fi(f, 0), fi(f, 1))); }
     return Ok(MenuActivated(fi(f, 0)));
@@ -481,7 +485,7 @@ Result(ToShell, Str) to_shell_typed(Int op, List(RspField) f) {
     if (op == 6) { return Ok(Cursor(fi(f, 0))); }
     if (op == 7) { return Ok(TextInputState(fi(f, 0), fi(f, 1), Rect { .x = fi(f, 2), .y = fi(f, 3), .w = fi(f, 4), .h = fi(f, 5) }, fstr(f, 6), fi(f, 7), fi(f, 8))); }
     if (op == 8) { return Ok(SemReset); }
-    if (op == 9) { return Ok(SemPut(SemNode { .id = fi(f, 0), .parent = fi(f, 1), .role = fi(f, 2), .flags = fi(f, 3), .bounds = Rect { .x = fi(f, 4), .y = fi(f, 5), .w = fi(f, 6), .h = fi(f, 7) }, .actions = fi(f, 8), .label = fstr(f, 9), .value = fstr(f, 10), .token = 0 })); }
+    if (op == 9) { return Ok(SemPut(SemNode { .id = fi(f, 0), .parent = fi(f, 1), .role = fi(f, 2), .flags = fi(f, 3), .bounds = Rect { .x = fi(f, 4), .y = fi(f, 5), .w = fi(f, 6), .h = fi(f, 7) }, .actions = fi(f, 8), .label = fstr(f, 9), .value = fstr(f, 10), .token = fi(f, 11) })); }
     if (op == 10) { return Ok(SemRemove(fi(f, 0))); }
     if (op == 11) { return Ok(SemCommit); }
     if (op == 12) { return Ok(ClipboardSet(fstr(f, 0), fb(f, 1))); }
@@ -522,7 +526,7 @@ test "a message carries its size and opcode" {
 
 test "every message to the shell survives a round trip" {
     SemNode n = SemNode { .id = 3, .parent = 1, .role = 2, .flags = 5, .bounds = Rect { .x = -4, .y = 5, .w = 60, .h = 20 },
-                          .actions = 1, .label = "Save", .value = "é€", .token = 0 };
+                          .actions = 1, .label = "Save", .value = "é€", .token = 2147483647 };
     List(ToShell) all = [
         Hello(1, "dev.resid.todo"), Window("Tâches", 640, 480, 1, 200, 100), Attach(1, 640, 480, 2560),
         Present(1, [Rect { .x = 0, .y = 0, .w = 10, .h = 10 }, Rect { .x = 5, .y = 6, .w = 7, .h = 8 }]),
@@ -546,7 +550,7 @@ test "every message from the shell survives a round trip" {
     List(FromShell) all = [
         Welcome(1, platform_linux(), "reference"), Configure(1280, 800, 2, 0, 0, 0, 0, theme_dark()), FrameDone, Release(1),
         Pointer(ptr_down(), 10, -20, 1, 0, dev_touch(), 500), ScrollBy(0, -120, phase_momentum()), Key(30, 1, mod_shift()),
-        TextCommit("日本"), Preedit("にほ", 2), Lifecycle(life_close_requested()), A11yAction(3, 1),
+        TextCommit("日本"), Preedit("にほ", 2), Lifecycle(life_close_requested()), A11yAction(3, 1, 12345),
         ClipboardData("text/plain", [1, 2, 3]), DialogResult(2, dialog_ok()), MenuActivated(10)
     ];
     expect(from_trips_to(all, 0)).toEqual(all.len());

@@ -262,10 +262,27 @@ RspStep dispatch(Rsp r, FromShell m) {
         Key(code, down, mods) => RspStep { .r = r, .events = [if (down != 0) { KeyDown(code, "") } else { KeyUp(code) }] },
         TextCommit(t) => RspStep { .r = r, .events = if (str_len(t) > 0) { [KeyDown(0, t)] } else { [] } },
         Lifecycle(state) => RspStep { .r = r, .events = lifecycle(state) },
-        A11yAction(node, act) => RspStep { .r = r, .events = [Assist(node, act)] },
+        A11yAction(node, act, tok) => RspStep { .r = r, .events = if (token_sent(r.sem, node, tok)) { [Assist(node, act)] } else { [] } },
         Welcome(v, p, n) => quiet(dead(r, "rsp: Welcome after the session started")),
         _ => quiet(r)
     };
+}
+
+/// Whether the tree last sent to the shell holds node `id` with token
+/// `tok`: a shell's action names a node by both, and one on a number the
+/// core has since given to another widget (a row removed above it, a row
+/// of the same shape with other text), or never sent, is dropped (R6-4).
+pub Bool token_sent(List(SemNode) sem, Int id, Int tok) {
+    Int k = sem_index(sem, id, 0, sem.len());
+    return k >= 0 && sem[k].token == tok;
+}
+
+/// Where node `id` is in `t` (in increasing id order, as sent), or -1.
+Int sem_index(List(SemNode) t, Int id, Int lo, Int hi) {
+    if (lo >= hi) { return -1; }
+    Int mid = lo + (hi - lo) / 2;
+    if (t[mid].id == id) { return mid; }
+    return if (t[mid].id < id) { sem_index(t, id, mid + 1, hi) } else { sem_index(t, id, lo, mid) };
 }
 
 RspStep resized(Rsp before, Rsp after) {

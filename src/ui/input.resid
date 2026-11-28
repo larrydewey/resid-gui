@@ -1223,9 +1223,7 @@ test "Tab skips inputs scrolled out of view or covered (R3-3)" {
     UiState next = ui_event(on1, w, big, KeyDown(key_tab(), "")).ui;
     expect(next.focus).toEqual(10);
     expect(ui_event(next, w, big, KeyDown(key_tab(), "")).ui.focus).toEqual(1);
-    // toEqual on a list checks nothing yet (a Resid bug): compare the text
-    List(Int) tabs = tab_inputs(w, big, ui_new(), font_builtin());
-    expect(f"{tabs}").toEqual("[1, 10]");
+    expect(tab_inputs(w, big, ui_new(), font_builtin())).toEqual([1, 10]);
 }
 
 test "an off-screen field under a modal cannot be scrolled to (R4-1)" {
@@ -1427,8 +1425,7 @@ test "losing the window forgets the password keys held (R6-6)" {
     Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
     UiState on = ui_event(ui_new(), login, r, Assist(2, act_focus())).ui;
     UiStep down = ui_event(on, login, r, KeyDown(30, "x"));
-    List(Int) held = down.ui.pwkeys;
-    expect(f"{held}").toEqual("[30]");
+    expect(down.ui.pwkeys).toEqual([30]);
     UiStep blur = ui_event(down.ui, login, r, Blurred);
     expect(blur.ui.pwkeys.len()).toEqual(0);
 }

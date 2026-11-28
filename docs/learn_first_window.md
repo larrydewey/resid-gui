@@ -51,7 +51,7 @@ Widget counter_view(Int m) {
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 Int main() {
     return gui_run(WindowOptions { .title = "Counter", .width = 240, .height = 90, .resizable = true });
 }
@@ -143,7 +143,7 @@ read (a file, the arguments) builds that model itself and passes it:
 
 ```resid
 @needs(App(M))
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
 ```
 
@@ -166,10 +166,11 @@ return gui_run_with(opts, fonts);
 ## Capabilities
 
 `gui_run` needs `display`, to reach the window server,
-`accessibility`, to serve screen readers, `clock(readonly)`, to time the
-caret and `FrameTick`, and `declassify`, because editing a
-`PasswordInput` splices each keystroke into its secret text (that one
-function is the only place the library reads a secret). Nothing else:
+`accessibility`, to serve screen readers, and `clock(readonly)`, to time
+the caret and `FrameTick`. It reads no secret: a `PasswordInput`'s
+keystrokes are spliced into its secret text with Resid's
+`secret_str_splice`, so a program grants `declassify` only where it
+reads the password itself (as the next section's does). Nothing else:
 there is no filesystem, network or environment access, and the program
 links no native code unless it imports a native module.
 

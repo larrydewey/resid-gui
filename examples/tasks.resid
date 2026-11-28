@@ -87,7 +87,7 @@ Widget todo_view(Todo t) {
 
 App(Todo) = { .init = todo_init, .update = todo_update, .view = todo_view };
 
-@requires(display, accessibility, clock(readonly), filesystem(readonly), declassify)
+@requires(display, accessibility, clock(readonly), filesystem(readonly))
 Int main() {
     List(Font) fonts = load_first(sans_paths(), 15);
     return gui_run_with(WindowOptions { .title = "Today", .width = 420, .height = 240, .resizable = true }, fonts);

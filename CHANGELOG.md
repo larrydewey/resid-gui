@@ -12,6 +12,14 @@
   third-party shell must update in lockstep with the library it hosts.
   `tools/rsp_shell.py` and `tests/fake_shell.resid` speak version 2.
 
+### Requires Resid r2
+
+- A `PasswordInput` is edited with Resid's `secret_str_splice` (r2,
+  `844c5f9e`), so the library no longer declassifies anything:
+  `gui_run` and the other entry points need only `display`,
+  `accessibility` and `clock(readonly)`. A program's `main` can drop
+  `declassify`, unless one of its own functions reads the password.
+
 ### Behaviour
 
 - While a `PasswordInput` has focus, `update` sees only Tab, Enter,

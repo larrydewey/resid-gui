@@ -6,10 +6,10 @@ reduction of whatever is static, and native code only where it is the right
 tool.
 
 A program states what it reaches, and nothing else is reachable: the
-display, the accessibility bus (so screen readers can read it), the clock
-(read-only, for timers), and `declassify`, because editing a
-`PasswordInput` splices each keystroke into its secret text. (That grant
-goes once Resid's `Secret(Str)` splice lands.)
+display, the accessibility bus (so screen readers can read it) and the
+clock (read-only, for timers). A `PasswordInput`'s text is edited with
+Resid's `secret_str_splice`, which never reads it, so the library needs
+no `declassify` grant.
 
 ```resid
 import "../src/gui.resid";
@@ -29,7 +29,7 @@ Widget counter_view(Int m) {
 
 App(Int) = { .init = counter_init, .update = counter_update, .view = counter_view };
 
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 Int main() {
     return gui_run(WindowOptions { .title = "Counter", .width = 320, .height = 120, .resizable = true });
 }
@@ -79,6 +79,8 @@ pixels copied into shared memory a word at a time) and spawn regions with
 room for the native modules' 16 MB values, both on Resid's `gui-runtime`
 branch: until it is merged and installed, build with its compiler,
 `RESIDC=../resid.worktrees/gui-runtime/build/boot/residc tests/run.sh`.
+The password input needs `secret_str_splice`, in Resid since the r2
+release (`844c5f9e`).
 
 Speed: a whole 2700x2200 frame of 800 draw ops rasterizes in about 70 ms
 and copies into shared memory in about 30 ms, and an ordinary frame
@@ -212,9 +214,9 @@ is pure, so:
 ## Security
 
 - Every function that reaches a display builtin or the clock declares
-  `@requires`. A GUI program needs `display`, `accessibility`,
-  `clock(readonly)` and `declassify` (the password input's splice, until
-  Resid's `Secret(Str)` splice replaces it), nothing more; one that loads
+  `@requires`. A GUI program needs `display`, `accessibility` and
+  `clock(readonly)`, nothing more (`declassify` only if the program
+  itself reads a password it was given); one that loads
   fonts or images adds `filesystem(readonly)` (and `args` for a path from
   the command line) and `native_font` or `native_image`. `gui_run_dev`
   adds `filesystem`, to write and replay its event log.

@@ -129,10 +129,9 @@ Int next_input_at(List(Int) ids, Int cur, Int i) {
 }
 
 /// Fold one raw event through the widgets on screen, in the built-in font.
-/// It needs the `declassify` grant: editing a `PasswordInput` splices a
-/// keystroke into its secret text (`pw_splice`), the one place the
-/// library reads one.
-@requires(declassify)
+/// Editing a `PasswordInput` splices a keystroke into its secret text
+/// with `secret_str_splice` (`pw_splice`), which never reads it: the
+/// library needs no `declassify` grant.
 pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) { return ui_event_in(ui, root, area, e, font_builtin()); }
 
 /// Fold one raw event through the widgets on screen, laid out in font `f`.
@@ -141,7 +140,6 @@ pub UiStep ui_event(UiState ui, Widget root, Rect area, Event e) { return ui_eve
 /// code and text are the password (the edit itself arrives as
 /// `PasswordEdited`). A key that went down there has its release withheld
 /// even if focus has moved by then.
-@requires(declassify)
 pub UiStep ui_event_in(UiState ui, Widget root, Rect area, Event e, Font f) {
     UiStep s = match (e) {
         PointerDown(x, y, b) => if (b == 1) { pointer_down(ui, root, area, x, y, f) } else { none(ui) },
@@ -844,7 +842,6 @@ UiStep pointer_up(UiState ui, Widget root, Rect area, Int x, Int y, Font fo) {
     };
 }
 
-@requires(declassify)
 UiStep key_down(UiState ui, Widget root, Rect area, Int code, Str text, Font fo) {
     // A key that types something types it, whatever its code.
     Bool typing = str_len(text) > 0;
@@ -871,7 +868,6 @@ UiStep key_in_input(UiState ui, Str s, Int k, Msg m, Int code, Str text) {
     return UiStep { .ui = ui_with_anchor(ui_with_caret(ui, true), e.anchor), .out = e.out };
 }
 
-@requires(declassify)
 UiStep key_in_password(UiState ui, Secret(Str) s, Int k, Msg m, Int code, Str text) {
     Edited e = edit_password(s, k, ui.anchor, m, code, text, ui.shift, ui.ctrl);
     return UiStep { .ui = ui_with_anchor(ui_with_caret(ui, true), e.anchor), .out = e.out };
@@ -880,7 +876,6 @@ UiStep key_in_password(UiState ui, Secret(Str) s, Int k, Msg m, Int code, Str te
 /// `edit_sel` for a password holding `s`: the same keys, worked out from
 /// its length alone (public, spec §48); a change to the text is a splice
 /// of the typed text (`pw_splice`) between two caret positions.
-@requires(declassify)
 pub Edited edit_password(Secret(Str) s, Int k, Int a0, Msg m, Int code, Str text, Bool shift, Bool ctrl) {
     Int n = s.len();
     Int a = if (a0 < 0 || a0 > n) { k } else { a0 };
@@ -901,19 +896,15 @@ pub Edited edit_password(Secret(Str) s, Int k, Int a0, Msg m, Int code, Str text
     return Edited { .out = if (t != k) { [PasswordEdited(m, s, t)] } else { [] }, .anchor = if (shift) { a } else { -1 } };
 }
 
-/// Password text `s` with characters `lo` to `hi` replaced by `ins`. The
-/// one place the library declassifies: the text is read here to splice
-/// the keystroke in and wrapped again at once, and goes nowhere else.
-/// (`classify`, not `secret`, for the result: E0250 would refuse a
-/// secret the compiler can work out, as it can in a test's literal
-/// view; at run time the text is the user's typing.)
-@requires(declassify)
+/// Password text `s` with characters `lo` to `hi` replaced by `ins`, by
+/// Resid's `secret_str_splice` (spec §48): the text is never read, so the
+/// library needs no `declassify` grant. The positions are public (the
+/// caret's and the length's), clamped to the text.
 pub Secret(Str) pw_splice(Secret(Str) s, Int lo, Int hi, Str ins) {
-    Str p = declassify(s, "a password input splices a keystroke into its own text");
-    Int n = str_len(p);
+    Int n = s.len();
     Int a = clamp_int(lo, 0, n);
     Int b = clamp_int(hi, a, n);
-    return classify(str_slice(p, 0, a) + ins + str_slice(p, b, n));
+    return secret_str_splice(s, a, b - a, ins);
 }
 
 /// The input before `cur` in tab order, wrapping; -1 when there is none.
@@ -990,7 +981,6 @@ test "hit finds the control under the pointer" {
     expect(next_input(inputs(demo()), 5)).toEqual(3);
 }
 
-@requires(declassify)
 test "a click is a press and a release on the same button" {
     UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(5, 30, 1));
     expect(a.ui.pressed).toEqual(2);
@@ -1004,7 +994,6 @@ test "a click is a press and a release on the same button" {
     expect(c.out.len()).toEqual(1);
 }
 
-@requires(declassify)
 test "clicking an input focuses it and typing edits at the caret" {
     UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(100, 70, 1));
     expect(a.ui.focus).toEqual(3);
@@ -1020,7 +1009,6 @@ test "clicking an input focuses it and typing edits at the caret" {
     expect(ui_event(a.ui, demo(), demo_area(), KeyDown(key_tab(), "")).ui.focus).toEqual(5);
 }
 
-@requires(declassify)
 test "dragging a slider reports values" {
     UiStep a = ui_event(ui_new(), demo(), demo_area(), PointerDown(6, 100, 1));
     Bool zero = match (a.out[1]) { SliderSet(m, v) => v == 0, _ => false };
@@ -1045,7 +1033,6 @@ test "a click in a long list reaches the row under it" {
 Str edited_text(List(Event) es) { return match (es[es.len() - 1]) { TextEdited(m, s, k) => s, _ => "?" }; }
 Int edited_caret(List(Event) es) { return match (es[es.len() - 1]) { TextEdited(m, s, k) => k, _ => -1 }; }
 
-@requires(declassify)
 test "Shift-Tab moves focus backwards" {
     UiState down = ui_event(ui_new(), demo(), demo_area(), KeyDown(key_left_shift(), "")).ui;
     expect(down.shift).toEqual(true);
@@ -1080,7 +1067,6 @@ test "Shift and the arrows select, and typing replaces the selection" {
     expect(edited_caret(all.out)).toEqual(5);
 }
 
-@requires(declassify)
 test "dragging across an input selects" {
     Widget w = Column([TextInput("abcdef", 0, Custom(1))]);
     Rect area = Rect { .x = 0, .y = 0, .w = 200, .h = 40 };
@@ -1092,7 +1078,6 @@ test "dragging across an input selects" {
     expect(b.ui.anchor).toEqual(1);
 }
 
-@requires(declassify)
 test "an assistive activation clicks; an assistive focus focuses" {
     Widget v = Column([Button("ok", Clicked), TextInput("x", 1, Custom(1))]);
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
@@ -1110,7 +1095,6 @@ Bool raised(UiStep s, Msg m, Int i) {
     return hit || raised(s, m, i + 1);
 }
 
-@requires(declassify)
 test "a release raises nothing when the view changed the pressed widget" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     Widget before = Column([Button("a", Custom(1)), Button("keep", Custom(2))]);
@@ -1127,7 +1111,6 @@ test "a release raises nothing when the view changed the pressed widget" {
     expect(raised(ui_event(down.ui, before, r, PointerUp(x, y, 1)), Custom(2), 0)).toEqual(true);
 }
 
-@requires(declassify)
 test "an assistive action reaches only what a click could" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Stack 0, Button "del" 1, Button "cover" 2: cover is drawn over del
@@ -1156,7 +1139,6 @@ Bool edited(UiStep s, Msg m, Int i) {
     return hit || edited(s, m, i + 1);
 }
 
-@requires(declassify)
 test "keys go to the input that was focused, not to the one now numbered so (R3-4)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget before = Column([TextInput("a", 1, Custom(1)), TextInput("b", 1, Custom(2))]);
@@ -1183,7 +1165,6 @@ test "keys go to the input that was focused, not to the one now numbered so (R3-
     expect(edited(ui_event(onc, Column([TextInput("ab", 2, Changed("ab"))]), r, KeyDown(30, "x")), Changed("ab"), 0)).toEqual(true);
 }
 
-@requires(declassify)
 test "a release raises nothing when index-keyed rows renumber under it (R3-6)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // a delete button per row, keyed by the row's index
@@ -1207,7 +1188,6 @@ Bool scrolled_to(UiStep s, Int node, Int off, Int i) {
     return hit || scrolled_to(s, node, off, i + 1);
 }
 
-@requires(declassify)
 test "a reader can scroll to an off-screen node, but not act on it (R3-3)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Scroll 0, Column 1, Button "top" 2 (0..32), Padding 3, Spacer 4,
@@ -1228,7 +1208,6 @@ test "a reader can scroll to an off-screen node, but not act on it (R3-3)" {
     expect(ui_event(ui_new(), Column([Padding(200, Spacer), Button("below", Custom(3))]), r, Assist(3, act_scroll())).out.len()).toEqual(1);
 }
 
-@requires(declassify)
 test "Tab skips inputs scrolled out of view or covered (R3-3)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Column 0, TextInput a 1, Scroll 2 (scrolled 500 past its content),
@@ -1249,7 +1228,6 @@ test "Tab skips inputs scrolled out of view or covered (R3-3)" {
     expect(f"{tabs}").toEqual("[1, 10]");
 }
 
-@requires(declassify)
 test "an off-screen field under a modal cannot be scrolled to (R4-1)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Stack 0, Scroll 1, Column 2, Padding 3, Spacer 4, TextInput 5, Button 6
@@ -1259,7 +1237,6 @@ test "an off-screen field under a modal cannot be scrolled to (R4-1)" {
     expect(ui_event(ui_new(), w, r, Assist(5, act_focus())).ui.focus).toEqual(-1);
 }
 
-@requires(declassify)
 test "a field under an overlay that scrolls with it cannot be scrolled to (R5-2)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 100 };
     // Scroll 0, Column 1, Padding 2, Spacer 3, Stack 4, TextInput 5, Button 6
@@ -1276,7 +1253,6 @@ Widget dismiss_rows(List(Str) names, Int i, ListBuf(Widget) acc) {
     return dismiss_rows(names, i + 1, acc.push(Row([Text(names[i]), Button("Dismiss", Custom(i))])));
 }
 
-@requires(declassify)
 test "a release raises nothing when rows with the same label renumber under it (R4-5)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // Column 0, Row 1, Text A 2, Dismiss 3, Row 4, Text B 5, Dismiss 6, ...
@@ -1304,7 +1280,6 @@ test "a release raises nothing when rows with the same label renumber under it (
     expect(sm.out.len()).toEqual(2);
 }
 
-@requires(declassify)
 test "inputs told apart by Changed tags keep their own focus (R4-6)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget before = Column([TextInput("ann", 3, Changed("name")), TextInput("a@b", 3, Changed("email"))]);
@@ -1328,7 +1303,6 @@ test "inputs told apart by Changed tags keep their own focus (R4-6)" {
     expect(ui_event(one, tag, r, KeyDown(30, "x")).ui.focus).toEqual(-1);
 }
 
-@requires(declassify)
 test "a release still clicks when only text before the button changed (R5-3)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // a clock or a counter above a button ticks between press and release
@@ -1360,7 +1334,6 @@ Bool pw_edited(UiStep s, Int i) {
     return hit || pw_edited(s, i + 1);
 }
 
-@requires(declassify)
 test "a password's keys never go to a text input that takes its number (R5-1)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // Column 0, TextInput 1, PasswordInput 2: both raise Submitted
@@ -1381,7 +1354,6 @@ test "a password's keys never go to a text input that takes its number (R5-1)" {
     expect(t2.ui.focus == -1 || t2.ui.focus == 2).toEqual(true);
 }
 
-@requires(declassify)
 test "inputs whose messages echo their text keep their own focus (R5-5)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget before = Column([TextInput("ann", 3, Changed("ann")), TextInput("a@b", 3, Changed("a@b"))]);
@@ -1407,7 +1379,6 @@ Bool raw_up(UiStep s, Int code, Int i) {
     return hit || raw_up(s, code, i + 1);
 }
 
-@requires(declassify)
 test "a password key's release is withheld after focus has left it (R5-6)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted), TextInput("", 0, Custom(2))]);
@@ -1431,7 +1402,6 @@ test "a password key's release is withheld after focus has left it (R5-6)" {
     expect(raw_up(ui_event(t.ui, login, r, KeyUp(32)), 32, 0)).toEqual(true);
 }
 
-@requires(declassify)
 test "a password's key codes are withheld even when the text comes apart (R6-1)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
@@ -1452,7 +1422,6 @@ test "a password's key codes are withheld even when the text comes apart (R6-1)"
     expect(raw_key(ui_event(on, login, r, KeyDown(key_enter(), "\n")), 0)).toEqual(false);
 }
 
-@requires(declassify)
 test "losing the window forgets the password keys held (R6-6)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
@@ -1464,7 +1433,6 @@ test "losing the window forgets the password keys held (R6-6)" {
     expect(blur.ui.pwkeys.len()).toEqual(0);
 }
 
-@requires(declassify)
 test "an input like the focused one appearing drops focus (R6-5)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // Column 0, new password 1, confirm 2: the same message
@@ -1489,7 +1457,6 @@ Widget feed(List(Str) names, Int i, ListBuf(Widget) acc) {
     return feed(names, i + 1, acc.push(Row([Button("Dismiss", Custom(i)), Text(names[i])])));
 }
 
-@requires(declassify)
 test "a release raises nothing when a row of the same shape replaced it (R6-2)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     // Column 0, Row 1, Dismiss A 2, Text A 3, Row 4, Dismiss B 5, Text B 6, ...
@@ -1513,7 +1480,6 @@ test "a release raises nothing when a row of the same shape replaced it (R6-2)" 
     expect(raised(ui_event(sd.ui, t2, r, PointerUp(s.r.x + 2, s.r.y + 2, 1)), Custom(9), 0)).toEqual(true);
 }
 
-@requires(declassify)
 test "a focused password passes no modifier on either (R7-5)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
@@ -1529,7 +1495,6 @@ test "a focused password passes no modifier on either (R7-5)" {
     expect(raw_key(ui_event(ui_new(), login, r, KeyDown(key_left_shift(), "")), 0)).toEqual(true);
 }
 
-@requires(declassify)
 test "the count of inputs alike is kept current as focus follows (R7-3)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget ab = Column([TextInput("a", 1, Submitted), TextInput("b", 1, Submitted)]);
@@ -1544,7 +1509,6 @@ test "the count of inputs alike is kept current as focus follows (R7-3)" {
     expect(edited(k2, Submitted, 0)).toEqual(false);
 }
 
-@requires(declassify)
 test "a drag goes on when a value shown beside it changes (R7-1)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 300, .h = 200 };
     // the gallery's row: Column 0, Row 1, Slider 2, Text 3, Bitmap 4
@@ -1565,7 +1529,6 @@ test "a drag goes on when a value shown beside it changes (R7-1)" {
     expect(edited(tm, Custom(1), 0)).toEqual(true);
 }
 
-@requires(declassify)
 test "a clock in a flat Column does not cancel a press; a record's own Row does (R7-2)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget t1 = Column([Text("12:00:01"), Button("Save", Custom(1))]);
@@ -1578,7 +1541,6 @@ test "a clock in a flat Column does not cancel a press; a record's own Row does 
         .toEqual(press_print(Column([Row([Button("click", Clicked), Text("1 clicks")])]), 2));
 }
 
-@requires(declassify)
 test "a drag does not move onto another row's slider (L8-3)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 300, .h = 200 };
     // Column 0, Row 1, Text 2, Slider 3, Text 4, Row 5, Text 6, Slider 7, Text 8
@@ -1594,7 +1556,6 @@ test "a drag does not move onto another row's slider (L8-3)" {
     expect(ui_event(down.ui, m3, r, PointerMoved(s.r.x + 40, s.r.y + 2)).out.len()).toEqual(2);
 }
 
-@requires(declassify)
 test "a modifier held as focus enters a password is let go first (L8-2)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 200, .h = 200 };
     Widget login = Column([Text("Login"), PasswordInput(password_empty(), 0, Submitted)]);
@@ -1614,7 +1575,6 @@ test "a modifier held as focus enters a password is let go first (L8-2)" {
     expect(raw_up(ui_event(on.ui, login, r, KeyUp(key_left_ctrl())), key_left_ctrl(), 0)).toEqual(false);
 }
 
-@requires(declassify)
 test "a drag goes on when its value is shown before it (R9-1)" {
     Rect r = Rect { .x = 0, .y = 0, .w = 300, .h = 200 };
     // Column 0, Row 1, Text 2, Slider 3

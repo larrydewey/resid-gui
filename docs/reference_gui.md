@@ -38,34 +38,35 @@ The meaning of each event and widget is in
 
 ```resid
 @needs(App(M))
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run(WindowOptions opts)
 
 @needs(App(M))
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_x11(WindowOptions opts)
 
 @needs(App(M))
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_with(WindowOptions opts, List(Font) fonts)
 
 @needs(App(M))
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_model(WindowOptions opts, M m0, List(Font) fonts)
 
 @needs(App(M), Backend(B))
-@requires(display, accessibility, clock(readonly), declassify)
+@requires(display, accessibility, clock(readonly))
 pub Int gui_run_on(B b, M m0, List(Font) fonts)
 
 pub Font pick_font(List(Font) fs, Int scale)
 ```
 
-Every way to run a program needs the `declassify` grant, and so does the
-`main` that calls it: a `PasswordInput`'s text is a `Secret(Str)`, and
-editing it splices each keystroke into that text (`pw_splice` in
-`ui/input.resid`, the library's one `declassify`, recorded in the graph as
-`declassify.a password input splices a keystroke into its own text`). The
-text is wrapped again at once and reaches nothing else: not semantics,
+No way to run a program needs the `declassify` grant: a
+`PasswordInput`'s text is a `Secret(Str)`, and editing it splices each
+keystroke into that text with Resid's `secret_str_splice` (`pw_splice` in
+`ui/input.resid`), which takes the secret, public positions and the typed
+text and gives a `Secret(Str)` without the text ever being read. A
+program grants `declassify` only to a function of its own that reads the
+password (checking a login). The text reaches nothing else: not semantics,
 AT-SPI, the RSP tree, the display list or the timeline, which the type
 system checks (a secret cannot be shown, compared or put in an f-string).
 A window whose width or height is past 16384 is refused before any

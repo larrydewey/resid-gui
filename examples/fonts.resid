@@ -32,7 +32,7 @@ Widget demo_view(Demo d) {
 
 App(Demo) = { .init = demo_init, .update = demo_update, .view = demo_view };
 
-@requires(display, accessibility, clock(readonly), args, filesystem(readonly), native_font, declassify)
+@requires(display, accessibility, clock(readonly), args, filesystem(readonly), native_font)
 Int main() {
     Str path = args.get(1);
     if (str_len(path) == 0) {

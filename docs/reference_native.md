@@ -30,7 +30,7 @@ The program grants the module's family, plus whatever it needs to get the
 bytes:
 
 ```resid
-@requires(display, accessibility, clock(readonly), args, filesystem(readonly), native_font, declassify)
+@requires(display, accessibility, clock(readonly), args, filesystem(readonly), native_font)
 Int main() { ... }
 ```
 

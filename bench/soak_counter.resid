@@ -13,7 +13,7 @@
 
 import "soak_lib.resid";
 
-@requires(display, accessibility, clock(readonly), filesystem(readonly), args, declassify)
+@requires(display, accessibility, clock(readonly), filesystem(readonly), args)
 Int main() {
     Int total = if (args.count() > 1) { str_parse_int(args.get(1)) } else { 20000 };
     Soaked s = soak(total);
